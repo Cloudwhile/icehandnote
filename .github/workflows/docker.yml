@@ -28,6 +28,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      deployments: write
 
     steps:
       - name: Checkout repository
@@ -62,10 +63,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke-test running Docker container (API + SPA)
+      - name: Smoke-test running Docker container (API + SPA + Persistence + Admin Init)
         run: |
           trap 'docker logs icehandnote-ci || true; docker rm -f icehandnote-ci || true' EXIT
-          docker run -d --name icehandnote-ci -p 3001:3001 icehandnote-smoke:test
+          mkdir -p /tmp/ihn-data /tmp/ihn-content
+          docker run -d --name icehandnote-ci -p 3001:3001 \
+            -v /tmp/ihn-data:/app/data \
+            -v /tmp/ihn-content:/app/content \
+            -e ADMIN_USERNAME=ci_admin \
+            -e ADMIN_PASSWORD=ci_smoke_password_2026 \
+            icehandnote-smoke:test
           for i in $(seq 1 25); do
             if curl -fsS http://127.0.0.1:3001/api/v1/health > /tmp/health.json 2>/dev/null; then
               cat /tmp/health.json
@@ -76,6 +83,10 @@ jobs:
           done
           grep -q '"status":"ok"' /tmp/health.json
           curl -fsS http://127.0.0.1:3001/ | grep -qi '<!DOCTYPE html>'
+          test -f /tmp/ihn-data/store.json
+          curl -fsS -X POST http://127.0.0.1:3001/api/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"identifier":"ci_admin","password":"ci_smoke_password_2026"}' | grep -q '"session_token"'
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -100,7 +111,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Version untagged build by image sha256 digest & verify pull
+      - name: Version GHCR image, verify pull & refresh README badge cache
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,14 +119,17 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
           IS_TAG: ${{ github.ref_type == 'tag' }}
           REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           REPO_LOWER=$(echo "$REPO_SLUG" | tr '[:upper:]' '[:lower:]')
           IMAGE_LOWER="ghcr.io/${REPO_LOWER}"
+          PKG_NAME=$(basename "$REPO_LOWER")
+          OWNER="${{ github.repository_owner }}"
 
           if [ "$IS_TAG" != "true" ]; then
             HEX="${DIGEST#sha256:}"
-            SHA256_TAG="sha256-${HEX:0:12}"
-            echo "Attaching :${SHA256_TAG} directly to manifest ${DIGEST}"
+            GHCR_VERSION="sha256-${HEX:0:12}"
+            echo "Attaching :${GHCR_VERSION} directly to manifest ${DIGEST}"
 
             TOKEN=$(curl -fsSL -u "${GITHUB_ACTOR}:${GH_TOKEN}" \
               "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO_LOWER}:pull,push" | jq -r .token)
@@ -130,39 +144,47 @@ jobs:
               -H "Authorization: Bearer ${TOKEN}" \
               -H "Content-Type: ${CT}" \
               --data-binary @"$BODY_FILE" \
-              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${SHA256_TAG}" > /dev/null
+              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${GHCR_VERSION}" > /dev/null
 
-            # Prune only superseded tagged non-release versions (never touch untagged child manifests with empty tags)
-            PKG_NAME=$(basename "$REPO_LOWER")
-            OWNER="${{ github.repository_owner }}"
-            VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
-            echo "$VERSIONS_JSON" | jq -r --arg cur "$DIGEST" '
-              .[] | select(.name != $cur)
-              | select((.metadata.container.tags // []) | (length > 0) and all(test("^(main|master|sha-[0-9a-f]+|sha256-[0-9a-f]+)$")))
-              | .id
-            ' | while read -r vid; do
-              [ -n "$vid" ] || continue
-              gh api --method DELETE "/users/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
-                || gh api --method DELETE "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
-                || true
-            done
-
-            docker pull "${IMAGE_LOWER}:${SHA256_TAG}"
+            docker pull "${IMAGE_LOWER}:${GHCR_VERSION}"
             docker pull "${IMAGE_LOWER}:latest"
           else
-            # Prune superseded non-release sha256-* / sha-* / main versions once a release tag is published
-            PKG_NAME=$(basename "$REPO_LOWER")
-            OWNER="${{ github.repository_owner }}"
-            VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
-            echo "$VERSIONS_JSON" | jq -r --arg cur "$DIGEST" '
-              .[] | select(.name != $cur)
-              | select((.metadata.container.tags // []) | (length > 0) and all(test("^(main|master|sha-[0-9a-f]+|sha256-[0-9a-f]+)$")))
-              | .id
-            ' | while read -r vid; do
-              [ -n "$vid" ] || continue
-              gh api --method DELETE "/users/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
-                || gh api --method DELETE "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
-                || true
-            done
+            GHCR_VERSION="${REF_NAME}"
             docker pull "${IMAGE_LOWER}:${REF_NAME}"
           fi
+
+          # Prune superseded non-release sha256-* / sha-* / main versions (never touch untagged child manifests)
+          VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
+          echo "$VERSIONS_JSON" | jq -r --arg cur "$DIGEST" '
+            .[] | select(.name != $cur)
+            | select((.metadata.container.tags // []) | (length > 0) and all(test("^(main|master|sha-[0-9a-f]+|sha256-[0-9a-f]+)$")))
+            | .id
+          ' | while read -r vid; do
+            [ -n "$vid" ] || continue
+            gh api --method DELETE "/users/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
+              || gh api --method DELETE "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
+              || true
+          done
+
+          # Record instant 0-latency GHCR version in GitHub Deployments API for the README Shields.io badge
+          DEPLOY_ID=$(jq -n \
+            --arg sha "$COMMIT_SHA" \
+            --arg ver "$GHCR_VERSION" \
+            --arg dig "$DIGEST" \
+            '{ref:$sha, environment:"ghcr", auto_merge:false, required_contexts:[], transient_environment:false, payload:{version:$ver, digest:$dig}}' \
+            | gh api --method POST "/repos/${REPO_SLUG}/deployments" --input - --jq .id 2>/dev/null || echo "")
+          if [ -n "$DEPLOY_ID" ]; then
+            gh api --method POST "/repos/${REPO_SLUG}/deployments/${DEPLOY_ID}/statuses" \
+              -f state=success \
+              -f environment_url="https://github.com/${REPO_SLUG}/pkgs/container/${PKG_NAME}" > /dev/null 2>&1 || true
+          fi
+
+          # Immediately purge GitHub Camo README image cache so the GHCR badge updates in seconds
+          for PAGE in "https://github.com/${REPO_SLUG}" "https://github.com/${REPO_SLUG}/blob/main/locales/README.zh-CN.md"; do
+            curl -fsSL "$PAGE" 2>/dev/null \
+              | grep -oE 'https://camo\.githubusercontent\.com/[0-9a-f]+/[0-9a-f]+' \
+              | sort -u \
+              | while read -r camo_url; do
+                  curl -fsSL -X PURGE "$camo_url" > /dev/null 2>&1 || true
+                done
+          done

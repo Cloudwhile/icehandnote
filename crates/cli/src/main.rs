@@ -190,7 +190,6 @@ async fn main() -> Result<()> {
             password,
             database_url,
         } => {
-            let db_url = resolve_db_url(database_url)?;
             let role = match role.to_ascii_lowercase().as_str() {
                 "admin" => UserRole::Admin,
                 "author" => UserRole::Author,
@@ -200,38 +199,69 @@ async fn main() -> Result<()> {
             let (password, generated) = match password
                 .or_else(|| env::var("ADMIN_PASSWORD").ok())
                 .or_else(|| env::var("ICETOWNE_ADMIN_PASSWORD").ok())
-                .filter(|p| !p.is_empty())
+                .filter(|p| !p.trim().is_empty())
             {
                 Some(p) => {
-                    if p.chars().count() < 12 {
-                        bail!("密码至少需 12 个字符");
+                    if p.chars().count() < 6 {
+                        bail!("密码至少需 6 个字符");
                     }
                     (p, false)
                 }
                 None => {
                     let raw = Uuid::new_v4().simple().to_string();
-                    (format!("sn-{}-{}", &raw[..10], &raw[10..20]), true)
+                    (format!("ihn-{}", &raw[..16]), true)
                 }
             };
 
-            let repo = PostgresRepository::connect_and_migrate(&db_url, false).await?;
-            let user = repo
-                .upsert_local_account(
+            let db_url_opt = database_url
+                .or_else(|| env::var("DATABASE_URL").ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            let user = if let Some(db_url) = db_url_opt {
+                let repo = PostgresRepository::connect_and_migrate(&db_url, false).await?;
+                repo.upsert_local_account(
                     username.trim(),
                     display_name.as_deref().unwrap_or(username.trim()),
                     email.trim(),
                     role,
                     &password,
                 )
-                .await?;
+                .await?
+            } else {
+                use icehandnote_db::{LocalSeedRepository, TutorialRepository};
+                let content_dir = env::var("CONTENT_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("./content"));
+                let store_path = env::var("LOCAL_STORE_PATH")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        env::var("DATA_DIR")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|d| PathBuf::from(d).join("store.json"))
+                    })
+                    .unwrap_or_else(|| PathBuf::from("./data/store.json"));
+                let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path)?;
+                repo.upsert_local_account(
+                    username.trim(),
+                    display_name.as_deref().unwrap_or(username.trim()),
+                    email.trim(),
+                    role,
+                    &password,
+                )
+                .await?
+            };
             println!(
-                "✓ 已建立/更新帳號 @{}（角色：{}，ID：{}）",
+                "✓ Account created/updated: @{} (role: {}, id: {})",
                 user.username,
                 user.role.as_str(),
                 user.id
             );
             if generated {
-                println!("  自動產生的密碼（只顯示這一次，請立即妥善保存）：{password}");
+                println!("  Generated password (save now): {password}");
             }
         }
     }

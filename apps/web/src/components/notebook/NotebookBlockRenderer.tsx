@@ -224,7 +224,7 @@ export function NotebookBlockRenderer({
         return (
           <ListTag
             key={block.block_id}
-            className="my-5 ps-0 list-none space-y-2.5 max-w-[65ch]"
+            className="my-5 ps-0 list-none space-y-2.5 w-full"
           >
             {block.items_html.map((itemHtml, idx) => (
               <li
@@ -252,7 +252,7 @@ export function NotebookBlockRenderer({
         return (
           <blockquote
             key={block.block_id}
-            className="my-6 mx-0 max-w-[65ch] rounded-xl py-3.5 px-5 relative"
+            className="my-6 mx-0 w-full rounded-xl py-3.5 px-5 relative"
             style={{
               backgroundColor: 'var(--alert-note-bg)',
               borderInlineStart: '6px solid var(--marker-h1)',

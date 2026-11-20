@@ -17,6 +17,7 @@ apps/web/.vite/
 .env.*
 !.env.example
 .data/
+/data/
 /design/
 
 # OS & Editors

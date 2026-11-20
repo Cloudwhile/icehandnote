@@ -6,15 +6,25 @@ html {
   background-color: var(--surface-page);
   color: var(--ink-primary);
   font-family: var(--font-sans);
-  /* Normalize Latin/CJK/Mono mixed & fallback optical x-height (`visually-stable-font-fallbacks` & `visually-stable-mixed-fonts`) */
-  font-size-adjust: from-font;
   font-kerning: normal;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Normalize Latin lowercase x-height on English pages only; CJK ideographs use full 1em em-boxes
+   and must not be scaled by embedded Latin x-height ratios (`visually-stable-font-fallbacks`) */
+html:lang(en) {
+  font-size-adjust: from-font;
+}
+
+html:lang(zh-CN),
+html:lang(zh-TW),
+html:lang(ja) {
+  font-size-adjust: none;
+}
+
 @supports not (font-size-adjust: from-font) {
-  html {
+  html:lang(en) {
     line-height: 1.6;
   }
 }
@@ -169,9 +179,11 @@ body {
 
 /* Locale-aware line height for long-form tutorial prose (Refactoring UI §4.5 + `typography`) */
 .notebook-prose {
-  max-width: 65ch;
+  width: 100%;
   line-height: 1.68;
   overflow-wrap: break-word;
+}
+:lang(en) .notebook-prose {
   font-size-adjust: from-font;
 }
 .notebook-prose p {
@@ -1182,7 +1194,7 @@ input[type="checkbox"][switch]:focus-visible {
 .notebook-task-inline,
 .notebook-task-section {
   margin-block: 1.35rem;
-  max-inline-size: 65ch;
+  width: 100%;
   border-radius: 12px;
   border: 1.5px solid var(--border-subtle);
   border-inline-start: 4px solid var(--action-bg);
@@ -1213,7 +1225,7 @@ input[type="checkbox"][switch]:focus-visible {
 /* Paragraph-level task checkpoint (`段任务`): sleek, low-profile inline micro-task tied to prose */
 .notebook-task-paragraph {
   margin-block: 0.85rem 1.15rem;
-  max-inline-size: 65ch;
+  width: 100%;
   border-radius: 10px;
   border: 1px dashed var(--border-subtle);
   border-inline-start: 3px solid var(--accent-ice-ink);
@@ -1243,7 +1255,7 @@ input[type="checkbox"][switch]:focus-visible {
 /* Multi-item sub-checklist card (when author explicitly groups 2+ related sub-tasks) */
 .notebook-steps-card {
   margin-block: 1.5rem;
-  max-inline-size: 65ch;
+  width: 100%;
   border-radius: 14px;
   border: 1.5px solid var(--border-ink);
   background-color: var(--surface-raised);

@@ -221,23 +221,81 @@ fn resolve_web_dist_dir(env_dir: Option<&Path>) -> Option<PathBuf> {
 
 fn resolve_store_path(env_dir: Option<&Path>) -> PathBuf {
     let base = env_dir.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-    match env::var("LOCAL_STORE_PATH") {
-        Ok(p) => {
-            let raw = PathBuf::from(p);
-            if raw.is_absolute() {
-                raw
-            } else {
-                // Anchor relative paths to the project root, never escape above it
-                let joined = base.join(&raw);
-                if joined.starts_with(&base) && !raw.starts_with("..") {
-                    joined
-                } else {
-                    base.join(".data").join("dev-store.json")
-                }
-            }
+    if let Ok(p) = env::var("LOCAL_STORE_PATH") {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            let raw = PathBuf::from(trimmed);
+            return if raw.is_absolute() { raw } else { base.join(raw) };
         }
-        Err(_) => base.join(".data").join("dev-store.json"),
     }
+    if let Ok(d) = env::var("DATA_DIR") {
+        let trimmed = d.trim();
+        if !trimmed.is_empty() {
+            let raw = PathBuf::from(trimmed);
+            let dir = if raw.is_absolute() { raw } else { base.join(raw) };
+            return dir.join("store.json");
+        }
+    }
+    let legacy = base.join(".data").join("dev-store.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    base.join("data").join("store.json")
+}
+
+async fn bootstrap_initial_admin(repo: &dyn TutorialRepository) -> anyhow::Result<()> {
+    let username = env::var("ADMIN_USERNAME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "admin".to_string());
+    let display_name = env::var("ADMIN_DISPLAY_NAME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "Admin".to_string());
+    let email = env::var("ADMIN_EMAIL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("{username}@localhost"));
+    let explicit_pw = env::var("ADMIN_PASSWORD")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    if let Some(pw) = explicit_pw {
+        let user = repo
+            .upsert_local_account(&username, &display_name, &email, UserRole::Admin, &pw)
+            .await?;
+        info!(
+            "Initialized admin account '{}' (id={}) from ADMIN_USERNAME / ADMIN_PASSWORD",
+            user.username, user.id
+        );
+        return Ok(());
+    }
+
+    let existing_users = repo.admin_list_users().await?;
+    let has_any_admin = existing_users.iter().any(|u| u.role.is_admin());
+    if !has_any_admin {
+        let raw = Uuid::new_v4().simple().to_string();
+        let generated_pw = format!("ihn-{}", &raw[..16]);
+        repo.upsert_local_account(
+            &username,
+            &display_name,
+            &email,
+            UserRole::Admin,
+            &generated_pw,
+        )
+        .await?;
+        info!("============================================================");
+        info!("Initial Admin Account Created (first boot):");
+        info!("  Username : {username}");
+        info!("  Password : {generated_pw}");
+        info!("  (Set ADMIN_USERNAME & ADMIN_PASSWORD to customize or reset)");
+        info!("============================================================");
+    }
+    Ok(())
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -339,13 +397,20 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {
             info!(
-                "DATABASE_URL not set; booting LocalSeedRepository from {}",
-                content_dir.display()
+                "DATABASE_URL not set; booting LocalSeedRepository (content={}, store={})",
+                content_dir.display(),
+                store_path.display()
             );
-            let local = LocalSeedRepository::from_content_dir(&content_dir, store_path)?;
+            let local = LocalSeedRepository::from_content_dir_with_options(
+                &content_dir,
+                store_path,
+                seed_demo_users,
+            )?;
             Arc::new(local)
         }
     };
+
+    bootstrap_initial_admin(&*repo).await?;
 
     let blog_sso_secret = match env::var("BLOG_SSO_SECRET") {
         Ok(s) if s.len() >= 32 => s,

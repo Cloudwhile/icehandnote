@@ -1,5 +1,6 @@
 services:
   icehandnote:
+    image: ghcr.io/cloudwhile/icehandnote:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,17 +9,20 @@ services:
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 3001
+      DATA_DIR: /app/data
+      CONTENT_DIR: /app/content
       DEFAULT_LOCALE: ${DEFAULT_LOCALE:-en}
       SITE_NAME: ${SITE_NAME:-IceHandnote}
       SITE_HERO_TITLE: ${SITE_HERO_TITLE:-IceHandnote}
       SITE_HERO_TAGLINE: ${SITE_HERO_TAGLINE:-Write clearly. Learn step by step.}
+      # Initial Admin Account (auto-generated and printed in logs on first boot if ADMIN_PASSWORD is empty)
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       # Optional: connect an external PostgreSQL 17 (PGroonga) instance
       DATABASE_URL: ${DATABASE_URL:-}
     ports:
-      - "3001:3001"
+      - "${PORT:-3001}:3001"
     volumes:
+      - ./data:/app/data
       - ./content:/app/content
-      - icehandnote_data:/app/.data
-
-volumes:
-  icehandnote_data:

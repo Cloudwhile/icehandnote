@@ -25,32 +25,38 @@
   --color-accent-success: var(--accent-success-ink);
   --color-accent-danger: var(--accent-danger-ink);
 
-  /* Neo-grotesque UI + authentic script-matched handwritten stationery font stack */
-  --font-sans: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --font-display: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --font-hand: "Caveat", "Klee One", "LXGW WenKai", "STKaiti", "KaiTi", "Kaiti SC", var(--font-sans);
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
+  /* Neo-grotesque UI + locale-isolated handwritten stationery font stack */
+  --font-sans: "Plus Jakarta Sans", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-sans);
+  --font-hand: "LXGW WenKai Screen", "LXGW WenKai GB", "LXGW WenKai", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "PingFang SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
 }
 
-/* Script-matched CJK stacks so each locale prioritizes its native glyphs in sans, hand, and mono */
-:root:lang(zh-CN),
+/* Strictly isolated script-matched stacks: never mix Japanese JIS-only `Klee One` or Windows `KaiTi` into Chinese */
 :root:lang(en) {
-  --font-sans: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --font-display: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --font-hand: "Caveat", "Klee One", "LXGW WenKai", "STKaiti", "KaiTi", "Kaiti SC", var(--font-sans);
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: var(--font-sans);
+  --font-hand: "Caveat", "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+:root:lang(zh-CN) {
+  --font-sans: "Plus Jakarta Sans", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-sans);
+  --font-hand: "LXGW WenKai Screen", "LXGW WenKai GB", "LXGW WenKai", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "PingFang SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
 }
 
 :root:lang(zh-TW) {
-  --font-sans: "Plus Jakarta Sans", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Noto Sans SC", system-ui, -apple-system, sans-serif;
-  --font-display: "Plus Jakarta Sans", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Noto Sans SC", system-ui, -apple-system, sans-serif;
-  --font-hand: "Caveat", "Klee One", "LXGW WenKai TC", "BiauKai", "DFKai-SB", "Kaiti TC", var(--font-sans);
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", monospace;
+  --font-sans: "Plus Jakarta Sans", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei UI", "Microsoft JhengHei", system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-sans);
+  --font-hand: "LXGW WenKai Screen", "LXGW WenKai TC", "LXGW WenKai", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei UI", "Microsoft JhengHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei UI", "Microsoft JhengHei", monospace;
 }
 
 :root:lang(ja) {
-  --font-sans: "Plus Jakarta Sans", "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, -apple-system, sans-serif;
-  --font-display: "Plus Jakarta Sans", "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, -apple-system, sans-serif;
-  --font-hand: "Caveat", "Klee One", "Yu Kyokasho", "Hiragino Mincho ProN", var(--font-sans);
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", monospace;
+  --font-sans: "Plus Jakarta Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", "Meiryo", system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-sans);
+  --font-hand: "Klee One", "Yu Kyokasho", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", monospace;
 }

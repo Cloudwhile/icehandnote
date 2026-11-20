@@ -272,10 +272,16 @@ export function BlockWithMargin({
     }
   };
 
+  const hasMarginStickies = Boolean(authorNote || userNotes.length > 0);
+
   return (
     <div
       id={blockId}
-      className="my-4 xl:grid xl:grid-cols-[minmax(0,65ch)_220px] xl:gap-6 items-start group"
+      className={`my-4 w-full group ${
+        hasMarginStickies
+          ? 'xl:grid xl:grid-cols-[minmax(0,1fr)_220px] xl:gap-5 items-start'
+          : ''
+      }`}
     >
       {/* Main Content Column */}
       <div className="relative min-w-0 max-w-full">

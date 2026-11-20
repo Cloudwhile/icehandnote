@@ -54,6 +54,28 @@ function hashSeed(input: string): number {
   return h;
 }
 
+let lastCopyAnnouncement = '';
+
+function legacyCopyText(text: string): boolean {
+  if (typeof document === 'undefined') return false;
+  const field = Object.assign(document.createElement('textarea'), {
+    value: text,
+  });
+  field.setAttribute('readonly', '');
+  field.style.cssText = 'position:fixed;inset-block-start:0;opacity:0';
+  document.body.append(field);
+  field.focus({ preventScroll: true });
+  field.select();
+  field.setSelectionRange(0, text.length);
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    field.remove();
+  }
+}
+
 export function WashiCodeCard({
   language,
   filename,
@@ -64,6 +86,7 @@ export function WashiCodeCard({
   copyFailedLabel = 'Copy failed',
 }: WashiCodeCardProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [liveStatus, setLiveStatus] = useState('');
   const timerRef = useRef<number | null>(null);
 
   const sheetStyle = normalizeCodeCardStyle(style);
@@ -95,14 +118,34 @@ export function WashiCodeCard({
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
     }
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopyState('copied');
-    } catch {
-      setCopyState('failed');
+    let ok = false;
+    if (
+      typeof window !== 'undefined' &&
+      window.isSecureContext &&
+      navigator.clipboard?.writeText
+    ) {
+      try {
+        await navigator.clipboard.writeText(code);
+        ok = true;
+      } catch {
+        ok = legacyCopyText(code);
+      }
+    } else {
+      ok = legacyCopyText(code);
     }
+
+    setCopyState(ok ? 'copied' : 'failed');
+    let msg = ok ? copiedLabel : copyFailedLabel;
+    if (msg === lastCopyAnnouncement) {
+      msg += '\u00A0';
+    }
+    lastCopyAnnouncement = msg;
+    setLiveStatus('');
+    requestAnimationFrame(() => setLiveStatus(msg));
+
     timerRef.current = window.setTimeout(() => {
       setCopyState('idle');
+      setLiveStatus('');
       timerRef.current = null;
     }, 1800);
   };
@@ -256,6 +299,9 @@ export function WashiCodeCard({
                     : copyLabel}
               </span>
             </button>
+            <span role="status" className="sr-only">
+              {liveStatus}
+            </span>
           </div>
         </div>
 

@@ -117,6 +117,14 @@ pub trait TutorialRepository: Send + Sync {
     ) -> Result<bool>;
 
     // Admin User Governance (Admin only)
+    async fn upsert_local_account(
+        &self,
+        username: &str,
+        display_name: &str,
+        email: &str,
+        role: UserRole,
+        password: &str,
+    ) -> Result<UserProfileDto>;
     async fn admin_list_users(&self) -> Result<Vec<UserProfileDto>>;
     async fn admin_update_user_role(
         &self,
@@ -1633,6 +1641,18 @@ impl TutorialRepository for PostgresRepository {
         Ok(res.rows_affected() > 0)
     }
 
+    async fn upsert_local_account(
+        &self,
+        username: &str,
+        display_name: &str,
+        email: &str,
+        role: UserRole,
+        password: &str,
+    ) -> Result<UserProfileDto> {
+        PostgresRepository::upsert_local_account(self, username, display_name, email, role, password)
+            .await
+    }
+
     async fn admin_list_users(&self) -> Result<Vec<UserProfileDto>> {
         let rows = sqlx::query(
             "SELECT id, wp_user_id, username, display_name, email, avatar_url, bio, role, auth_source, last_login_at FROM users ORDER BY created_at ASC",
@@ -1756,6 +1776,14 @@ pub struct LocalSeedRepository {
 
 impl LocalSeedRepository {
     pub fn from_content_dir(content_dir: &Path, store_path: PathBuf) -> Result<Self> {
+        Self::from_content_dir_with_options(content_dir, store_path, false)
+    }
+
+    pub fn from_content_dir_with_options(
+        content_dir: &Path,
+        store_path: PathBuf,
+        seed_demo_users: bool,
+    ) -> Result<Self> {
         let bundle = load_content_directory(content_dir)?;
         let mut state: PersistedUserState = if store_path.exists() {
             fs::read_to_string(&store_path)
@@ -1766,7 +1794,7 @@ impl LocalSeedRepository {
             PersistedUserState::default()
         };
 
-        if state.users.is_empty() {
+        if seed_demo_users && state.users.is_empty() {
             state.users = default_seeded_blog_users();
         }
 
@@ -2360,6 +2388,69 @@ impl TutorialRepository for LocalSeedRepository {
     ) -> Result<bool> {
         let mut bundle = self.bundle.write().await;
         delete_step_in_bundle_and_disk(&mut bundle, track_slug, chapter_slug, step_slug, content_dir)
+    }
+
+    async fn upsert_local_account(
+        &self,
+        username: &str,
+        display_name: &str,
+        email: &str,
+        role: UserRole,
+        password: &str,
+    ) -> Result<UserProfileDto> {
+        let clean_username = username.trim();
+        if clean_username.is_empty() {
+            anyhow::bail!("Username cannot be empty");
+        }
+        let clean_display = if display_name.trim().is_empty() {
+            clean_username
+        } else {
+            display_name.trim()
+        };
+        let clean_email = if email.trim().is_empty() {
+            format!("{clean_username}@localhost")
+        } else {
+            email.trim().to_string()
+        };
+        let pw_hash = icehandnote_core::auth::hash_password(clean_username, password);
+        let now = Utc::now();
+
+        let mut state = self.state.write().await;
+        let user_profile = if let Some(existing) = state
+            .users
+            .iter_mut()
+            .find(|u| u.profile.username.eq_ignore_ascii_case(clean_username))
+        {
+            existing.profile.display_name = clean_display.to_string();
+            existing.profile.email = clean_email;
+            existing.profile.role = role;
+            existing.password_hash = Some(pw_hash);
+            let uid = existing.profile.id;
+            let prof = existing.profile.clone();
+            state.sessions.retain(|s| s.user_id != uid);
+            prof
+        } else {
+            let prof = UserProfileDto {
+                id: Uuid::new_v4(),
+                wp_user_id: None,
+                username: clean_username.to_string(),
+                display_name: clean_display.to_string(),
+                email: clean_email,
+                avatar_url: String::new(),
+                bio: String::new(),
+                role,
+                auth_source: "local".to_string(),
+                last_login_at: now,
+            };
+            state.users.push(StoredUserRecord {
+                profile: prof.clone(),
+                password_hash: Some(pw_hash),
+            });
+            prof
+        };
+
+        self.persist_state(&state);
+        Ok(user_profile)
     }
 
     async fn admin_list_users(&self) -> Result<Vec<UserProfileDto>> {

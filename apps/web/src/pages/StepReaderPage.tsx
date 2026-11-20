@@ -508,7 +508,7 @@ export function StepReaderPage({
                   </svg>
                 </div>
 
-                <p className="text-base text-ink-secondary leading-relaxed max-w-[65ch] m-0">
+                <p className="text-base text-ink-secondary leading-relaxed m-0">
                   {detail.summary}
                 </p>
 

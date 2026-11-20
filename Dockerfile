@@ -29,7 +29,7 @@ RUN cargo build --release --locked --bin icehandnote-api --bin icehandnote-cli
 # ==============================================================================
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 icehandnote
 
@@ -38,17 +38,19 @@ WORKDIR /app
 COPY --from=rust-builder /src/target/release/icehandnote-api /usr/local/bin/icehandnote-api
 COPY --from=rust-builder /src/target/release/icehandnote-cli /usr/local/bin/icehandnote-cli
 COPY --from=web-builder /src/apps/web/dist /app/web
+COPY content /usr/share/icehandnote/seed-content
 COPY content /app/content
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p /app/.data && chown -R icehandnote:icehandnote /app
-
-USER icehandnote
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && mkdir -p /app/data /app/content \
+    && chown -R icehandnote:icehandnote /app
 
 ENV API_HOST=0.0.0.0 \
     API_PORT=3001 \
     WEB_DIST_DIR=/app/web \
+    DATA_DIR=/app/data \
     CONTENT_DIR=/app/content \
-    LOCAL_STORE_PATH=/app/.data/store.json \
     DEFAULT_LOCALE=en \
     SITE_NAME=IceHandnote \
     SITE_HERO_TITLE=IceHandnote \
@@ -56,9 +58,12 @@ ENV API_HOST=0.0.0.0 \
     DEV_SSO_SIMULATOR=false \
     SEED_DEMO_USERS=false
 
+VOLUME ["/app/data", "/app/content"]
+
 EXPOSE 3001
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \
   CMD curl -fsS http://127.0.0.1:3001/api/v1/health || exit 1
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["icehandnote-api"]
