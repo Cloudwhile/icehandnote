@@ -1,0 +1,24 @@
+services:
+  icehandnote:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: icehandnote
+    restart: unless-stopped
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 3001
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-en}
+      SITE_NAME: ${SITE_NAME:-IceHandnote}
+      SITE_HERO_TITLE: ${SITE_HERO_TITLE:-IceHandnote}
+      SITE_HERO_TAGLINE: ${SITE_HERO_TAGLINE:-Write clearly. Learn step by step.}
+      # Optional: connect an external PostgreSQL 17 (PGroonga) instance
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./content:/app/content
+      - icehandnote_data:/app/.data
+
+volumes:
+  icehandnote_data:

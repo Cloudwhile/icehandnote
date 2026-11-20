@@ -1,0 +1,88 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-test:
+    name: Rust Workspace & DB Sync Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: groonga/pgroonga:latest-alpine-17
+        env:
+          POSTGRES_USER: icehandnote
+          POSTGRES_PASSWORD: icehandnote_secret
+          POSTGRES_DB: icehandnote
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U icehandnote -d icehandnote"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://icehandnote:icehandnote_secret@127.0.0.1:5432/icehandnote
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust unit & router tests
+        run: cargo test --workspace --locked
+
+      - name: Validate notebook Markdown & frontmatter
+        run: cargo run --locked -p icehandnote-cli -- validate ./content
+
+      - name: Test PostgreSQL migrations, content sync & admin bootstrap
+        env:
+          ADMIN_PASSWORD: ci_test_strong_password_2026
+        run: |
+          cargo run --locked -p icehandnote-cli -- sync ./content --database-url "$DATABASE_URL"
+          cargo run --locked -p icehandnote-cli -- create-admin \
+            --username ci_admin \
+            --email ci_admin@example.com \
+            --display-name "CI Admin" \
+            --role admin \
+            --database-url "$DATABASE_URL"
+
+  web-test:
+    name: Web TypeScript & Production Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/web install --frozen-lockfile
+
+      - name: Typecheck & build frontend bundle
+        run: pnpm --dir apps/web build

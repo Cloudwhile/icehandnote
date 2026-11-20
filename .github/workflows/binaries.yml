@@ -1,0 +1,165 @@
+name: Build Executables (Win & Linux)
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: binaries-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+permissions:
+  contents: read
+
+jobs:
+  web-assets:
+    name: Build Frontend Assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install & build frontend SPA
+        run: |
+          pnpm --dir apps/web install --frozen-lockfile
+          pnpm --dir apps/web build
+
+      - name: Upload compiled web dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          retention-days: 3
+
+  build-binaries:
+    name: Executable (${{ matrix.platform }})
+    needs: web-assets
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      - name: Download compiled web assets
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: dist-web
+
+      - name: Build release executables
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin icehandnote-api --bin icehandnote-cli
+
+      - name: Smoke-test CLI executable (Linux)
+        if: runner.os == 'Linux'
+        run: ./target/${{ matrix.target }}/release/icehandnote-cli validate ./content
+
+      - name: Smoke-test CLI executable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\target\${{ matrix.target }}\release\icehandnote-cli.exe validate .\content
+
+      - name: Package Linux tar.gz bundle
+        if: runner.os == 'Linux'
+        run: |
+          BUNDLE="icehandnote-${{ matrix.platform }}"
+          mkdir -p "release/$BUNDLE/web"
+          cp "target/${{ matrix.target }}/release/icehandnote-api" "release/$BUNDLE/"
+          cp "target/${{ matrix.target }}/release/icehandnote-cli" "release/$BUNDLE/"
+          chmod +x "release/$BUNDLE/icehandnote-api" "release/$BUNDLE/icehandnote-cli"
+          cp -r dist-web/* "release/$BUNDLE/web/"
+          cp -r content "release/$BUNDLE/content"
+          cp .env.example "release/$BUNDLE/.env.example"
+          cp README.md "release/$BUNDLE/README.md"
+          if [ -d locales ]; then cp -r locales "release/$BUNDLE/locales"; fi
+          if [ -f LICENSE ]; then cp LICENSE "release/$BUNDLE/LICENSE"; fi
+          tar -C release -czf "release/${BUNDLE}.tar.gz" "$BUNDLE"
+          (cd release && sha256sum "${BUNDLE}.tar.gz" > "${BUNDLE}.tar.gz.sha256")
+
+      - name: Package Windows zip bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Bundle = "icehandnote-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path "release/$Bundle/web" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/icehandnote-api.exe" "release/$Bundle/"
+          Copy-Item "target/${{ matrix.target }}/release/icehandnote-cli.exe" "release/$Bundle/"
+          Copy-Item -Recurse "dist-web/*" "release/$Bundle/web/"
+          Copy-Item -Recurse "content" "release/$Bundle/content"
+          Copy-Item ".env.example" "release/$Bundle/.env.example"
+          Copy-Item "README.md" "release/$Bundle/README.md"
+          if (Test-Path "locales") { Copy-Item -Recurse "locales" "release/$Bundle/locales" }
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "release/$Bundle/LICENSE" }
+          Compress-Archive -Path "release/$Bundle" -DestinationPath "release/$Bundle.zip" -Force
+          $Hash = (Get-FileHash "release/$Bundle.zip" -Algorithm SHA256).Hash.ToLower()
+          "$Hash  $Bundle.zip" | Out-File -FilePath "release/$Bundle.zip.sha256" -Encoding utf8
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: icehandnote-${{ matrix.platform }}
+          path: |
+            release/*.tar.gz
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: icehandnote-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

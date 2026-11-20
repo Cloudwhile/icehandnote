@@ -1,0 +1,60 @@
+name: Bug Report
+description: Report a reproducible bug or regression in IceHandnote.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version / Image Digest
+      placeholder: "v0.1.0 or sha256-..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment Method
+      options:
+        - Docker / GHCR Container
+        - Standalone Binary (Windows x64)
+        - Standalone Binary (Linux x64)
+        - Local Source Build
+    validations:
+      required: true
+
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage Backend
+      options:
+        - Built-in Local Storage (store.json)
+        - External PostgreSQL 17 (PGroonga)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. Actual Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Screenshots
+      render: shell
+    validations:
+      required: false

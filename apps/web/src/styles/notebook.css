@@ -1,0 +1,1622 @@
+/*
+ * IceHandNote — Hand-Drawn Notebook & Modern Web Platform Styles
+ */
+
+html {
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  /* Normalize Latin/CJK/Mono mixed & fallback optical x-height (`visually-stable-font-fallbacks` & `visually-stable-mixed-fonts`) */
+  font-size-adjust: from-font;
+  font-kerning: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@supports not (font-size-adjust: from-font) {
+  html {
+    line-height: 1.6;
+  }
+}
+
+/* Prevent JetBrains Mono's tall x-height and Caveat/Klee calligraphic ascenders from distorting optical sizing */
+code,
+pre,
+kbd,
+.font-mono,
+.font-hand {
+  font-size-adjust: none;
+}
+
+/* Semantic Breadcrumb Trail (`modern-web-guidance/breadcrumbs`) */
+.notebook-breadcrumb > ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1.25;
+  color: var(--ink-muted);
+}
+
+.notebook-breadcrumb > ol > li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+/* Decorative slash stays out of the accessibility tree via empty alt text */
+.notebook-breadcrumb > ol > li + li::before {
+  content: "/" / "";
+  color: var(--ink-muted);
+  opacity: 0.7;
+  line-height: 1;
+}
+
+.notebook-breadcrumb > ol > li > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-block-size: 1.75rem;
+  padding-inline: 0.125rem;
+  border-radius: 6px;
+  color: var(--ink-muted);
+  text-decoration: none;
+  transition: color 140ms ease-out;
+}
+
+.notebook-breadcrumb > ol > li > a:hover {
+  color: var(--ink-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.notebook-breadcrumb > ol > li > a[aria-current="page"] {
+  color: var(--accent-ice-ink);
+  font-weight: 600;
+}
+
+@media (forced-colors: active) {
+  .notebook-breadcrumb > ol > li > a[aria-current="page"] {
+    text-decoration: underline;
+  }
+}
+
+/* Collapsible Chapter Group in Reader Sidebar (`modern-web-guidance/accordion`) */
+.sidebar-chapter-group > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.375rem 0.25rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.sidebar-chapter-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-chapter-group > summary:hover {
+  color: var(--ink-primary);
+}
+
+.sidebar-chapter-group > summary::before {
+  content: "";
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+  flex-shrink: 0;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>") no-repeat center / contain;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>") no-repeat center / contain;
+  rotate: -90deg;
+}
+
+.sidebar-chapter-group[open] > summary::before {
+  rotate: 0deg;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar-chapter-group > summary::before {
+    transition: rotate 0.18s ease-out;
+  }
+}
+
+@supports (selector(::details-content)) {
+  .sidebar-chapter-group::details-content {
+    interpolate-size: allow-keywords;
+    overflow: clip;
+    contain: layout;
+  }
+  .sidebar-chapter-group:not([open])::details-content {
+    block-size: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .sidebar-chapter-group::details-content {
+      transition: block-size 0.22s ease-in-out, content-visibility 0.22s ease-in-out, display 0.22s ease-in-out;
+      transition-behavior: allow-discrete;
+    }
+  }
+}
+
+/* Deliberate heading balancing for space-delimited Latin scripts (`modern-web-guidance/typography`)
+ * Kept off CJK headings so two-character Chinese words (e.g. 笔记 / 工作区) never split mid-word */
+:lang(en) h1,
+:lang(en) h2,
+:lang(en) h3 {
+  text-wrap: balance;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  background-color: var(--surface-page);
+  color: var(--ink-primary);
+  /* Subtle low-contrast dot-grid paper pattern via fallback-safe token (Refactoring UI §8.3.2) */
+  background-image: radial-gradient(var(--dot-grid-color) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Locale-aware line height for long-form tutorial prose (Refactoring UI §4.5 + `typography`) */
+.notebook-prose {
+  max-width: 65ch;
+  line-height: 1.68;
+  overflow-wrap: break-word;
+  font-size-adjust: from-font;
+}
+.notebook-prose p {
+  text-wrap: pretty;
+}
+:lang(zh-TW) .notebook-prose,
+:lang(zh-CN) .notebook-prose,
+:lang(ja) .notebook-prose {
+  line-height: 1.82;
+}
+@supports not (font-size-adjust: from-font) {
+  .notebook-prose code {
+    font-size: max(0.75rem, 0.85em);
+  }
+}
+
+.notebook-prose code {
+  font-family: var(--font-mono);
+  /* Never shrink inline code below 12px (0.75rem) inside text-xs secondary copy (§4.1) */
+  font-size: max(0.75rem, 0.875em);
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
+  background-color: var(--action-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--ink-primary);
+}
+
+.notebook-prose a {
+  color: var(--link-ink);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-underline-offset: 3px;
+}
+
+/* Highlighter <mark> for search snippets & callouts */
+mark {
+  background-color: var(--mark-bg);
+  color: inherit;
+  padding-inline: 0.2em;
+  border-radius: 4px;
+}
+
+/* Stacked Loose-Leaf Notebook Sheet */
+.notebook-sheet-stack {
+  position: relative;
+  padding-bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.notebook-sheet-stack::after {
+  content: "" / "";
+  position: absolute;
+  inset-inline: 14px;
+  bottom: 0;
+  height: 22px;
+  background-color: var(--surface-sheet-tab);
+  border: 2px solid var(--border-ink);
+  border-radius: 16px;
+  z-index: 0;
+  pointer-events: none;
+}
+.notebook-sheet-card {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  max-width: 100%;
+  background-color: var(--surface-sheet);
+  border: 2px solid var(--border-ink);
+  border-radius: 16px;
+}
+
+/* Unified Hand-Drawn Stationery Elevation Helpers (Refactoring UI §6.2.1) */
+.ink-surface-floating {
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-floating);
+}
+.ink-surface-modal {
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-modal);
+}
+.ink-input-inset {
+  box-shadow: var(--shadow-inset);
+}
+
+/* Tactile Ink Buttons (Refactoring UI §6.2.2) */
+.ink-btn-primary {
+  background-color: var(--action-bg);
+  color: var(--action-fg);
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-control);
+  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+.ink-btn-primary:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-control-hover);
+}
+.ink-btn-primary:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.ink-btn-secondary {
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-control);
+  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+.ink-btn-secondary:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-control-hover);
+}
+.ink-btn-secondary:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+/* Accessible keyboard focus ring (15-beyond-the-book.md: >= 3:1 contrast with offset) */
+:focus-visible {
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+/* Brand-Consistent Progress Bar with cross-browser track/fill styling (§8.1 + brand-consistent-forms) */
+.notebook-progress {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--surface-sunken);
+  height: 8px;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.notebook-progress::-webkit-progress-bar {
+  background-color: var(--surface-sunken);
+  border-radius: 9999px;
+}
+.notebook-progress::-webkit-progress-value {
+  background-color: var(--action-bg);
+  border-radius: 9999px;
+}
+.notebook-progress::-moz-progress-bar {
+  background-color: var(--action-bg);
+  border-radius: 9999px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .notebook-progress::-webkit-progress-value {
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .notebook-progress::-moz-progress-bar {
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+/* Fallback for older browsers lacking `accent-color` on checkboxes (`brand-consistent-forms`) */
+@supports not (accent-color: auto) {
+  input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid var(--border-ink);
+    border-radius: 4px;
+  }
+}
+
+/* Hand-Drawn Notebook & Engineering Pad Code Surface (theme-adaptive via light-dark() tokens) */
+.washi-code-surface {
+  position: relative;
+  background-color: var(--code-bg);
+  color: var(--code-fg);
+  accent-color: var(--action-bg);
+  border: 2px solid var(--border-ink);
+  border-radius: 14px;
+  box-shadow: var(--shadow-floating);
+}
+
+.washi-code-surface[data-code-style="torn"] {
+  border-bottom-left-radius: 4px;
+  border-bottom-right-radius: 4px;
+}
+
+.washi-code-header {
+  background-color: var(--code-header-bg);
+  border-block-end: 1.5px dashed var(--code-border-subtle);
+}
+
+.washi-code-surface[data-code-style="index"] .washi-code-header {
+  border-block-end: 3px double var(--code-gutter-rule);
+}
+
+.washi-code-body {
+  background-image:
+    linear-gradient(to right, var(--code-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--code-grid-line) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.washi-code-surface[data-code-style="spiral"] .washi-code-body {
+  background-image: linear-gradient(to bottom, transparent 23px, var(--code-grid-line) 23px);
+  background-size: 100% 24px;
+  background-position: 0 12px;
+}
+
+.washi-code-pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--code-scrollbar-thumb) var(--code-scrollbar-track);
+}
+
+.washi-code-line {
+  min-block-size: 24px;
+  line-height: 24px;
+  transition: background-color 110ms ease-out;
+}
+.washi-code-line:hover {
+  background-color: var(--code-line-hover);
+}
+.washi-code-line-added {
+  background-color: var(--code-diff-add);
+}
+.washi-code-line-removed {
+  background-color: var(--code-diff-del);
+}
+
+.washi-code-gutter {
+  color: var(--code-gutter-fg);
+  border-inline-end: 1.5px solid var(--code-gutter-rule);
+}
+
+/* Dual-Theme Drafting Ink Syntax Highlighting (all tokens >= 5.87:1 WCAG AA in both light & dark) */
+.washi-code-surface .hljs-comment,
+.washi-code-surface .hljs-quote {
+  color: var(--code-syn-comment);
+  font-style: italic;
+}
+
+.washi-code-surface .hljs-keyword,
+.washi-code-surface .hljs-selector-tag,
+.washi-code-surface .hljs-template-tag {
+  color: var(--code-syn-kw);
+  font-weight: 600;
+}
+
+.washi-code-surface .hljs-type,
+.washi-code-surface .hljs-title.class_,
+.washi-code-surface .hljs-title.class_.inherited__,
+.washi-code-surface .hljs-class .hljs-title,
+.washi-code-surface .hljs-built_in {
+  color: var(--code-syn-type);
+}
+
+.washi-code-surface .hljs-title,
+.washi-code-surface .hljs-title.function_,
+.washi-code-surface .hljs-function .hljs-title,
+.washi-code-surface .hljs-section {
+  color: var(--code-syn-fn);
+}
+
+.washi-code-surface .hljs-string,
+.washi-code-surface .hljs-regexp,
+.washi-code-surface .hljs-template-variable,
+.washi-code-surface .hljs-addition {
+  color: var(--code-syn-str);
+}
+
+.washi-code-surface .hljs-number,
+.washi-code-surface .hljs-literal,
+.washi-code-surface .hljs-bullet,
+.washi-code-surface .hljs-link {
+  color: var(--code-syn-num);
+}
+
+.washi-code-surface .hljs-meta,
+.washi-code-surface .hljs-meta .hljs-keyword,
+.washi-code-surface .hljs-symbol,
+.washi-code-surface .hljs-selector-id,
+.washi-code-surface .hljs-selector-pseudo,
+.washi-code-surface .hljs-deletion {
+  color: var(--code-syn-meta);
+}
+
+.washi-code-surface .hljs-meta .hljs-string {
+  color: var(--code-syn-str);
+}
+
+.washi-code-surface .hljs-attr,
+.washi-code-surface .hljs-attribute,
+.washi-code-surface .hljs-property,
+.washi-code-surface .hljs-selector-class,
+.washi-code-surface .hljs-selector-attr,
+.washi-code-surface .hljs-name,
+.washi-code-surface .hljs-tag {
+  color: var(--code-syn-attr);
+}
+
+.washi-code-surface .hljs-variable,
+.washi-code-surface .hljs-params,
+.washi-code-surface .hljs-subst {
+  color: var(--code-fg);
+}
+
+.washi-code-surface .hljs-punctuation,
+.washi-code-surface .hljs-operator {
+  color: var(--code-syn-punct);
+}
+
+.washi-code-surface .hljs-doctag {
+  color: var(--code-syn-fn);
+  font-weight: 600;
+}
+
+.washi-code-surface .hljs-emphasis {
+  font-style: italic;
+}
+
+.washi-code-surface .hljs-strong {
+  font-weight: 600;
+}
+
+/* Stationery Sticker Silhouettes (tape / pin / torn / clip / stamp / looseleaf / tag) */
+.sticker-card {
+  position: relative;
+  border: 2px solid var(--sticker-border, var(--border-ink));
+  background-color: var(--sticker-bg, var(--surface-sheet));
+  color: var(--sticker-body, var(--ink-primary));
+  box-shadow: 3px 3px 0 0 var(--border-ink);
+}
+
+.sticker-card[data-sticker-style="stamp"] {
+  border-style: dashed;
+  border-width: 2px;
+  outline: 2px solid var(--sticker-border, var(--border-ink));
+  outline-offset: -6px;
+}
+
+.sticker-card[data-sticker-style="looseleaf"] {
+  background-image: linear-gradient(to bottom, transparent 25px, rgba(128, 120, 108, 0.13) 26px);
+  background-size: 100% 26px;
+}
+
+.sticker-card[data-sticker-style="index"],
+.sticker-card[data-sticker-style="clip"] {
+  background-image:
+    linear-gradient(to right, rgba(128, 120, 108, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(128, 120, 108, 0.08) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+/* Forced Colors Mode accessibility (`modern-web-guidance/color`):
+ * Preserve syntax highlighter & color-picker swatches with paired fg/bg >= 4.5:1,
+ * while letting sticker cards inherit system colors with crisp CanvasText borders. */
+@media (forced-colors: active) {
+  .washi-code-surface,
+  [data-color-swatch] {
+    forced-color-adjust: none;
+  }
+  .washi-code-surface {
+    border-color: CanvasText;
+  }
+  .sticker-card {
+    border: 2px solid CanvasText;
+    outline: none;
+  }
+}
+
+/* Searchable <details> disclosure inside Alerts (modern-web-guidance/accordion & search-hidden-content) */
+.alert-disclosure > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45ch;
+  cursor: pointer;
+}
+.alert-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.alert-disclosure .disclosure-chevron {
+  transform: rotate(0deg);
+}
+.alert-disclosure[open] .disclosure-chevron {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .alert-disclosure .disclosure-chevron {
+    transition: transform 0.18s ease-out;
+  }
+}
+
+@supports (selector(::details-content)) {
+  .alert-disclosure::details-content {
+    interpolate-size: allow-keywords;
+    overflow: clip;
+    contain: layout;
+  }
+  .alert-disclosure:not([open])::details-content {
+    block-size: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .alert-disclosure::details-content {
+      transition: block-size 0.25s ease-in-out, content-visibility 0.25s ease-in-out, display 0.25s ease-in-out;
+      transition-behavior: allow-discrete;
+    }
+  }
+}
+
+/* Pure CSS Scroll-Driven Highlighter Progress Bar (modern-web-guidance/scroll-progress-indicator) */
+#reading-progress {
+  position: fixed;
+  inset-inline-start: 0;
+  inset-block-start: 0;
+  width: 100%;
+  height: 4px;
+  z-index: 50;
+  background: linear-gradient(90deg, #8b3dff 0%, #0dcaf0 100%);
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: scroll()) {
+    @keyframes grow-notebook-progress {
+      from { transform: scaleX(0); }
+      to { transform: scaleX(1); }
+    }
+    #reading-progress {
+      animation: grow-notebook-progress auto linear;
+      /* MANDATORY: Declare animation-timeline AFTER animation shorthand */
+      animation-timeline: scroll(root block);
+    }
+  }
+}
+
+/* Native Modal Dialogs + Scroll Chaining Prevention + Top-Layer Entry/Exit Transitions
+ * (`prevent-page-scroll-under-modal-dialog` & `animate-to-from-top-layer`)
+ */
+dialog.search-dialog {
+  opacity: 0;
+  transition-property: opacity, transform, display, overlay;
+  transition-duration: 0.22s;
+  transition-timing-function: ease-out;
+  /* Separate declaration so shorthand never resets or breaks older browsers */
+  transition-behavior: allow-discrete;
+}
+@media (prefers-reduced-motion: no-preference) {
+  dialog.search-dialog {
+    transform: translateY(8px) scale(0.96);
+  }
+}
+dialog.search-dialog[open]:where(:not([data-closing])) {
+  opacity: 1;
+}
+@starting-style {
+  dialog.search-dialog[open]:where(:not([data-closing])) {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  dialog.search-dialog[open]:where(:not([data-closing])) {
+    transform: translateY(0) scale(1);
+  }
+  @starting-style {
+    dialog.search-dialog[open]:where(:not([data-closing])) {
+      transform: translateY(8px) scale(0.96);
+    }
+  }
+}
+dialog.search-dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog.search-dialog::backdrop {
+  background-color: rgba(10, 11, 20, 0);
+  backdrop-filter: blur(0px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  transition-property: background-color, backdrop-filter, display, overlay;
+  transition-duration: 0.22s;
+  transition-timing-function: ease-out;
+  transition-behavior: allow-discrete;
+}
+dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgba(10, 11, 20, 0.62);
+  backdrop-filter: blur(3px);
+}
+@starting-style {
+  dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
+    background-color: rgba(10, 11, 20, 0);
+    backdrop-filter: blur(0px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  dialog.search-dialog,
+  dialog.search-dialog::backdrop {
+    transition-duration: 0.1s;
+  }
+}
+
+/* Unified Swipeable Mobile Navigation Drawer (<dialog> + scroll-snap + IntersectionObserver) */
+@property --drawer-backdrop {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+.swipe-drawer-dialog {
+  --drawer-width: min(19.5rem, 84dvw, 100dvw - 24px);
+  --drawer-backdrop: 0;
+  inset: 0;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  overflow: visible;
+}
+.swipe-drawer-dialog:modal {
+  overscroll-behavior: contain;
+}
+.swipe-drawer-dialog::backdrop {
+  background: #000;
+  opacity: calc(var(--drawer-backdrop) * 0.55);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.swipe-drawer-scroller {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--drawer-width) 100%;
+  overflow-x: scroll;
+  overscroll-behavior: none;
+  scrollbar-width: none;
+  scroll-snap-type: x mandatory;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .swipe-drawer-scroller {
+    scroll-behavior: smooth;
+  }
+}
+.swipe-drawer-scroller::after {
+  content: "";
+  scroll-snap-align: end;
+  scroll-initial-target: nearest;
+}
+.swipe-drawer-sheet {
+  display: flex;
+  flex-direction: column;
+  block-size: 100svh;
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border-inline-end: 2px solid var(--border-ink);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-align: start;
+}
+.swipe-drawer-sheet[data-surface="sunken"] {
+  background-color: var(--surface-sunken);
+}
+@supports (animation-timeline: scroll()) {
+  .swipe-drawer-dialog {
+    timeline-scope: --swipe-drawer-fade;
+    animation: fade-swipe-drawer-backdrop linear both;
+    animation-timeline: --swipe-drawer-fade;
+  }
+  .swipe-drawer-scroller {
+    scroll-timeline: --swipe-drawer-fade x;
+  }
+  @keyframes fade-swipe-drawer-backdrop {
+    0% { --drawer-backdrop: 1; }
+    100% { --drawer-backdrop: 0; }
+  }
+}
+
+/* Native Popover Panels (Mobile TopNavbar menu & Floating TOC) */
+.ink-popover-panel {
+  margin: 0;
+  padding: 0;
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border: 2px solid var(--border-ink);
+  border-radius: 16px;
+  box-shadow: var(--shadow-floating);
+}
+.ink-popover-panel::backdrop {
+  background: transparent;
+}
+
+/* Directional Page-Turn View Transitions (modern-web-guidance/directional-navigation-transitions) */
+@keyframes page-slide-out-left {
+  to { transform: translateX(-28px); opacity: 0; }
+}
+@keyframes page-slide-in-right {
+  from { transform: translateX(28px); opacity: 0; }
+}
+@keyframes page-slide-out-right {
+  to { transform: translateX(28px); opacity: 0; }
+}
+@keyframes page-slide-in-left {
+  from { transform: translateX(-28px); opacity: 0; }
+}
+
+::view-transition-group(root) {
+  animation: 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+html:active-view-transition-type(forward)::view-transition-old(root) {
+  animation-name: page-slide-out-left;
+}
+html:active-view-transition-type(forward)::view-transition-new(root) {
+  animation-name: page-slide-in-right;
+}
+html:active-view-transition-type(backward)::view-transition-old(root) {
+  animation-name: page-slide-out-right;
+}
+html:active-view-transition-type(backward)::view-transition-new(root) {
+  animation-name: page-slide-in-left;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(root) {
+    animation: none !important;
+  }
+}
+
+/* Animated Hero Waves */
+@keyframes drift-wave {
+  0% { transform: translate3d(-45px, 0, 0); }
+  50% { transform: translate3d(30px, 0, 0); }
+  100% { transform: translate3d(-45px, 0, 0); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hero-wave-slow { animation: drift-wave 14s ease-in-out infinite; }
+  .hero-wave-fast { animation: drift-wave 9s ease-in-out infinite reverse; }
+}
+
+/* Responsive Container-Queried Data Table (modern-web-guidance/responsive-table) */
+.responsive-table-region {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(560px, 75dvh);
+  container-type: inline-size;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+}
+.responsive-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  --col-2: "Auth Source";
+  --col-3: "Role";
+  --col-4: "WP ID";
+}
+.responsive-table thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  background-color: var(--surface-raised);
+}
+.responsive-table tbody th {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+  background-color: var(--surface-sheet);
+}
+@container (width < 600px) {
+  .responsive-table,
+  .responsive-table thead,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table th,
+  .responsive-table td {
+    display: block;
+  }
+  .responsive-table thead {
+    display: none;
+  }
+  .responsive-table tbody tr {
+    margin-block-end: 0.75rem;
+    padding: 0.75rem;
+    border-block-end: 1px dashed var(--border-subtle);
+  }
+  .responsive-table tbody th {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 2;
+    background-color: var(--surface-raised);
+    border-radius: 8px;
+    margin-block-end: 0.5rem;
+  }
+  .responsive-table td {
+    padding-block: 0.5rem;
+    text-align: start;
+  }
+  .responsive-table td:nth-child(2)::before {
+    content: var(--col-2) ": ";
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+  .responsive-table td:nth-child(3)::before {
+    content: var(--col-3) ": ";
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+  .responsive-table td:nth-child(4)::before {
+    content: var(--col-4) ": ";
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+}
+
+/* ============================================================================
+ * Studio Top / Left / Right Admin Dashboard Shell (上左右分區)
+ * ============================================================================ */
+.studio-shell {
+  display: grid;
+  min-block-size: 100dvh;
+  inline-size: 100%;
+  grid-template-rows: 3.5rem minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "topbar"
+    "main";
+}
+
+.studio-topbar {
+  grid-area: topbar;
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 30;
+  display: flex;
+  align-items: safe center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-inline-size: 0;
+  padding-inline: 1rem;
+  background-color: var(--surface-sheet);
+  border-block-end: 1px solid var(--border-subtle);
+}
+
+.studio-sidebar {
+  grid-area: sidebar;
+  display: none;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+  background-color: var(--surface-sunken);
+  border-inline-end: 1px solid var(--border-subtle);
+}
+
+.studio-main {
+  grid-area: main;
+  min-inline-size: 0;
+  min-block-size: 0;
+  /* Calm solid canvas inside admin workspace — reserve dot-grid paper for tutorial content */
+  background-color: var(--surface-page);
+}
+
+/* Calm Dashboard Panel: subtle border + surface elevation, no loud wireframe cages (Refactoring UI §8.5 & §6.4.1) */
+.studio-panel {
+  background-color: var(--surface-sheet);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+/* Native HTML switch control with accessible focus ring (`modern-web-guidance/switch`) */
+input[type="checkbox"][switch] {
+  accent-color: var(--action-bg);
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  margin: 0;
+  cursor: pointer;
+}
+input[type="checkbox"][switch]:focus-visible {
+  outline: 2px solid var(--action-bg);
+  outline-offset: 3px;
+}
+
+@media (min-width: 1024px) {
+  .studio-shell {
+    block-size: 100dvh;
+    overflow: clip;
+    grid-template-columns: 17.5rem minmax(0, 1fr);
+    grid-template-areas:
+      "topbar topbar"
+      "sidebar main";
+  }
+
+  .studio-shell[data-sidebar-collapsed="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "topbar"
+      "main";
+  }
+
+  .studio-topbar {
+    position: relative;
+    padding-inline: 1.5rem;
+  }
+
+  .studio-sidebar {
+    display: flex;
+  }
+
+  .studio-shell[data-sidebar-collapsed="true"] .studio-sidebar {
+    display: none;
+  }
+}
+
+/* Independent scroll containers with zero scroll chaining and stable gutter */
+.studio-scroll-pane {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  .studio-scroll-pane {
+    /* Reset scrollbar-width so legacy WebKit pseudo-elements are not suppressed */
+    scrollbar-width: auto;
+  }
+  .studio-scroll-pane::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .studio-scroll-pane::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+  }
+  .studio-scroll-pane::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+/* De-emphasized inactive items, crisp accent bar on active item (Refactoring UI §2.4 & §8.2) */
+.studio-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  inline-size: 100%;
+  min-block-size: 2.25rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border-inline-start: 3px solid transparent;
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+  text-align: start;
+}
+.studio-nav-item:hover {
+  color: var(--ink-primary);
+  background-color: var(--surface-sheet);
+}
+.studio-nav-item[aria-current="page"] {
+  color: var(--ink-primary);
+  font-weight: 600;
+  background-color: var(--surface-sheet);
+  border-inline-start-color: var(--action-bg);
+}
+
+/* Single-line text overflow inside flex/grid items (`single-line-overflow`) */
+@layer components {
+  .studio-ellipsis {
+    min-inline-size: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* ============================================================================
+ * Accessible Editor Mode Tablist (`modern-web-guidance/tabs` & `anchor-positioning-tab-underline`)
+ * - Single row, no dimension shift on select, `border-block-end` indicator survives forced-colors
+ * - Gliding anchor-positioned underline in supporting browsers with instant border fallback
+ * ============================================================================ */
+.editor-mode-tablist {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  overflow-x: auto;
+  border-block-end: 1px solid var(--border-subtle);
+}
+
+.editor-mode-tab {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-block-size: 2.375rem;
+  padding: 0.5rem 0.875rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 150ms ease-out;
+}
+
+.editor-mode-tab:hover {
+  color: var(--ink-primary);
+}
+
+.editor-mode-tab[aria-selected="true"] {
+  color: var(--ink-primary);
+}
+
+@supports (position-anchor: --editor-active-tab) {
+  .editor-mode-tab[aria-selected="true"] {
+    anchor-name: --editor-active-tab;
+  }
+  .editor-mode-tablist::before {
+    content: "";
+    position: absolute;
+    position-anchor: --editor-active-tab;
+    inset-block-end: 0;
+    inset-inline-start: anchor(left);
+    inset-inline-end: anchor(right);
+    border-block-end: 3px solid var(--action-bg);
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .editor-mode-tablist::before {
+      transition: inset 200ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+  }
+}
+
+@supports not (position-anchor: --editor-active-tab) {
+  .editor-mode-tab[aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0;
+    border-block-end: 3px solid var(--action-bg);
+  }
+}
+
+/* ============================================================================
+ * Interactive In-Article Scattered Task Checkpoints & Multi-Item Checklists
+ * - Supports both sleek single-task inline checkpoints (`.notebook-task-inline`)
+ *   and grouped sub-task lists (`.notebook-steps-card`)
+ * - Accessible custom checkbox (`modern-web-guidance/checkbox`) with `appearance: none`,
+ *   SVG mask checkmark animation, forced-colors support, `:focus-visible`, and >= 44px label target
+ * ============================================================================ */
+:root {
+  --icon-check: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
+}
+
+/* Whole-Section Task Milestone (`节任务`, `## [ ] ...`): sits flush with standard sections (no side rail) */
+.notebook-section-task {
+  margin-block: 2.5rem 0;
+}
+
+.notebook-section-task .notebook-section-task {
+  margin-block: 1.75rem 0;
+}
+
+.notebook-section-task-body > :last-child {
+  margin-block-end: 0;
+}
+
+.notebook-section-task-footer {
+  margin-block-start: 1.25rem;
+  padding-block-start: 0.75rem;
+  border-block-start: 1px dashed var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.notebook-section-task-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-block-size: 2.25rem;
+  padding: 0.375rem 0.85rem;
+  border-radius: 9999px;
+  border: 1.5px solid var(--border-subtle);
+  background-color: var(--surface-raised);
+  color: var(--ink-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
+}
+
+.notebook-section-task-btn:hover:not(:disabled) {
+  border-color: var(--action-bg);
+  color: var(--ink-primary);
+}
+
+.notebook-section-task-btn[data-checked="true"] {
+  border-color: var(--accent-success-ink);
+  background-color: var(--steps-checked-bg);
+  color: var(--accent-success-ink);
+}
+
+.notebook-section-task-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* Section-level task checkpoint (`节任务` legacy standalone card): distinct milestone card with left accent bar */
+.notebook-task-inline,
+.notebook-task-section {
+  margin-block: 1.35rem;
+  max-inline-size: 65ch;
+  border-radius: 12px;
+  border: 1.5px solid var(--border-subtle);
+  border-inline-start: 4px solid var(--action-bg);
+  background-color: var(--surface-raised);
+  overflow: hidden;
+  transition: border-color 160ms ease-out, background-color 160ms ease-out;
+}
+
+.notebook-task-inline:hover,
+.notebook-task-section:hover {
+  border-color: var(--border-ink);
+  border-inline-start-color: var(--action-bg);
+}
+
+.notebook-task-inline[data-checked="true"],
+.notebook-task-section[data-checked="true"] {
+  border-color: var(--border-subtle);
+  border-inline-start-color: var(--accent-success-ink);
+  background-color: var(--steps-checked-bg);
+}
+
+.notebook-task-inline .notebook-step-row,
+.notebook-task-section .notebook-step-row {
+  border-block-start: 0;
+  padding: 0.75rem 1rem;
+}
+
+/* Paragraph-level task checkpoint (`段任务`): sleek, low-profile inline micro-task tied to prose */
+.notebook-task-paragraph {
+  margin-block: 0.85rem 1.15rem;
+  max-inline-size: 65ch;
+  border-radius: 10px;
+  border: 1px dashed var(--border-subtle);
+  border-inline-start: 3px solid var(--accent-ice-ink);
+  background-color: var(--surface-sheet);
+  overflow: hidden;
+  transition: border-color 160ms ease-out, background-color 160ms ease-out;
+}
+
+.notebook-task-paragraph:hover {
+  border-color: var(--ink-muted);
+  border-inline-start-color: var(--accent-ice-ink);
+}
+
+.notebook-task-paragraph[data-checked="true"] {
+  border-style: solid;
+  border-color: var(--border-subtle);
+  border-inline-start-color: var(--accent-success-ink);
+  background-color: var(--steps-checked-bg);
+}
+
+.notebook-task-paragraph .notebook-step-row {
+  border-block-start: 0;
+  min-block-size: 2.75rem;
+  padding: 0.55rem 0.875rem;
+}
+
+/* Multi-item sub-checklist card (when author explicitly groups 2+ related sub-tasks) */
+.notebook-steps-card {
+  margin-block: 1.5rem;
+  max-inline-size: 65ch;
+  border-radius: 14px;
+  border: 1.5px solid var(--border-ink);
+  background-color: var(--surface-raised);
+  overflow: hidden;
+}
+
+.notebook-step-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  min-block-size: 2.75rem;
+  padding: 0.75rem 1rem;
+  border-block-start: 1px dashed var(--border-subtle);
+  cursor: pointer;
+  transition: background-color 160ms ease-out;
+}
+
+.notebook-step-row:hover {
+  background-color: var(--surface-sheet);
+}
+
+.notebook-step-row[data-checked="true"] {
+  background-color: var(--steps-checked-bg);
+}
+
+/* Harmonize nested inline code pills on the checked green surface (§5.6.2) */
+.notebook-step-row[data-checked="true"] code {
+  background-color: var(--surface-sheet);
+  color: var(--ink-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Fully accessible custom checkbox (`modern-web-guidance/checkbox`) */
+.notebook-step-checkbox {
+  --checkbox-size: 1.25rem;
+  --checkbox-icon-size: 0.78rem;
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  inline-size: var(--checkbox-size);
+  aspect-ratio: 1;
+  margin: 0.15rem 0 0;
+  flex-shrink: 0;
+  border: 2px solid var(--ink-muted);
+  border-radius: 6px;
+  background-color: var(--surface-sheet);
+  color: var(--surface-sheet);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.notebook-step-checkbox::before {
+  content: "";
+  inline-size: var(--checkbox-icon-size);
+  aspect-ratio: 1;
+  background-color: currentColor;
+  -webkit-mask: var(--icon-check) no-repeat center / contain;
+  mask: var(--icon-check) no-repeat center / contain;
+  scale: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .notebook-step-checkbox::before {
+    transition: scale 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+@media (forced-colors: active) {
+  .notebook-step-checkbox::before {
+    background-color: CanvasText;
+  }
+}
+
+.notebook-step-checkbox:hover:not(:disabled) {
+  border-color: var(--action-bg);
+}
+
+.notebook-step-checkbox:checked {
+  background-color: var(--steps-checkbox-accent);
+  border-color: var(--steps-checkbox-accent);
+  color: #ffffff;
+}
+
+.notebook-step-checkbox:checked::before {
+  scale: 1;
+}
+
+.notebook-step-checkbox:focus-visible {
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+.notebook-step-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ============================================================================
+ * Restraint-First Compositor Motion & Tactile Micro-Interactions
+ * (`motion` & `natural-interactions`, always honoring `prefers-reduced-motion`)
+ * ============================================================================ */
+@keyframes ui-fade-slide-up {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+}
+
+@keyframes ui-popover-grow {
+  from {
+    opacity: 0;
+    scale: 0.93;
+  }
+}
+
+@keyframes ui-badge-pop {
+  0% {
+    scale: 0.88;
+  }
+  60% {
+    scale: 1.07;
+  }
+  100% {
+    scale: 1;
+  }
+}
+
+.ui-panel-enter {
+  animation: none;
+}
+.ui-popover-enter {
+  animation: none;
+}
+.ui-badge-pop {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ui-panel-enter {
+    animation: ui-fade-slide-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .ui-popover-enter {
+    animation: ui-popover-grow 180ms ease-out both;
+    animation: ui-popover-grow 260ms linear(0, 0.45 15%, 1.06 42%, 0.99 68%, 1) both;
+  }
+  .ui-badge-pop {
+    animation: ui-badge-pop 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Tactile hover lift on Home track notebook cards (transform stays on compositor) */
+  .notebook-track-card {
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .notebook-track-card:hover {
+    transform: translateY(-2px);
+  }
+
+  /* Gentle press response on subtle interactive pills/buttons */
+  .ui-press-tactile {
+    transition: transform 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+  }
+  .ui-press-tactile:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  /* Pure-CSS @starting-style panel transition when toggling tabpanels via `hidden` */
+  [role="tabpanel"]:not([hidden]) > .editor-tabpanel-body {
+    opacity: 1;
+    translate: 0 0;
+    transition: opacity 160ms ease-out, translate 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    @starting-style {
+      opacity: 0;
+      translate: 0 5px;
+    }
+  }
+}
+
+/* ============================================================================
+ * Accessible Popup Dropdown Menus (`modern-web-guidance/menu`)
+ * - Uses native Popover API + `focusgroup="menu nomemory"` + Anchor Positioning
+ * - Script fallback positions viewport-clamped menus under `@supports not (position-area: block-end)`
+ * ============================================================================ */
+.ink-menu-popover[popover] {
+  margin: 0;
+  padding: 0.375rem;
+  min-inline-size: 11.5rem;
+  max-inline-size: min(18rem, calc(100vw - 1.5rem));
+  border-radius: 12px;
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border: 1.5px solid var(--border-ink);
+  box-shadow: var(--shadow-floating);
+  overflow: visible;
+}
+
+@supports (position-area: block-end) {
+  .ink-menu-popover[popover] {
+    inset: auto;
+    margin-block-start: 0.375rem;
+    position-area: block-end span-inline-end;
+    position-try-fallbacks: flip-inline, flip-block, flip-block flip-inline;
+  }
+  .ink-menu-popover[popover][data-align="end"] {
+    position-area: block-end span-inline-start;
+    position-try-fallbacks: flip-inline, flip-block, flip-block flip-inline;
+  }
+}
+
+@supports not (position-area: block-end) {
+  .ink-menu-popover[popover] {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ink-menu-popover[popover] {
+    opacity: 0;
+    translate: 0 -0.25rem;
+    transition: opacity, translate, display, overlay;
+    transition-duration: 0.15s;
+    transition-timing-function: ease-out;
+    /* Separate declaration after transition shorthand so older browsers don't drop it */
+    transition-behavior: allow-discrete;
+  }
+  .ink-menu-popover[popover]:is(:popover-open, .\:popover-open) {
+    opacity: 1;
+    translate: 0 0;
+    transition-duration: 0.11s;
+    @starting-style {
+      opacity: 0;
+      translate: 0 -0.25rem;
+    }
+  }
+}
+
+.ink-menu-list {
+  --menu-icon-size: 1.125rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.ink-menu-list hr {
+  margin: 0.25rem 0.375rem;
+  border: 0;
+  border-block-start: 1px solid var(--border-subtle);
+}
+
+.ink-menu-list .ink-menu-header {
+  padding: 0.375rem 0.625rem 0.5rem;
+  border-block-end: 1px solid var(--border-subtle);
+  margin-block-end: 0.25rem;
+}
+
+.ink-menu-list button,
+.ink-menu-list a {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  inline-size: 100%;
+  min-block-size: 2rem;
+  padding: 0.375rem 0.625rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-primary);
+  font-size: 0.8125rem;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.ink-menu-list button:hover:not(:disabled),
+.ink-menu-list a:hover {
+  background-color: var(--surface-raised);
+}
+
+.ink-menu-list button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ink-menu-list button[data-tone="danger"] {
+  color: var(--accent-danger-ink);
+}
+
+.ink-menu-list button[data-tone="danger"]:hover:not(:disabled) {
+  background-color: var(--alert-danger-bg);
+}
+
+/* Reserved leading checkmark slot for checkable radio/checkbox menu items (`menu` guide) */
+.ink-menu-list button[role="menuitemradio"]::before,
+.ink-menu-list button[role="menuitemcheckbox"]::before {
+  content: "";
+  flex: none;
+  inline-size: var(--menu-icon-size);
+  font-weight: 600;
+  color: var(--link-ink);
+  text-align: center;
+}
+
+.ink-menu-list button[role="menuitemradio"][aria-checked="true"]::before,
+.ink-menu-list button[role="menuitemcheckbox"][aria-checked="true"]::before {
+  content: "✓";
+}
+
+.ink-menu-list .ink-menu-hint {
+  margin-inline-start: auto;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+}
+
+/* Branded Stationery Select (`modern-web-guidance/branded-select-styling`)
+ * Progressively opts into `appearance: base-select` top-layer picker where supported,
+ * while gracefully falling back to standard themed OS `<select>` in Firefox / Safari < 27. */
+.ink-select {
+  inline-size: 100%;
+  cursor: pointer;
+}
+
+@supports (appearance: base-select) {
+  .ink-select,
+  .ink-select::picker(select) {
+    appearance: base-select;
+  }
+
+  .ink-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    inline-size: 100%;
+  }
+
+  .ink-select::picker(select) {
+    margin-block-start: 0.25rem;
+    padding: 0.375rem;
+    border-radius: 12px;
+    background-color: var(--surface-sheet);
+    color: var(--ink-primary);
+    border: 2px solid var(--border-ink);
+    box-shadow: var(--shadow-floating);
+  }
+
+  .ink-select::picker-icon {
+    color: var(--ink-muted);
+  }
+
+  .ink-select option {
+    padding: 0.45rem 0.625rem;
+    border-radius: 8px;
+    color: var(--ink-primary);
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .ink-select option:hover,
+  .ink-select option:focus-visible {
+    background-color: var(--surface-raised);
+  }
+
+  .ink-select option:checked {
+    background-color: var(--action-subtle);
+    color: var(--link-ink);
+    font-weight: 600;
+  }
+
+  .ink-select option::checkmark {
+    color: var(--link-ink);
+    font-weight: 600;
+  }
+}

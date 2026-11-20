@@ -1,0 +1,23 @@
+# Build artifacts & caches
+target/
+debug/
+**/node_modules/
+apps/web/dist/
+apps/web/.vite/
+*.tsbuildinfo
+
+# VCS & CI metadata
+.git/
+.github/
+
+# Local secrets & runtime state
+.env
+.env.*
+!.env.example
+.data/
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

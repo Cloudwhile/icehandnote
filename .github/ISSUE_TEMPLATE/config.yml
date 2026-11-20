@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Releases & Standalone Bundles
+    url: https://github.com/Cloudwhile/icehandnote/releases
+    about: Download pre-built Windows & Linux archives or view release notes.
+  - name: Container Images (GHCR)
+    url: https://github.com/Cloudwhile/icehandnote/pkgs/container/icehandnote
+    about: Browse published OCI container images and digests on GitHub Container Registry.

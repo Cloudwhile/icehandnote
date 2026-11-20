@@ -1,0 +1,34 @@
+slug = "linux-api-craft"
+difficulty = "beginner"
+icon_kind = "terminal"
+sort_order = 2
+tags = ["Python", "Linux", "API", "Security"]
+
+[translations.zh-TW]
+title = "Linux 伺服器面板 API 自動化與資安筆記"
+subtitle = "簽章驗證、IP 白名單與零信任憑證管理"
+description = "從實戰腳本出發，詳解面板 API 時間戳簽章構造原理，並針對生產環境常見的萬用字元白名單風險提供加固方案。"
+
+[translations.zh-CN]
+title = "Linux 服务器面板 API 自动化与安全笔记"
+subtitle = "签名校验、IP 白名单与零信任凭证管理"
+description = "从实战脚本出发，详解面板 API 时间戳签名构造原理，并针对生产环境常见的通配符白名单风险提供加固方案。"
+
+[translations.en]
+title = "Linux Control Panel API & Hardening Notes"
+subtitle = "Request signing, CIDR allowlists, and TLS certificate pinning"
+description = "Build a clean Python/Rust API client with strict TLS verification while eliminating wildcard IP allowlist risks."
+
+[translations.ja]
+title = "LinuxパネルAPI自動化とセキュリティ実践ノート"
+subtitle = "署名トークン生成・固定IPホワイトリスト・TLS検証"
+description = "安全なサーバー管理APIクライアントの実装手順と境界防御を図解ノート形式で解説します。"
+
+[[chapters]]
+slug = "01-signature-auth"
+number = 1
+[chapters.titles]
+zh-TW = "第一章：簽章構造與網路邊界加固"
+zh-CN = "第一章：签名构造与网络边界加固"
+en = "Chapter 1: Request Signing & Boundary Hardening"
+ja = "第1章：リクエスト署名とネットワーク防御"

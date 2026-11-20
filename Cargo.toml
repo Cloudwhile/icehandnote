@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/core",
+  "crates/db",
+  "crates/api",
+  "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["Cloudwhile <86512509+Cloudwhile@users.noreply.github.com>"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+ammonia = "4.0"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json", "macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15"
+hex = "0.4"
+hmac = "0.12"
+pulldown-cmark = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["full"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.10", features = ["v4", "v5", "serde"] }
