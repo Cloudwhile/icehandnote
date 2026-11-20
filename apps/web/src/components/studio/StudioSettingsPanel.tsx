@@ -14,12 +14,13 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { LOCALES, UI_COPY } from '../../lib/i18n';
 import { ALL_LICENSE_OPTIONS, normalizeLicenseId } from '../../lib/licenses';
-import type {
-  DefaultThemeSetting,
-  LicenseId,
-  LocaleCode,
-  SiteSettingsDto,
-  UpdateCheckResponse,
+import {
+  APP_VERSION,
+  type DefaultThemeSetting,
+  type LicenseId,
+  type LocaleCode,
+  type SiteSettingsDto,
+  type UpdateCheckResponse,
 } from '../../lib/types';
 
 interface StudioSettingsPanelProps {
@@ -666,7 +667,7 @@ export function StudioSettingsPanel({
             <div className="flex items-baseline gap-2">
               <dt className="text-ink-muted">{st.currentVersionLabel}</dt>
               <dd className="m-0 font-mono font-semibold text-ink-primary">
-                {updateResult?.current_version ?? 'v0.1.0'}
+                {updateResult?.current_version ?? APP_VERSION}
               </dd>
             </div>
 

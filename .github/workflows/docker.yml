@@ -150,5 +150,19 @@ jobs:
             docker pull "${IMAGE_LOWER}:${SHA256_TAG}"
             docker pull "${IMAGE_LOWER}:latest"
           else
+            # Prune superseded non-release sha256-* / sha-* / main versions once a release tag is published
+            PKG_NAME=$(basename "$REPO_LOWER")
+            OWNER="${{ github.repository_owner }}"
+            VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
+            echo "$VERSIONS_JSON" | jq -r --arg cur "$DIGEST" '
+              .[] | select(.name != $cur)
+              | select((.metadata.container.tags // []) | (length > 0) and all(test("^(main|master|sha-[0-9a-f]+|sha256-[0-9a-f]+)$")))
+              | .id
+            ' | while read -r vid; do
+              [ -n "$vid" ] || continue
+              gh api --method DELETE "/users/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
+                || gh api --method DELETE "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions/${vid}" 2>/dev/null \
+                || true
+            done
             docker pull "${IMAGE_LOWER}:${REF_NAME}"
           fi

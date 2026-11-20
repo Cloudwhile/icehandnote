@@ -10,12 +10,13 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { LOCALES, UI_COPY } from '../../lib/i18n';
-import type {
-  LocaleCode,
-  SiteSettingsDto,
-  StudioTrackDto,
-  UpdateCheckResponse,
-  UserProfileDto,
+import {
+  APP_VERSION,
+  type LocaleCode,
+  type SiteSettingsDto,
+  type StudioTrackDto,
+  type UpdateCheckResponse,
+  type UserProfileDto,
 } from '../../lib/types';
 import type { StudioSectionId } from './StudioSidebarContent';
 
@@ -445,7 +446,7 @@ export function StudioOverviewPanel({
                 <dt className="text-ink-muted">{st.currentVersionLabel}</dt>
                 <dd className="m-0 flex items-center gap-2">
                   <span className="font-mono text-ink-primary">
-                    {updateInfo?.current_version ?? 'v0.1.0'}
+                    {updateInfo?.current_version ?? APP_VERSION}
                   </span>
                   <span role="status" aria-live="polite" className="inline-flex items-center">
                     {!checkingUpdate && updateErr ? (

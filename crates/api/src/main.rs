@@ -1090,11 +1090,12 @@ async fn reload_content_handler(
     Ok(Json(serde_json::json!({ "synced_documents": synced })))
 }
 
-fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64, bool)> {
+fn parse_semver_key(raw: &str) -> Option<(u64, u64, u64, bool, Vec<(bool, u64, String)>)> {
     let trimmed = raw.trim().trim_start_matches(['v', 'V']);
-    let (core, prerelease) = match trimmed.split_once('-') {
-        Some((c, pre)) => (c, !pre.trim().is_empty()),
-        None => (trimmed.split('+').next().unwrap_or(trimmed), false),
+    let without_build = trimmed.split('+').next().unwrap_or(trimmed);
+    let (core, pre_opt) = match without_build.split_once('-') {
+        Some((c, p)) if !p.trim().is_empty() => (c, Some(p.trim())),
+        _ => (without_build, None),
     };
     let mut parts = core.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
@@ -1103,12 +1104,22 @@ fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64, bool)> {
     if parts.next().is_some() {
         return None;
     }
-    // Stable release (prerelease == false) sorts higher than prerelease of same version
-    Some((major, minor, patch, !prerelease))
+    let pre_tokens = pre_opt
+        .map(|pre| {
+            pre.split('.')
+                .map(|seg| match seg.parse::<u64>() {
+                    Ok(n) => (false, n, String::new()),
+                    Err(_) => (true, 0, seg.to_ascii_lowercase()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Stable release (pre_opt.is_none() == true) sorts higher than pre-release of same version
+    Some((major, minor, patch, pre_opt.is_none(), pre_tokens))
 }
 
 fn is_newer_semver(latest: &str, current: &str) -> bool {
-    match (parse_semver_tuple(latest), parse_semver_tuple(current)) {
+    match (parse_semver_key(latest), parse_semver_key(current)) {
         (Some(l), Some(c)) => l > c,
         _ => false,
     }
@@ -1179,10 +1190,10 @@ async fn studio_update_check_handler(
         .unwrap_or_else(|| "Cloudwhile/icehandnote".to_string());
     let pkg_name = repo.rsplit('/').next().unwrap_or("icehandnote");
 
-    let gh_release_url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let gh_releases_url = format!("https://api.github.com/repos/{repo}/releases?per_page=10");
     let release_resp = state
         .http_client
-        .get(&gh_release_url)
+        .get(&gh_releases_url)
         .header("User-Agent", format!("IceHandnote/{raw_pkg_ver}"))
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(8))
@@ -1191,33 +1202,50 @@ async fn studio_update_check_handler(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Update check request failed: {e}")))?;
 
     if release_resp.status().is_success() {
-        let val: serde_json::Value = release_resp.json().await.map_err(internal_err)?;
-        let tag_name = val
-            .get("tag_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let html_url = val
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("https://github.com/{repo}/releases"));
-        let published_at = val
-            .get("published_at")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let releases: Vec<serde_json::Value> = release_resp.json().await.map_err(internal_err)?;
+        let current_is_prerelease = raw_pkg_ver.contains('-');
+        // Prefer stable releases when running stable, falling back to pre-releases if only RC/beta exists
+        let chosen = releases
+            .iter()
+            .filter(|r| !r.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+            .find(|r| {
+                current_is_prerelease
+                    || !r.get("prerelease").and_then(|p| p.as_bool()).unwrap_or(false)
+            })
+            .or_else(|| {
+                releases
+                    .iter()
+                    .find(|r| !r.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+            });
 
-        if !tag_name.is_empty() {
-            let has_update = is_newer_semver(&tag_name, raw_pkg_ver) || current_digest.is_some();
-            return Ok(Json(UpdateCheckResponse {
-                current_version,
-                latest_version: tag_name,
-                channel: "release",
-                has_update,
-                release_url: html_url,
-                published_at,
-            }));
+        if let Some(val) = chosen {
+            let tag_name = val
+                .get("tag_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let html_url = val
+                .get("html_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("https://github.com/{repo}/releases"));
+            let published_at = val
+                .get("published_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if !tag_name.is_empty() {
+                let has_update = is_newer_semver(&tag_name, raw_pkg_ver) || current_digest.is_some();
+                return Ok(Json(UpdateCheckResponse {
+                    current_version,
+                    latest_version: tag_name,
+                    channel: "release",
+                    has_update,
+                    release_url: html_url,
+                    published_at,
+                }));
+            }
         }
     } else if release_resp.status() != StatusCode::NOT_FOUND {
         return Err((
@@ -1290,5 +1318,8 @@ mod tests {
         assert!(!is_newer_semver("v0.1.0", "0.1.0"));
         assert!(!is_newer_semver("v0.1.0-rc.1", "0.1.0"));
         assert!(is_newer_semver("v0.1.0", "0.1.0-rc.1"));
+        assert!(is_newer_semver("v0.1.0-rc.2", "v0.1.0-rc.1"));
+        assert!(is_newer_semver("v0.1.0-rc.10", "v0.1.0-rc.2"));
+        assert!(!is_newer_semver("v0.1.0-rc.1", "v0.1.0-rc.1"));
     }
 }

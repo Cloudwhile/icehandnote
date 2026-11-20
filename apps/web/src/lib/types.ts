@@ -380,6 +380,8 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   draft_autosave_interval_secs: 15,
 };
 
+export const APP_VERSION = 'v0.1.0-rc.1';
+
 export interface UpdateCheckResponse {
   current_version: string;
   latest_version: string;
