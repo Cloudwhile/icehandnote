@@ -203,14 +203,14 @@
     --surface-sheet: var(--palette-dusk-900);
     --surface-raised: var(--palette-dusk-800);
     --surface-sunken: #181a2b;
-    --surface-sheet-tab: var(--palette-paper-100);
+    --surface-sheet-tab: var(--palette-dusk-800);
 
     --ink-primary: var(--palette-dusk-100);
     --ink-secondary: var(--palette-dusk-200);
     --ink-muted: var(--palette-dusk-400);
 
-    --border-ink: var(--palette-dusk-100);
-    --border-subtle: var(--palette-dusk-800);
+    --border-ink: var(--palette-dusk-300);
+    --border-subtle: var(--palette-dusk-700);
 
     --action-bg: var(--palette-primary-300);
     --action-fg: var(--palette-primary-950);
@@ -321,14 +321,14 @@
     --surface-sheet: light-dark(var(--palette-paper-50), var(--palette-dusk-900));
     --surface-raised: light-dark(var(--palette-paper-100), var(--palette-dusk-800));
     --surface-sunken: light-dark(var(--palette-paper-200), #181a2b);
-    --surface-sheet-tab: light-dark(var(--palette-paper-200), var(--palette-paper-100));
+    --surface-sheet-tab: light-dark(var(--palette-paper-200), var(--palette-dusk-800));
 
     --ink-primary: light-dark(var(--palette-paper-950), var(--palette-dusk-100));
     --ink-secondary: light-dark(var(--palette-paper-700), var(--palette-dusk-200));
     --ink-muted: light-dark(var(--palette-paper-600), var(--palette-dusk-400));
 
-    --border-ink: light-dark(var(--palette-paper-950), var(--palette-dusk-100));
-    --border-subtle: light-dark(var(--palette-paper-200), var(--palette-dusk-800));
+    --border-ink: light-dark(var(--palette-paper-950), var(--palette-dusk-300));
+    --border-subtle: light-dark(var(--palette-paper-200), var(--palette-dusk-700));
 
     --action-bg: light-dark(var(--palette-primary-600), var(--palette-primary-300));
     --action-fg: light-dark(#ffffff, var(--palette-primary-950));

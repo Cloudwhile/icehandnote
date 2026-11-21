@@ -12,6 +12,7 @@
  */
 
 import {
+  type ChangeEvent,
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
@@ -22,10 +23,12 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { PasswordStrengthMeter } from '../components/auth/PasswordStrengthMeter';
 import { CcLicenseCard } from '../components/notebook/CcLicenseCard';
 import { NotebookBlockRenderer } from '../components/notebook/NotebookBlockRenderer';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
+import { StudioEditorInspector } from '../components/studio/StudioEditorInspector';
 import { StudioMobileDrawer } from '../components/studio/StudioMobileDrawer';
 import { StudioOverviewPanel } from '../components/studio/StudioOverviewPanel';
 import { StudioSettingsPanel } from '../components/studio/StudioSettingsPanel';
@@ -33,11 +36,16 @@ import {
   StudioSidebarContent,
   type StudioSectionId,
 } from '../components/studio/StudioSidebarContent';
-import { VisualBlockEditor } from '../components/studio/VisualBlockEditor';
 import {
+  VisualBlockEditor,
+  VisualBlockToolStrip,
+} from '../components/studio/VisualBlockEditor';
+import {
+  IconBook,
   IconExternalLink,
   IconFileCode,
   IconGlobe,
+  IconImage,
   IconLayers,
   IconLogOut,
   IconMenu,
@@ -45,6 +53,8 @@ import {
   IconMoreHorizontal,
   IconPlus,
   IconSearch,
+  IconSettings,
+  IconShield,
   IconSidebarToggle,
   IconSnowflake,
   IconSun,
@@ -52,6 +62,8 @@ import {
 } from '../components/ui/Icons';
 import { ModalDialog } from '../components/ui/ModalDialog';
 import { PopupMenu } from '../components/ui/PopupMenu';
+import { useToast } from '../components/ui/ToastProvider';
+import { UserAvatar } from '../components/ui/UserAvatar';
 import { api } from '../lib/api';
 import {
   detectSystemLocale,
@@ -59,12 +71,13 @@ import {
   type LocalePreference,
   UI_COPY,
 } from '../lib/i18n';
-import {
-  ALL_LICENSE_OPTIONS,
-  normalizeLicenseId,
-} from '../lib/licenses';
+import { RC3_COPY } from '../lib/i18nRc3';
+import { normalizeLicenseId } from '../lib/licenses';
+import { SafeHtml, stripHtmlTags } from '../lib/sanitizer';
 import type { ResolvedTheme } from '../lib/theme';
 import type {
+  ArticleAuthorDto,
+  CollaboratorInviteDto,
   LicenseId,
   LocaleCode,
   NotebookBlock,
@@ -75,6 +88,8 @@ import type {
   UserRole,
 } from '../lib/types';
 import {
+  createDefaultVisualBlock,
+  createVisualId,
   parseMarkdownToVisualBlocks,
   serializeVisualBlocksToMarkdown,
   type VisualBlock,
@@ -92,6 +107,7 @@ interface StudioPageProps {
   siteSettings: SiteSettingsDto;
   onSettingsUpdated: (next: SiteSettingsDto) => void;
   onOpenAuth: () => void;
+  onOpenProfile: () => void;
   onLogout: () => void;
 }
 
@@ -225,27 +241,44 @@ export function StudioPage({
   siteSettings,
   onSettingsUpdated,
   onOpenAuth,
+  onOpenProfile,
   onLogout,
 }: StudioPageProps) {
   const copy = UI_COPY[locale];
   const s = copy.studio;
+  const rc3 = RC3_COPY[locale];
+  const toast = useToast();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const usersTableCaptionId = useId();
   const deleteTitleId = useId();
   const newStepTitleId = useId();
+  const takedownTitleId = useId();
+  const deleteCatalogTitleId = useId();
+  const createUserTitleId = useId();
+  const banUserTitleId = useId();
+  const resetPwTitleId = useId();
+  const deleteUserTitleId = useId();
   const visualTabId = useId();
   const markdownTabId = useId();
   const visualTabRef = useRef<HTMLButtonElement | null>(null);
   const markdownTabRef = useRef<HTMLButtonElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const mdImageInputRef = useRef<HTMLInputElement | null>(null);
+  const mainScrollRef = useRef<HTMLElement | null>(null);
   const saveActionRef = useRef<() => void>(() => {});
 
   // Dashboard shell navigation state
   const [activeSection, setActiveSection] = useState<StudioSectionId>('overview');
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
+  const [inspectorOpen, setInspectorOpen] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1280 : true,
+  );
+  const [previewSplitOpen, setPreviewSplitOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
 
   const [tracks, setTracks] = useState<StudioTrackDto[]>([]);
 
@@ -259,7 +292,8 @@ export function StudioPage({
   const [docTitle, setDocTitle] = useState('');
   const [docSummary, setDocSummary] = useState('');
   const [docStepNum, setDocStepNum] = useState(1);
-  const [docMinutes, setDocMinutes] = useState(10);
+  const [docMinutes, setDocMinutes] = useState(1);
+  const [docVersion, setDocVersion] = useState(1);
   const [docSyncedRev, setDocSyncedRev] = useState(1);
   const [docCanonicalRev, setDocCanonicalRev] = useState(1);
   const [bumpCanonical, setBumpCanonical] = useState(false);
@@ -269,6 +303,16 @@ export function StudioPage({
   const [docBody, setDocBody] = useState('');
   const [visualBlocks, setVisualBlocks] = useState<VisualBlock[]>([]);
   const [docExists, setDocExists] = useState(true);
+  const [docAuthors, setDocAuthors] = useState<ArticleAuthorDto[]>([]);
+  const [docPendingInvites, setDocPendingInvites] = useState<CollaboratorInviteDto[]>([]);
+  const [canManageCollaborators, setCanManageCollaborators] = useState(false);
+  const [docTakedownReason, setDocTakedownReason] = useState<string | null>(null);
+  const [docTakedownBy, setDocTakedownBy] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviting, setInviting] = useState(false);
+  const [lastInviteUrl, setLastInviteUrl] = useState('');
+  const [uploadingMdImage, setUploadingMdImage] = useState(false);
+
   const [savedSnapshot, setSavedSnapshot] = useState('');
   const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>({
     kind: 'idle',
@@ -280,14 +324,13 @@ export function StudioPage({
   // Live preview AST & interactive step test overrides
   const [previewBlocks, setPreviewBlocks] = useState<NotebookBlock[]>([]);
   const [previewStepOverrides, setPreviewStepOverrides] = useState<Record<string, boolean>>({});
-  const [saveBanner, setSaveBanner] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Quick new step inline creator
   const [newStepSlug, setNewStepSlug] = useState('');
   const [creatingNewStep, setCreatingNewStep] = useState(false);
 
-  // Catalog: Create Track & Create Chapter forms
+  // Catalog: Create Track & Create Chapter forms + delete confirm
   const [trackSlugInput, setTrackSlugInput] = useState('');
   const [trackTitleInput, setTrackTitleInput] = useState('');
   const [trackDescInput, setTrackDescInput] = useState('');
@@ -300,9 +343,41 @@ export function StudioPage({
   const [newChNumber, setNewChNumber] = useState(2);
   const [newChTitle, setNewChTitle] = useState('');
 
-  // Admin Users
+  const [deleteCatalogTarget, setDeleteCatalogTarget] = useState<
+    | { kind: 'track'; trackSlug: string }
+    | { kind: 'chapter'; trackSlug: string; chapterSlug: string }
+    | null
+  >(null);
+
+  // Admin Takedown modal target
+  const [takedownTarget, setTakedownTarget] = useState<{
+    trackSlug: string;
+    chapterSlug: string;
+    stepSlug: string;
+    title: string;
+  } | null>(null);
+  const [takedownReasonInput, setTakedownReasonInput] = useState('');
+  const [submittingTakedown, setSubmittingTakedown] = useState(false);
+
+  // Admin Users & governance modals
   const [usersList, setUsersList] = useState<UserProfileDto[]>([]);
-  const [roleFeedback, setRoleFeedback] = useState('');
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('author');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [creatingUser, setCreatingUser] = useState(false);
+
+  const [banTarget, setBanTarget] = useState<UserProfileDto | null>(null);
+  const [banReasonInput, setBanReasonInput] = useState('');
+  const [submittingBan, setSubmittingBan] = useState(false);
+
+  const [resetPwTarget, setResetPwTarget] = useState<UserProfileDto | null>(null);
+  const [resetPwInput, setResetPwInput] = useState('');
+  const [submittingResetPw, setSubmittingResetPw] = useState(false);
+
+  const [deleteUserTarget, setDeleteUserTarget] = useState<UserProfileDto | null>(null);
 
   const canAuthor = Boolean(user && (user.role === 'author' || user.role === 'admin'));
   const isAdmin = Boolean(user && user.role === 'admin');
@@ -311,6 +386,34 @@ export function StudioPage({
   const activeTargetKey = `${selTrack}/${selChapter}/${selStep}/${editLocale}`;
   const activeTargetRef = useRef(activeTargetKey);
   activeTargetRef.current = activeTargetKey;
+
+  useEffect(() => {
+    setLogoFailed(false);
+  }, [siteSettings.logo_url]);
+
+  // Reset main pane scroll position when switching Studio sections (fixes preserved scroll offset)
+  useEffect(() => {
+    mainScrollRef.current?.scrollTo({ top: 0 });
+  }, [activeSection]);
+
+  // Honor `?track=&chapter=&step=` deep links (e.g., after accepting a co-author invite)
+  useEffect(() => {
+    if (!canAuthor) return;
+    const t = searchParams.get('track');
+    const c = searchParams.get('chapter');
+    const st = searchParams.get('step');
+    if (t && c && st) {
+      setSelTrack(t);
+      setSelChapter(c);
+      setSelStep(st);
+      setActiveSection('editor');
+      const next = new URLSearchParams(searchParams);
+      next.delete('track');
+      next.delete('chapter');
+      next.delete('step');
+      setSearchParams(next, { replace: true });
+    }
+  }, [canAuthor, searchParams, setSearchParams]);
 
   const refreshOverview = useCallback(async () => {
     if (!canAuthor) return;
@@ -366,6 +469,7 @@ export function StudioPage({
         setDocSummary(dto.summary);
         setDocStepNum(dto.step_number);
         setDocMinutes(dto.estimated_minutes);
+        setDocVersion(dto.version ?? dto.synced_revision);
         setDocSyncedRev(dto.synced_revision);
         setDocCanonicalRev(dto.canonical_revision);
         setBumpCanonical(false);
@@ -376,13 +480,18 @@ export function StudioPage({
         setDocTagsText(nextTags);
         setDocBody(dto.body_markdown);
         setVisualBlocks(parseMarkdownToVisualBlocks(dto.body_markdown));
+        setDocAuthors(dto.authors ?? []);
+        setDocPendingInvites(dto.pending_invites ?? []);
+        setCanManageCollaborators(Boolean(dto.can_manage_collaborators));
+        setDocTakedownReason(dto.takedown_reason ?? null);
+        setDocTakedownBy(dto.takedown_by ?? null);
+        setLastInviteUrl('');
         setPreviewStepOverrides({});
         setSavedSnapshot(
           JSON.stringify({
             title: dto.title,
             summary: dto.summary,
             stepNum: dto.step_number,
-            minutes: dto.estimated_minutes,
             status: dto.status === 'draft' ? 'draft' : 'published',
             license: nextLicense,
             tags: nextTags,
@@ -409,25 +518,29 @@ export function StudioPage({
         }
       } catch (err) {
         setDocExists(false);
-        setSaveBanner(
-          s.loadStepFailedBanner(err instanceof Error ? err.message : 'Unknown error'),
-        );
+        setDocAuthors([]);
+        setDocPendingInvites([]);
+        setCanManageCollaborators(false);
+        setDocTakedownReason(null);
+        setDocTakedownBy(null);
+        toast.error(err);
       }
     },
-    [canAuthor, s],
+    [canAuthor, toast],
   );
 
   useEffect(() => {
     void loadEditorStep(selTrack, selChapter, selStep, editLocale);
   }, [selTrack, selChapter, selStep, editLocale, loadEditorStep]);
 
-  // Debounced live Rust AST preview
+  // Debounced live Rust AST preview (+ automatic reading minutes calculation)
   useEffect(() => {
     if (!canAuthor || activeSection !== 'editor') return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (!docBody.trim()) {
         setPreviewBlocks([]);
+        setDocMinutes(1);
         return;
       }
       void api
@@ -437,7 +550,11 @@ export function StudioPage({
           body_markdown: docBody,
         })
         .then((res) => {
-          if (!cancelled) setPreviewBlocks(res.blocks);
+          if (cancelled) return;
+          setPreviewBlocks(res.blocks);
+          if (typeof res.frontmatter?.estimated_minutes === 'number') {
+            setDocMinutes(res.frontmatter.estimated_minutes);
+          }
         })
         .catch(() => {});
     }, 200);
@@ -511,7 +628,6 @@ export function StudioPage({
         title: docTitle,
         summary: docSummary,
         stepNum: docStepNum,
-        minutes: docMinutes,
         status: docStatus,
         license: docLicense,
         tags: docTagsText,
@@ -522,7 +638,6 @@ export function StudioPage({
       docTitle,
       docSummary,
       docStepNum,
-      docMinutes,
       docStatus,
       docLicense,
       docTagsText,
@@ -639,6 +754,8 @@ export function StudioPage({
             setRecoverableDraft(null);
             setDocExists(true);
             setDocStatus('draft');
+            setDocMinutes(saved.estimated_minutes);
+            setDocVersion(saved.version ?? saved.synced_revision);
             setDocSyncedRev(saved.synced_revision);
             setDocCanonicalRev(saved.canonical_revision);
             setSavedSnapshot(
@@ -646,7 +763,6 @@ export function StudioPage({
                 title: cur.docTitle.trim(),
                 summary: cur.docSummary.trim(),
                 stepNum: cur.docStepNum,
-                minutes: cur.docMinutes,
                 status: 'draft',
                 license: cur.docLicense,
                 tags: cur.docTagsText,
@@ -846,12 +962,50 @@ export function StudioPage({
     setSelStep(clean);
     setNewStepSlug('');
     setCreatingNewStep(false);
-    setSaveBanner(s.switchedNewStepBanner(clean));
+    toast.info(s.switchedNewStepBanner(clean));
   };
 
   const handleVisualBlocksChange = (nextBlocks: VisualBlock[]) => {
     setVisualBlocks(nextBlocks);
     setDocBody(serializeVisualBlocksToMarkdown(nextBlocks));
+  };
+
+  const handleAppendVisualBlock = (kind: VisualBlock['type']) => {
+    handleVisualBlocksChange([...visualBlocks, createDefaultVisualBlock(kind)]);
+  };
+
+  const handleAppendSectionTask = () => {
+    handleVisualBlocksChange([
+      ...visualBlocks,
+      {
+        id: createVisualId(),
+        type: 'heading',
+        level: 2,
+        text: '',
+        isTask: true,
+        defaultChecked: false,
+      },
+    ]);
+  };
+
+  const handleTogglePreviewSplit = () => {
+    setPreviewSplitOpen((prev) => {
+      const next = !prev;
+      if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
+        setInspectorOpen(false);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleInspector = () => {
+    setInspectorOpen((prev) => {
+      const next = !prev;
+      if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
+        setPreviewSplitOpen(false);
+      }
+      return next;
+    });
   };
 
   const handleSwitchEditorMode = (nextMode: 'visual' | 'markdown') => {
@@ -895,13 +1049,29 @@ export function StudioPage({
     });
   };
 
+  const handleUploadMdImage = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || uploadingMdImage) return;
+    setUploadingMdImage(true);
+    try {
+      const res = await api.uploadStudioMedia(file);
+      const alt = file.name.replace(/\.[^.]+$/, '') || 'image';
+      insertSnippetAtCursor(`\n![${alt}](${res.url})\n`);
+      toast.success(rc3.studio.imageUploadedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setUploadingMdImage(false);
+    }
+  };
+
   const handleSaveStep = async () => {
     if (!docTitle.trim() || !selStep.trim() || saving) {
-      setSaveBanner(s.missingTitleOrSlugBanner);
+      toast.warning(s.missingTitleOrSlugBanner);
       return;
     }
     setSaving(true);
-    setSaveBanner('');
     try {
       const tags = docTagsText
         .split(',')
@@ -927,8 +1097,15 @@ export function StudioPage({
       });
 
       setDocExists(true);
+      setDocMinutes(saved.estimated_minutes);
+      setDocVersion(saved.version ?? saved.synced_revision);
       setDocSyncedRev(saved.synced_revision);
       setDocCanonicalRev(saved.canonical_revision);
+      if (saved.authors) setDocAuthors(saved.authors);
+      if (saved.pending_invites) setDocPendingInvites(saved.pending_invites);
+      if (typeof saved.can_manage_collaborators === 'boolean') {
+        setCanManageCollaborators(saved.can_manage_collaborators);
+      }
       setBumpCanonical(false);
       clearLocalDraft(selTrack, selChapter, selStep, editLocale);
       setRecoverableDraft(null);
@@ -939,7 +1116,6 @@ export function StudioPage({
           title: docTitle.trim(),
           summary: docSummary.trim(),
           stepNum: docStepNum,
-          minutes: docMinutes,
           status: docStatus,
           license: docLicense,
           tags: docTagsText,
@@ -949,13 +1125,16 @@ export function StudioPage({
       );
       await refreshOverview();
       const timeStr = new Date().toLocaleTimeString();
-      setSaveBanner(
-        s.savedBanner(editLocale, saved.synced_revision, saved.status === 'draft', timeStr),
+      toast.success(
+        s.savedBanner(
+          editLocale,
+          saved.version ?? saved.synced_revision,
+          saved.status === 'draft',
+          timeStr,
+        ),
       );
     } catch (err) {
-      setSaveBanner(
-        s.saveFailedBanner(err instanceof Error ? err.message : 'Unknown error'),
-      );
+      toast.error(err);
     } finally {
       setSaving(false);
     }
@@ -983,11 +1162,71 @@ export function StudioPage({
         setDocBody('');
         setVisualBlocks([]);
       }
-      setSaveBanner(s.deletedBanner(deletedSlug));
+      toast.success(s.deletedBanner(deletedSlug));
     } catch (err) {
-      setSaveBanner(
-        s.deleteFailedBanner(err instanceof Error ? err.message : 'Unknown error'),
+      toast.error(err);
+    }
+  };
+
+  const handleInviteCollaborator = async (e: FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = inviteEmail.trim();
+    if (!cleanEmail || inviting) return;
+    setInviting(true);
+    try {
+      const res = await api.createCollaboratorInvite(
+        selTrack,
+        selChapter,
+        selStep,
+        cleanEmail,
+        locale,
       );
+      setInviteEmail('');
+      setLastInviteUrl(res.invite_url);
+      setDocPendingInvites((prev) => [
+        res.invite,
+        ...prev.filter((inv) => inv.id !== res.invite.id),
+      ]);
+      if (res.email_sent) {
+        toast.success(rc3.studio.inviteCreatedEmailSentMsg);
+      } else {
+        toast.info(rc3.studio.inviteCreatedLinkOnlyMsg);
+      }
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleCopyInviteLink = async () => {
+    if (!lastInviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(lastInviteUrl);
+      toast.success(rc3.settings.copiedMsg);
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    try {
+      await api.revokeCollaboratorInvite(inviteId);
+      setDocPendingInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
+      toast.success(rc3.studio.inviteRevokedMsg);
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const handleRemoveCollaborator = async (targetUserId: string) => {
+    try {
+      await api.removeStepCollaborator(selTrack, selChapter, selStep, targetUserId);
+      setDocAuthors((prev) => prev.filter((a) => a.user_id !== targetUserId));
+      toast.success(rc3.studio.collaboratorRemovedMsg);
+      void refreshOverview();
+    } catch (err) {
+      toast.error(err);
     }
   };
 
@@ -1014,11 +1253,9 @@ export function StudioPage({
       setTrackTitleInput('');
       setTrackDescInput('');
       setActiveSection('editor');
-      setSaveBanner(s.trackCreatedBanner(created.title));
+      toast.success(s.trackCreatedBanner(stripHtmlTags(created.title)));
     } catch (err) {
-      setSaveBanner(
-        s.trackCreateFailedBanner(err instanceof Error ? err.message : 'Unknown error'),
-      );
+      toast.error(err);
     }
   };
 
@@ -1035,11 +1272,77 @@ export function StudioPage({
       await refreshOverview();
       setNewChSlug('');
       setNewChTitle('');
-      setSaveBanner(s.chapterCreatedBanner(newChTrack));
+      toast.success(s.chapterCreatedBanner(newChTrack));
     } catch (err) {
-      setSaveBanner(
-        s.chapterCreateFailedBanner(err instanceof Error ? err.message : 'Unknown error'),
+      toast.error(err);
+    }
+  };
+
+  const handleConfirmDeleteCatalog = async () => {
+    if (!deleteCatalogTarget) return;
+    try {
+      if (deleteCatalogTarget.kind === 'track') {
+        await api.studioDeleteTrack(deleteCatalogTarget.trackSlug);
+        toast.success(rc3.studio.trackDeletedMsg);
+      } else {
+        await api.studioDeleteChapter(
+          deleteCatalogTarget.trackSlug,
+          deleteCatalogTarget.chapterSlug,
+        );
+        toast.success(rc3.studio.chapterDeletedMsg);
+      }
+      setDeleteCatalogTarget(null);
+      await refreshOverview();
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const handleConfirmTakedown = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!takedownTarget || !takedownReasonInput.trim() || submittingTakedown) return;
+    setSubmittingTakedown(true);
+    try {
+      const res = await api.adminTakedownStep(
+        takedownTarget.trackSlug,
+        takedownTarget.chapterSlug,
+        takedownTarget.stepSlug,
+        takedownReasonInput.trim(),
       );
+      toast.success(rc3.studio.takedownSuccessMsg(res.emails_sent));
+      if (
+        takedownTarget.trackSlug === selTrack &&
+        takedownTarget.chapterSlug === selChapter &&
+        takedownTarget.stepSlug === selStep
+      ) {
+        setDocTakedownReason(takedownReasonInput.trim());
+        setDocTakedownBy(user?.display_name ?? null);
+      }
+      setTakedownTarget(null);
+      setTakedownReasonInput('');
+      await refreshOverview();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setSubmittingTakedown(false);
+    }
+  };
+
+  const handleRestoreStep = async (
+    trackSlug: string,
+    chapterSlug: string,
+    stepSlug: string,
+  ) => {
+    try {
+      await api.adminRestoreStep(trackSlug, chapterSlug, stepSlug);
+      toast.success(rc3.studio.restoredSuccessMsg);
+      if (trackSlug === selTrack && chapterSlug === selChapter && stepSlug === selStep) {
+        setDocTakedownReason(null);
+        setDocTakedownBy(null);
+      }
+      await refreshOverview();
+    } catch (err) {
+      toast.error(err);
     }
   };
 
@@ -1049,13 +1352,107 @@ export function StudioPage({
       setUsersList((prev) =>
         prev.map((u) => (u.id === updated.id ? updated : u)),
       );
-      setRoleFeedback(
+      toast.success(
         s.roleUpdatedFeedback(updated.username, updated.role.toUpperCase()),
       );
     } catch (err) {
-      setRoleFeedback(
-        s.roleUpdateFailedFeedback(err instanceof Error ? err.message : 'Unknown error'),
+      toast.error(err);
+    }
+  };
+
+  const handleCreateUser = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newUsername.trim() || !newUserPassword || creatingUser) return;
+    setCreatingUser(true);
+    try {
+      const created = await api.adminCreateUser({
+        username: newUsername.trim(),
+        display_name: newDisplayName.trim() || newUsername.trim(),
+        email: newEmail.trim(),
+        role: newUserRole,
+        password: newUserPassword,
+      });
+      setUsersList((prev) => [created, ...prev]);
+      setCreateUserOpen(false);
+      setNewUsername('');
+      setNewDisplayName('');
+      setNewEmail('');
+      setNewUserRole('author');
+      setNewUserPassword('');
+      toast.success(rc3.users.userCreatedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleConfirmBanUser = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!banTarget || submittingBan) return;
+    setSubmittingBan(true);
+    try {
+      const updated = await api.adminSetUserBan(
+        banTarget.id,
+        true,
+        banReasonInput.trim(),
       );
+      setUsersList((prev) =>
+        prev.map((u) => (u.id === updated.id ? updated : u)),
+      );
+      setBanTarget(null);
+      setBanReasonInput('');
+      toast.success(rc3.users.userBannedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setSubmittingBan(false);
+    }
+  };
+
+  const handleUnbanUser = async (target: UserProfileDto) => {
+    try {
+      const updated = await api.adminSetUserBan(target.id, false, '');
+      setUsersList((prev) =>
+        prev.map((u) => (u.id === updated.id ? updated : u)),
+      );
+      toast.success(rc3.users.userUnbannedMsg);
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const handleConfirmResetUserPw = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!resetPwTarget || !resetPwInput || submittingResetPw) return;
+    setSubmittingResetPw(true);
+    try {
+      const updated = await api.adminResetUserPassword(
+        resetPwTarget.id,
+        resetPwInput,
+      );
+      setUsersList((prev) =>
+        prev.map((u) => (u.id === updated.id ? updated : u)),
+      );
+      setResetPwTarget(null);
+      setResetPwInput('');
+      toast.success(rc3.users.userPwResetMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setSubmittingResetPw(false);
+    }
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deleteUserTarget) return;
+    try {
+      await api.adminDeleteUser(deleteUserTarget.id);
+      setUsersList((prev) => prev.filter((u) => u.id !== deleteUserTarget.id));
+      setDeleteUserTarget(null);
+      toast.success(rc3.users.userDeletedMsg);
+    } catch (err) {
+      toast.error(err);
     }
   };
 
@@ -1063,12 +1460,18 @@ export function StudioPage({
   const authorCount = usersList.filter((u) => u.role === 'author').length;
   const readerCount = usersList.filter((u) => u.role === 'reader').length;
 
-  // Dynamic localized mobile stacked-card column labels (`responsive-table` MWG — fixes `--col-4` WP ID bug!)
+  // Dynamic localized mobile stacked-card column labels (`responsive-table`)
   const responsiveTableVars = {
     '--col-2': JSON.stringify(s.colAuthSource),
-    '--col-3': JSON.stringify(s.colRole),
-    '--col-4': JSON.stringify(s.colWpId),
+    '--col-3': JSON.stringify(rc3.users.colStatus),
+    '--col-4': JSON.stringify(s.colRole),
+    '--col-5': JSON.stringify(rc3.users.colActions),
   } as CSSProperties;
+
+  const combinedPreviewAuthor =
+    docAuthors.length > 0
+      ? docAuthors.map((a) => a.display_name).join(' · ')
+      : user?.display_name || siteSettings.default_author_name;
 
   return (
     <div
@@ -1079,32 +1482,55 @@ export function StudioPage({
       {/* ZONE 1 (上分區): Minimal Single-Row Studio Topbar                 */}
       {/* ================================================================= */}
       <header className="studio-topbar">
-        {/* Left: Brand Logo FIRST, then Sidebar Toggle (zero redundant breadcrumb) */}
+        {/* Left: Mobile Drawer Trigger FIRST (< 1024px, prevents 375px occlusion P0 #1) + Brand Logo + Desktop Collapse */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          {/* Mobile Drawer Trigger (< 1024px) */}
+          <button
+            type="button"
+            aria-label={s.openNavAria}
+            aria-expanded={mobileDrawerOpen}
+            aria-controls="studio-sidebar-drawer"
+            onClick={() => setMobileDrawerOpen(true)}
+            className="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
+          >
+            <IconMenu className="w-4 h-4" />
+          </button>
+
           <Link
             to={`/${locale}`}
             title={s.backHomeTitle}
-            className="inline-flex items-center gap-2 no-underline text-ink-primary shrink-0"
+            className="inline-flex items-center gap-2 no-underline text-ink-primary min-w-0 shrink-0"
           >
             <span
               aria-hidden="true"
-              className="w-7 h-7 rounded-lg flex items-center justify-center border border-border-ink bg-surface-raised shrink-0"
+              className="w-7 h-7 rounded-lg flex items-center justify-center border border-border-ink bg-surface-raised shrink-0 overflow-hidden"
             >
-              <svg
-                className="w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--accent-ice-ink)"
-                strokeWidth="2.1"
-                strokeLinecap="round"
-              >
-                <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07" />
-                <circle cx="12" cy="12" r="2.2" fill="var(--link-ink)" stroke="none" />
-              </svg>
+              {siteSettings.logo_url && !logoFailed ? (
+                <img
+                  src={siteSettings.logo_url}
+                  alt=""
+                  onError={() => setLogoFailed(true)}
+                  className="w-full h-full object-contain p-0.5"
+                />
+              ) : (
+                <svg
+                  className="w-4 h-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="var(--accent-ice-ink)"
+                  strokeWidth="2.1"
+                  strokeLinecap="round"
+                >
+                  <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07" />
+                  <circle cx="12" cy="12" r="2.2" fill="var(--link-ink)" stroke="none" />
+                </svg>
+              )}
             </span>
-            <span className="text-sm font-semibold tracking-tight studio-ellipsis max-w-36">
-              {siteSettings.site_name}
-            </span>
+            <SafeHtml
+              as="span"
+              html={siteSettings.site_name}
+              className="hidden sm:inline text-sm font-semibold tracking-tight studio-ellipsis max-w-36"
+            />
           </Link>
 
           {/* Desktop Sidebar Collapse Toggle (>= 1024px) */}
@@ -1117,32 +1543,10 @@ export function StudioPage({
           >
             <IconSidebarToggle className="w-4 h-4" />
           </button>
-
-          {/* Mobile Drawer Trigger (< 1024px) */}
-          <button
-            type="button"
-            aria-label={s.openNavAria}
-            aria-expanded={mobileDrawerOpen}
-            aria-controls="studio-sidebar-drawer"
-            onClick={() => setMobileDrawerOpen(true)}
-            className="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
-          >
-            <IconMenu className="w-4 h-4" />
-          </button>
         </div>
 
-        {/* Right: Save Toast + Search + Dropdown Locale + Theme + Dropdown Account */}
+        {/* Right: Search + Dropdown Locale + Theme + Dropdown Account */}
         <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 shrink-0">
-          {saveBanner && (
-            <div
-              aria-live="polite"
-              className="hidden xl:block text-xs font-mono px-2.5 py-1 rounded-lg bg-surface-raised border border-border-subtle text-ink-secondary max-w-72 studio-ellipsis"
-              title={saveBanner}
-            >
-              {saveBanner}
-            </div>
-          )}
-
           <button
             type="button"
             onClick={onOpenSearch}
@@ -1240,15 +1644,12 @@ export function StudioPage({
             triggerClassName="min-h-8 ps-1.5 pe-2 py-1 rounded-full bg-surface-raised border border-border-subtle hover:border-border-ink text-xs"
             triggerLabel={
               <>
-                <span
-                  aria-hidden="true"
-                  className="w-5 h-5 bg-action-bg text-action-fg font-mono font-semibold inline-flex items-center justify-center text-xs shrink-0"
-                  style={{
-                    clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)',
-                  }}
-                >
-                  {user.display_name.slice(0, 1).toUpperCase()}
-                </span>
+                <UserAvatar
+                  name={user.display_name}
+                  avatarUrl={user.avatar_url}
+                  sizeClass="w-5 h-5"
+                  textClass="text-xs"
+                />
                 <span className="hidden sm:inline-block font-semibold text-ink-primary max-w-20 studio-ellipsis">
                   {user.display_name}
                 </span>
@@ -1276,6 +1677,17 @@ export function StudioPage({
                     @{user.username}
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    close(e.detail !== 0);
+                    onOpenProfile();
+                  }}
+                >
+                  <IconSettings className="w-3.5 h-3.5 text-ink-muted" />
+                  <span>{rc3.profile.menuItem}</span>
+                </button>
 
                 <Link
                   to={`/${locale}`}
@@ -1349,18 +1761,8 @@ export function StudioPage({
       {/* ================================================================= */}
       {/* ZONE 3 (右分區): Fluid Independent Scrollable Main Workspace      */}
       {/* ================================================================= */}
-      <main className="studio-main studio-scroll-pane">
+      <main ref={mainScrollRef} className="studio-main studio-scroll-pane">
         <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16 space-y-6">
-          {/* Mobile / Tablet Live Save Banner (visible below xl where topbar hides it) */}
-          {saveBanner && (
-            <div
-              aria-live="polite"
-              className="xl:hidden text-xs font-mono px-3.5 py-2 rounded-xl studio-panel text-ink-primary"
-            >
-              {saveBanner}
-            </div>
-          )}
-
           {/* --------------------------------------------------------------- */}
           {/* SECTION A: Dashboard Overview                                   */}
           {/* --------------------------------------------------------------- */}
@@ -1383,230 +1785,428 @@ export function StudioPage({
           )}
 
           {/* --------------------------------------------------------------- */}
-          {/* SECTION B: Split-Pane Hand-Drawn Tutorial Editor                */}
+          {/* SECTION B: 3-Zone WordPress / Canva-Style Article Editor        */}
+          {/* Clean separation: Top Action & Tool Bar | Canvas | Info Panel   */}
           {/* --------------------------------------------------------------- */}
           {activeSection === 'editor' && (
-            <div key="studio-sec-editor" className="ui-panel-enter space-y-5">
+            <div
+              key="studio-sec-editor"
+              className="ui-panel-enter studio-editor-workspace"
+            >
               <h1 className="sr-only">{s.editorHeadingSr}</h1>
 
-              {/* Calm Single-Row Editor Command Bar (article switching lives in the unified sidebar tree) */}
-              <div className="studio-panel px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-                {/* Left: Compact Translation Locale Dropdown + Context Path + Live Auto-Save Status */}
-                <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-                  <PopupMenu
-                    align="start"
-                    triggerAriaLabel={s.editLocaleLabel(docCanonicalRev)}
-                    triggerClassName="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink"
-                    triggerLabel={
-                      <>
-                        <IconGlobe className="w-3.5 h-3.5 text-ink-muted" />
-                        <span>
-                          {LOCALES.find((l) => l.code === editLocale)?.short ??
-                            editLocale}
-                        </span>
-                        <span className="font-mono text-ink-muted tabular-nums">
-                          v{docSyncedRev}
-                        </span>
-                      </>
-                    }
-                  >
-                    {({ close }) => (
-                      <div
-                        role="group"
-                        aria-label={s.editLocaleLabel(docCanonicalRev)}
-                      >
-                        {LOCALES.map((loc) => {
-                          const active = loc.code === editLocale;
-                          const tr = currentStepObj?.translations.find(
-                            (item) => item.locale === loc.code,
-                          );
-                          const statusHint = !tr
-                            ? s.addLocaleAction
-                            : tr.status === 'draft'
-                              ? s.draftParen
-                              : tr.synced_revision <
-                                  (currentStepObj?.canonical_revision ?? 1)
-                                ? `⚠ v${tr.synced_revision}`
-                                : `v${tr.synced_revision}`;
-                          return (
-                            <button
-                              key={loc.code}
-                              type="button"
-                              role="menuitemradio"
-                              aria-checked={active}
-                              onClick={(e) => {
-                                setEditLocale(loc.code);
-                                close(e.detail !== 0);
-                              }}
-                            >
-                              <span className="flex-1">{loc.label}</span>
-                              <span className="ink-menu-hint">{statusHint}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </PopupMenu>
-
-                  {currentTrackObj && currentChapterObj && (
-                    <span
-                      className="hidden md:inline-block text-xs text-ink-muted studio-ellipsis max-w-64"
-                      title={`${currentTrackObj.title} / ${currentChapterObj.title}`}
+              {/* ZONE 1A: Top Editor Workbench Bar (Locale + Mode Switch + View Toggles + Publish + Save) */}
+              <div className="studio-panel overflow-hidden">
+                <div className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+                  {/* Left: Locale Dropdown + Visual/Source Mode Switcher + Live Auto-Save Status */}
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <PopupMenu
+                      align="start"
+                      triggerAriaLabel={s.editLocaleLabel(docCanonicalRev)}
+                      triggerClassName="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink"
+                      triggerLabel={
+                        <>
+                          <IconGlobe className="w-3.5 h-3.5 text-ink-muted" />
+                          <span>
+                            {LOCALES.find((l) => l.code === editLocale)?.short ??
+                              editLocale}
+                          </span>
+                          <span className="font-mono text-ink-muted tabular-nums">
+                            v{docVersion}
+                          </span>
+                        </>
+                      }
                     >
-                      {currentTrackObj.title} / {currentChapterObj.title}
-                    </span>
-                  )}
+                      {({ close }) => (
+                        <div
+                          role="group"
+                          aria-label={s.editLocaleLabel(docCanonicalRev)}
+                        >
+                          {LOCALES.map((loc) => {
+                            const active = loc.code === editLocale;
+                            const tr = currentStepObj?.translations.find(
+                              (item) => item.locale === loc.code,
+                            );
+                            const statusHint = !tr
+                              ? s.addLocaleAction
+                              : tr.status === 'draft'
+                                ? s.draftParen
+                                : tr.synced_revision <
+                                    (currentStepObj?.canonical_revision ?? 1)
+                                  ? `⚠ v${tr.synced_revision}`
+                                  : `v${tr.synced_revision}`;
+                            return (
+                              <button
+                                key={loc.code}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={active}
+                                onClick={(e) => {
+                                  setEditLocale(loc.code);
+                                  close(e.detail !== 0);
+                                }}
+                              >
+                                <span className="flex-1">{loc.label}</span>
+                                <span className="ink-menu-hint">{statusHint}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </PopupMenu>
 
-                  {/* Unified Draft Auto-Save Status Indicator */}
-                  {(() => {
-                    const statusText = !siteSettings.enable_draft_autosave
-                      ? s.autosaveStatusOff
-                      : autosaveStatus.kind === 'saving'
-                        ? s.autosavingNow
-                        : autosaveStatus.kind === 'saved_server'
-                          ? s.autosavedServer(autosaveStatus.time)
-                          : autosaveStatus.kind === 'saved_local'
-                            ? s.autosavedLocal(autosaveStatus.time)
-                            : autosaveStatus.kind === 'error'
-                              ? s.autosaveFailed
-                              : s.autosaveStatusOn(
-                                  siteSettings.draft_autosave_interval_secs,
-                                );
-                    const statusTone = !siteSettings.enable_draft_autosave
-                      ? 'text-ink-muted'
-                      : autosaveStatus.kind === 'error'
-                        ? 'text-accent-danger'
-                        : autosaveStatus.kind === 'saved_server' ||
-                            autosaveStatus.kind === 'saved_local'
-                          ? 'text-accent-success'
-                          : 'text-ink-muted';
+                    {/* Segmented Visual / Source Code Editor Switcher (WordPress / Canva style) */}
+                    <div
+                      role="tablist"
+                      aria-label={s.visual.modeAria}
+                      onKeyDown={handleEditorTabKeyDown}
+                      className="inline-flex items-center p-0.5 rounded-xl bg-surface-raised border border-border-subtle"
+                      {...({ focusgroup: 'tablist nomemory' } as Record<string, string>)}
+                    >
+                      <button
+                        ref={visualTabRef}
+                        id={visualTabId}
+                        type="button"
+                        role="tab"
+                        aria-selected={editorMode === 'visual'}
+                        tabIndex={editorMode === 'visual' ? 0 : -1}
+                        onClick={() => handleSwitchEditorMode('visual')}
+                        className={`min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                          editorMode === 'visual'
+                            ? 'bg-surface-sheet text-ink-primary border border-border-subtle'
+                            : 'text-ink-muted hover:text-ink-primary border border-transparent'
+                        }`}
+                        {...(editorMode === 'visual'
+                          ? ({ focusgroupstart: '' } as Record<string, string>)
+                          : {})}
+                      >
+                        <IconLayers className="w-3.5 h-3.5 text-ink-muted" />
+                        <span>{rc3.studio.editorVisualMode}</span>
+                      </button>
+                      <button
+                        ref={markdownTabRef}
+                        id={markdownTabId}
+                        type="button"
+                        role="tab"
+                        aria-selected={editorMode === 'markdown'}
+                        tabIndex={editorMode === 'markdown' ? 0 : -1}
+                        onClick={() => handleSwitchEditorMode('markdown')}
+                        className={`min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                          editorMode === 'markdown'
+                            ? 'bg-surface-sheet text-ink-primary border border-border-subtle'
+                            : 'text-ink-muted hover:text-ink-primary border border-transparent'
+                        }`}
+                        {...(editorMode === 'markdown'
+                          ? ({ focusgroupstart: '' } as Record<string, string>)
+                          : {})}
+                      >
+                        <IconFileCode className="w-3.5 h-3.5 text-ink-muted" />
+                        <span>{rc3.studio.editorSourceMode}</span>
+                      </button>
+                    </div>
 
-                    return isAdmin ? (
+                    {/* Unified Draft Auto-Save Status Indicator */}
+                    {(() => {
+                      const statusText = !siteSettings.enable_draft_autosave
+                        ? s.autosaveStatusOff
+                        : autosaveStatus.kind === 'saving'
+                          ? s.autosavingNow
+                          : autosaveStatus.kind === 'saved_server'
+                            ? s.autosavedServer(autosaveStatus.time)
+                            : autosaveStatus.kind === 'saved_local'
+                              ? s.autosavedLocal(autosaveStatus.time)
+                              : autosaveStatus.kind === 'error'
+                                ? s.autosaveFailed
+                                : s.autosaveStatusOn(
+                                    siteSettings.draft_autosave_interval_secs,
+                                  );
+                      const statusTone = !siteSettings.enable_draft_autosave
+                        ? 'text-ink-muted'
+                        : autosaveStatus.kind === 'error'
+                          ? 'text-accent-danger'
+                          : autosaveStatus.kind === 'saved_server' ||
+                              autosaveStatus.kind === 'saved_local'
+                            ? 'text-accent-success'
+                            : 'text-ink-muted';
+
+                      return isAdmin ? (
+                        <button
+                          type="button"
+                          role="status"
+                          aria-live="polite"
+                          title={s.configureAutosaveTitle}
+                          onClick={() => setActiveSection('settings')}
+                          className={`hidden md:inline-flex min-h-7 px-2 py-0.5 rounded-lg font-mono text-xs tabular-nums hover:bg-surface-raised hover:text-ink-primary transition-colors cursor-pointer ${statusTone}`}
+                        >
+                          {statusText}
+                        </button>
+                      ) : (
+                        <span
+                          role="status"
+                          aria-live="polite"
+                          className={`hidden md:inline font-mono text-xs tabular-nums ${statusTone}`}
+                        >
+                          {statusText}
+                        </span>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Right: Preview Split Toggle + Article Info Panel Toggle + Publish Switch + Overflow + ONE Primary Save */}
+                  <div className="flex flex-wrap items-center gap-2 ms-auto">
+                    <button
+                      type="button"
+                      aria-pressed={previewSplitOpen}
+                      onClick={handleTogglePreviewSplit}
+                      className={`min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        previewSplitOpen
+                          ? 'bg-action-subtle border-action-bg text-ink-primary'
+                          : 'bg-surface-raised border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary'
+                      }`}
+                    >
+                      <IconBook className="w-3.5 h-3.5 text-ink-muted" />
+                      <span>{rc3.studio.editorPreviewToggle}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-pressed={inspectorOpen}
+                      onClick={handleToggleInspector}
+                      className={`min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        inspectorOpen
+                          ? 'bg-action-subtle border-action-bg text-ink-primary'
+                          : 'bg-surface-raised border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary'
+                      }`}
+                    >
+                      <IconSidebarToggle className="w-3.5 h-3.5 text-ink-muted" />
+                      <span>{rc3.studio.editorInspectorToggle}</span>
+                    </button>
+
+                    <label className="inline-flex items-center gap-2 min-h-8 px-2.5 py-1 rounded-xl bg-surface-raised border border-border-subtle cursor-pointer text-xs text-ink-secondary hover:text-ink-primary transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={docStatus === 'published'}
+                        onChange={(e) =>
+                          setDocStatus(e.target.checked ? 'published' : 'draft')
+                        }
+                        {...({ switch: '' } as Record<string, unknown>)}
+                      />
+                      <span>{s.publishCheckbox}</span>
+                    </label>
+
+                    {/* Overflow Dropdown Menu folding Bump Rev, Preview, New Article, Takedown & Delete */}
+                    <PopupMenu
+                      align="end"
+                      showChevron={false}
+                      triggerAriaLabel={s.editorHeadingSr}
+                      triggerClassName="w-8 h-8 rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary"
+                      triggerLabel={<IconMoreHorizontal className="w-4 h-4" />}
+                    >
+                      {({ close }) => (
+                        <>
+                          <button
+                            type="button"
+                            role="menuitemcheckbox"
+                            aria-checked={bumpCanonical}
+                            onClick={(e) => {
+                              setBumpCanonical((v) => !v);
+                              if (e.detail !== 0) {
+                                window.setTimeout(() => close(true), 180);
+                              }
+                            }}
+                          >
+                            <span className="flex-1">
+                              {s.bumpCanonicalCheckbox(
+                                docCanonicalRev,
+                                docCanonicalRev + 1,
+                              )}
+                            </span>
+                          </button>
+
+                          <hr />
+
+                          <Link
+                            to={`/${editLocale}/tracks/${selTrack}/${selChapter}/${selStep}`}
+                            onClick={() => close(true)}
+                          >
+                            <IconExternalLink className="w-3.5 h-3.5 text-ink-muted" />
+                            <span>{s.openReaderLink.replace(/\s*↗$/, '')}</span>
+                          </Link>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              close(e.detail !== 0);
+                              setCreatingNewStep(true);
+                            }}
+                          >
+                            <IconPlus className="w-3.5 h-3.5 text-ink-muted" />
+                            <span>{s.newStepToggle.replace(/^[+＋]\s*/, '')}</span>
+                          </button>
+
+                          {isAdmin && docExists && (
+                            <>
+                              <hr />
+                              {docTakedownReason ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    close(e.detail !== 0);
+                                    void handleRestoreStep(selTrack, selChapter, selStep);
+                                  }}
+                                >
+                                  <IconShield className="w-3.5 h-3.5 text-ink-muted" />
+                                  <span>{rc3.studio.restoreBtn}</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  data-tone="danger"
+                                  onClick={(e) => {
+                                    close(e.detail !== 0);
+                                    setTakedownReasonInput('');
+                                    setTakedownTarget({
+                                      trackSlug: selTrack,
+                                      chapterSlug: selChapter,
+                                      stepSlug: selStep,
+                                      title: stripHtmlTags(docTitle) || selStep,
+                                    });
+                                  }}
+                                >
+                                  <IconShield className="w-3.5 h-3.5" />
+                                  <span>{rc3.studio.takedownBtn}</span>
+                                </button>
+                              )}
+                            </>
+                          )}
+
+                          {docExists && (
+                            <>
+                              <hr />
+                              <button
+                                type="button"
+                                data-tone="danger"
+                                onClick={(e) => {
+                                  close(e.detail !== 0);
+                                  setDeleteModalOpen(true);
+                                }}
+                              >
+                                <IconTrash className="w-3.5 h-3.5" />
+                                <span>{s.deleteStepBtn}</span>
+                              </button>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </PopupMenu>
+
+                    {/* ONE Primary Action on the Editor view (§2.8) + unsaved dirty dot */}
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void handleSaveStep()}
+                      title="Ctrl+S / ⌘S"
+                      className="min-h-8 px-4 py-1.5 rounded-xl text-xs sm:text-sm font-semibold ink-btn-primary inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                    >
+                      {isEditorDirty && !saving && (
+                        <span
+                          aria-hidden="true"
+                          className="w-2 h-2 rounded-full ui-badge-pop shrink-0"
+                          style={{ backgroundColor: 'var(--marker-h3)' }}
+                        />
+                      )}
+                      <span>{saving ? s.savingBtn : s.saveBtn(editLocale)}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* ZONE 1B: Dedicated Separated Contextual Editing Tool Bar (`工具栏`) */}
+                <div
+                  role="toolbar"
+                  aria-label={rc3.studio.editorToolbarAria}
+                  className="px-4 py-2.5 border-t border-border-subtle bg-surface-raised/60"
+                >
+                  {editorMode === 'visual' ? (
+                    <VisualBlockToolStrip
+                      locale={locale}
+                      blockCount={visualBlocks.length}
+                      onInsertBlock={handleAppendVisualBlock}
+                      onInsertSectionTask={handleAppendSectionTask}
+                    />
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <input
+                        ref={mdImageInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                        onChange={(e) => void handleUploadMdImage(e)}
+                        className="sr-only"
+                      />
                       <button
                         type="button"
-                        role="status"
-                        aria-live="polite"
-                        title={s.configureAutosaveTitle}
-                        onClick={() => setActiveSection('settings')}
-                        className={`min-h-7 px-2 py-0.5 rounded-lg font-mono text-xs tabular-nums hover:bg-surface-raised hover:text-ink-primary transition-colors cursor-pointer ${statusTone}`}
+                        disabled={uploadingMdImage}
+                        onClick={() => mdImageInputRef.current?.click()}
+                        className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
                       >
-                        {statusText}
+                        <IconImage className="w-3.5 h-3.5 text-ink-muted" />
+                        <span>{s.snippets.image}</span>
                       </button>
-                    ) : (
-                      <span
-                        role="status"
-                        aria-live="polite"
-                        className={`font-mono text-xs tabular-nums ${statusTone}`}
-                      >
-                        {statusText}
-                      </span>
-                    );
-                  })()}
-                </div>
-
-                {/* Right: Publish Switch + More Actions Dropdown (`⋯`) + Primary Save CTA */}
-                <div className="flex flex-wrap items-center gap-2.5 ms-auto">
-                  <label className="inline-flex items-center gap-2 min-h-8 px-2.5 py-1 rounded-xl bg-surface-raised border border-border-subtle cursor-pointer text-xs text-ink-secondary hover:text-ink-primary transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={docStatus === 'published'}
-                      onChange={(e) =>
-                        setDocStatus(e.target.checked ? 'published' : 'draft')
-                      }
-                      {...({ switch: '' } as Record<string, unknown>)}
-                    />
-                    <span>{s.publishCheckbox}</span>
-                  </label>
-
-                  {/* Overflow Dropdown Menu folding Bump Rev, Preview, New Article, and Delete */}
-                  <PopupMenu
-                    align="end"
-                    showChevron={false}
-                    triggerAriaLabel={s.editorHeadingSr}
-                    triggerClassName="w-9 h-9 rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary"
-                    triggerLabel={<IconMoreHorizontal className="w-4 h-4" />}
-                  >
-                    {({ close }) => (
-                      <>
+                      {stationerySnippets.map((item) => (
                         <button
+                          key={item.id}
                           type="button"
-                          role="menuitemcheckbox"
-                          aria-checked={bumpCanonical}
-                          onClick={(e) => {
-                            setBumpCanonical((v) => !v);
-                            if (e.detail !== 0) {
-                              window.setTimeout(() => close(true), 180);
-                            }
-                          }}
+                          onClick={() => insertSnippetAtCursor(item.snippet)}
+                          className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-mono bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink cursor-pointer transition-colors"
                         >
-                          <span className="flex-1">
-                            {s.bumpCanonicalCheckbox(
-                              docCanonicalRev,
-                              docCanonicalRev + 1,
-                            )}
-                          </span>
+                          {item.label}
                         </button>
-
-                        <hr />
-
-                        <Link
-                          to={`/${editLocale}/tracks/${selTrack}/${selChapter}/${selStep}`}
-                          onClick={() => close(true)}
-                        >
-                          <IconExternalLink className="w-3.5 h-3.5 text-ink-muted" />
-                          <span>{s.openReaderLink.replace(/\s*↗$/, '')}</span>
-                        </Link>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            close(e.detail !== 0);
-                            setCreatingNewStep(true);
-                          }}
-                        >
-                          <IconPlus className="w-3.5 h-3.5 text-ink-muted" />
-                          <span>{s.newStepToggle.replace(/^[+＋]\s*/, '')}</span>
-                        </button>
-
-                        {docExists && (
-                          <>
-                            <hr />
-                            <button
-                              type="button"
-                              data-tone="danger"
-                              onClick={(e) => {
-                                close(e.detail !== 0);
-                                setDeleteModalOpen(true);
-                              }}
-                            >
-                              <IconTrash className="w-3.5 h-3.5" />
-                              <span>{s.deleteStepBtn}</span>
-                            </button>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </PopupMenu>
-
-                  {/* ONE Primary Action on the Editor view (§2.8) + unsaved dirty dot */}
-                  <button
-                    type="button"
-                    disabled={saving}
-                    onClick={() => void handleSaveStep()}
-                    title="Ctrl+S / ⌘S"
-                    className="min-h-9 px-5 py-2 rounded-xl text-sm font-semibold ink-btn-primary inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
-                  >
-                    {isEditorDirty && !saving && (
-                      <span
-                        aria-hidden="true"
-                        className="w-2 h-2 rounded-full ui-badge-pop shrink-0"
-                        style={{ backgroundColor: 'var(--marker-h3)' }}
-                      />
-                    )}
-                    <span>{saving ? s.savingBtn : s.saveBtn(editLocale)}</span>
-                  </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* Admin Takedown Notice Banner */}
+              {docTakedownReason && (
+                <div
+                  role="alert"
+                  className="ui-panel-enter studio-panel px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+                  style={{
+                    backgroundColor: 'var(--alert-danger-bg)',
+                    borderColor: 'var(--alert-danger-border)',
+                    borderInlineStartWidth: '4px',
+                  }}
+                >
+                  <div className="space-y-0.5 min-w-0">
+                    <div
+                      className="text-xs font-semibold"
+                      style={{ color: 'var(--alert-danger-title)' }}
+                    >
+                      {rc3.studio.takedownBannerTitle}
+                    </div>
+                    <div
+                      className="text-xs"
+                      style={{ color: 'var(--alert-danger-body)' }}
+                    >
+                      {rc3.studio.takedownBannerMeta(
+                        docTakedownBy ?? '',
+                        docTakedownReason,
+                      )}
+                    </div>
+                  </div>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleRestoreStep(selTrack, selChapter, selStep)
+                      }
+                      className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer shrink-0"
+                    >
+                      {rc3.studio.restoreBtn}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Local Auto-Saved Draft Recovery Strip (only shown when a newer local draft exists) */}
               {siteSettings.enable_draft_autosave && recoverableDraft && (
@@ -1657,317 +2257,227 @@ export function StudioPage({
                 </div>
               )}
 
-              {/* Split-Pane Editor & Real-Time Hand-Drawn Preview */}
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
-                {/* Left Pane: Frontmatter + Stationery Snippets + Markdown Source */}
-                <div className="studio-panel p-5 space-y-4 min-w-0">
-                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                    <div className="sm:col-span-8">
-                      <label
-                        htmlFor="doc-title-input"
-                        className="block mb-1.5 text-xs font-semibold text-ink-secondary"
+              {/* ZONE 2 (编辑区) & ZONE 3 (信息栏): Separated Writing Canvas + Optional Preview + Collapsible Inspector */}
+              <div className="studio-editor-body">
+                {/* ZONE 2: Dedicated Writing & Design Canvas (`编辑区`) + Optional Live Split Preview */}
+                <div className="flex-1 min-w-0">
+                  <div
+                    className={
+                      previewSplitOpen
+                        ? 'grid grid-cols-1 xl:grid-cols-2 gap-6 items-start'
+                        : 'w-full'
+                    }
+                  >
+                    {/* Active Editing Canvas (`可视化视图` or `源代码`) */}
+                    <div className="min-w-0">
+                      {/* Panel 1: Visual Block Canvas (`可视化视图编辑`) */}
+                      <div
+                        role="tabpanel"
+                        aria-labelledby={visualTabId}
+                        hidden={editorMode !== 'visual'}
                       >
-                        {s.titleInputLabel}
-                      </label>
-                      <input
-                        id="doc-title-input"
-                        type="text"
-                        value={docTitle}
-                        onChange={(e) => setDocTitle(e.target.value)}
-                        placeholder={s.titleInputPlaceholder}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-sm ink-input-inset"
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label
-                        htmlFor="doc-stepnum-input"
-                        className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                      >
-                        {s.stepNumLabel}
-                      </label>
-                      <input
-                        id="doc-stepnum-input"
-                        type="number"
-                        min={1}
-                        value={docStepNum}
-                        onChange={(e) =>
-                          setDocStepNum(Number(e.target.value) || 1)
-                        }
-                        className="w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm tabular-nums"
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label
-                        htmlFor="doc-mins-input"
-                        className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                      >
-                        {s.minutesLabel}
-                      </label>
-                      <input
-                        id="doc-mins-input"
-                        type="number"
-                        min={1}
-                        value={docMinutes}
-                        onChange={(e) =>
-                          setDocMinutes(Number(e.target.value) || 5)
-                        }
-                        className="w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm tabular-nums"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label
-                      htmlFor="doc-summary-input"
-                      className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                    >
-                      {s.summaryInputLabel}
-                    </label>
-                    <input
-                      id="doc-summary-input"
-                      type="text"
-                      value={docSummary}
-                      onChange={(e) => setDocSummary(e.target.value)}
-                      placeholder={s.summaryInputPlaceholder}
-                      className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm ink-input-inset"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                    <div className="sm:col-span-7">
-                      <label
-                        htmlFor="doc-license-select"
-                        className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                      >
-                        {s.licenseSelectLabel}
-                      </label>
-                      <select
-                        id="doc-license-select"
-                        name="license"
-                        value={docLicense}
-                        onChange={(e) =>
-                          setDocLicense(normalizeLicenseId(e.target.value))
-                        }
-                        className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs sm:text-sm"
-                      >
-                        <option value="">
-                          {s.licenseFollowSite(
-                            copy.licenseNames[
-                              normalizeLicenseId(siteSettings.default_license) ||
-                                'cc-by-nc-sa-4.0'
-                            ],
-                          )}
-                        </option>
-                        {ALL_LICENSE_OPTIONS.map((opt) => (
-                          <option key={opt.id} value={opt.id}>
-                            {copy.licenseNames[opt.id]}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="sm:col-span-5">
-                      <label
-                        htmlFor="doc-tags-input"
-                        className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                      >
-                        {s.tagsInputLabel}
-                      </label>
-                      <input
-                        id="doc-tags-input"
-                        type="text"
-                        value={docTagsText}
-                        onChange={(e) => setDocTagsText(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Accessible Editor Mode Tablist (`modern-web-guidance/tabs`): Visual Editor primary, Markdown fallback */}
-                  <div className="space-y-4">
-                    <div
-                      role="tablist"
-                      aria-label={s.visual.modeAria}
-                      onKeyDown={handleEditorTabKeyDown}
-                      className="editor-mode-tablist"
-                      {...({ focusgroup: 'tablist nomemory' } as Record<string, string>)}
-                    >
-                      <button
-                        ref={visualTabRef}
-                        id={visualTabId}
-                        type="button"
-                        role="tab"
-                        aria-selected={editorMode === 'visual'}
-                        tabIndex={editorMode === 'visual' ? 0 : -1}
-                        onClick={() => handleSwitchEditorMode('visual')}
-                        className="editor-mode-tab"
-                        {...(editorMode === 'visual'
-                          ? ({ focusgroupstart: '' } as Record<string, string>)
-                          : {})}
-                      >
-                        <IconLayers className="w-3.5 h-3.5" />
-                        <span>{s.visual.visualTab}</span>
-                      </button>
-                      <button
-                        ref={markdownTabRef}
-                        id={markdownTabId}
-                        type="button"
-                        role="tab"
-                        aria-selected={editorMode === 'markdown'}
-                        tabIndex={editorMode === 'markdown' ? 0 : -1}
-                        onClick={() => handleSwitchEditorMode('markdown')}
-                        className="editor-mode-tab"
-                        {...(editorMode === 'markdown'
-                          ? ({ focusgroupstart: '' } as Record<string, string>)
-                          : {})}
-                      >
-                        <IconFileCode className="w-3.5 h-3.5" />
-                        <span>{s.visual.markdownTab}</span>
-                      </button>
-                    </div>
-
-                    {/* Panel 1: Primary Visual Block Editor (zero padding/border/bg on role="tabpanel" element itself) */}
-                    <div
-                      role="tabpanel"
-                      aria-labelledby={visualTabId}
-                      hidden={editorMode !== 'visual'}
-                    >
-                      <div className="editor-tabpanel-body">
-                        <VisualBlockEditor
-                          locale={locale}
-                          blocks={visualBlocks}
-                          onChange={handleVisualBlocksChange}
-                        />
-                      </div>
-                    </div>
-
-                    {/* Panel 2: Markdown Source Fallback (zero padding/border/bg on role="tabpanel" element itself) */}
-                    <div
-                      role="tabpanel"
-                      aria-labelledby={markdownTabId}
-                      hidden={editorMode !== 'markdown'}
-                    >
-                      <div className="editor-tabpanel-body space-y-4">
-                        <div className="space-y-1.5">
-                          <div className="text-xs font-semibold text-ink-secondary">
-                            {s.snippetsHeading}
+                        <div className="editor-tabpanel-body studio-panel p-5 sm:p-7 space-y-6">
+                          {/* WordPress / Canva-style direct inline Canvas Document Title */}
+                          <div className="pb-4 border-b border-dashed border-border-subtle space-y-1.5">
+                            <input
+                              type="text"
+                              aria-label={s.titleInputLabel}
+                              value={docTitle}
+                              onChange={(e) => setDocTitle(e.target.value)}
+                              placeholder={rc3.studio.editorCanvasTitlePlaceholder}
+                              style={{ fontFamily: 'var(--font-hand)' }}
+                              className="w-full bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-tight tracking-tight"
+                            />
+                            <svg
+                              aria-hidden="true"
+                              className="w-52 max-w-full h-2.5 block pointer-events-none"
+                              viewBox="0 0 220 10"
+                              fill="none"
+                            >
+                              <path
+                                d="M3 6.5 C 65 2.5, 138 9, 216 4.2"
+                                stroke="var(--marker-h1)"
+                                strokeWidth="3.4"
+                                strokeLinecap="round"
+                              />
+                            </svg>
                           </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {stationerySnippets.map((item) => (
-                              <button
-                                key={item.id}
-                                type="button"
-                                onClick={() => insertSnippetAtCursor(item.snippet)}
-                                className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-mono bg-surface-raised hover:bg-action-subtle text-ink-primary border border-border-subtle cursor-pointer transition-colors"
-                              >
-                                {item.label}
-                              </button>
-                            ))}
-                          </div>
+
+                          <VisualBlockEditor
+                            locale={locale}
+                            blocks={visualBlocks}
+                            onChange={handleVisualBlocksChange}
+                            hideTopInserter
+                          />
                         </div>
+                      </div>
 
-                        <div>
-                          <label
-                            htmlFor="doc-markdown-body"
-                            className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-                          >
-                            {s.markdownLabel}
-                          </label>
+                      {/* Panel 2: Dedicated Markdown Source Code Canvas (`源代码编辑`) */}
+                      <div
+                        role="tabpanel"
+                        aria-labelledby={markdownTabId}
+                        hidden={editorMode !== 'markdown'}
+                      >
+                        <div className="editor-tabpanel-body studio-panel p-5 space-y-3">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <label
+                              htmlFor="doc-markdown-body"
+                              className="text-xs font-semibold text-ink-secondary"
+                            >
+                              {s.markdownLabel}
+                            </label>
+                            <span className="text-xs font-mono text-ink-muted tabular-nums">
+                              {docTitle ? stripHtmlTags(docTitle) : selStep}
+                            </span>
+                          </div>
                           <textarea
                             id="doc-markdown-body"
                             ref={textareaRef}
-                            rows={22}
+                            rows={26}
                             value={docBody}
                             onChange={(e) => setDocBody(e.target.value)}
-                            className="w-full p-3.5 rounded-xl bg-surface-raised text-ink-primary border border-border-ink font-mono text-xs sm:text-sm leading-relaxed ink-input-inset"
+                            spellCheck={false}
+                            className="ink-field-input min-h-[34rem] p-4 font-mono text-xs sm:text-sm leading-relaxed resize-y"
                           />
                         </div>
                       </div>
                     </div>
+
+                    {/* Optional Side-by-Side Compiled Notebook Preview Sheet */}
+                    {previewSplitOpen && (
+                      <div className="notebook-sheet-stack min-w-0 ui-panel-enter">
+                        <div className="notebook-sheet-card p-5 sm:p-7 space-y-4">
+                          <div className="flex items-baseline justify-between gap-2 pb-3 border-b border-dashed border-border-subtle">
+                            <span className="text-xs font-mono uppercase tracking-wider text-accent-ice font-semibold">
+                              {s.livePreviewBadge(editLocale)}
+                            </span>
+                            <span className="text-xs font-mono text-ink-muted tabular-nums">
+                              v{docVersion} · {rc3.studio.autoReadMinutesBadge(docMinutes)} ·{' '}
+                              {docStatus === 'published'
+                                ? rc3.studio.editorStatusPublished
+                                : rc3.studio.editorStatusDraft}
+                            </span>
+                          </div>
+
+                          <div>
+                            <h2
+                              className="text-2xl font-semibold text-ink-primary m-0 leading-tight"
+                              style={{ fontFamily: 'var(--font-hand)' }}
+                            >
+                              {docTitle ? (
+                                <SafeHtml as="span" html={docTitle} />
+                              ) : (
+                                s.untitledPlaceholder
+                              )}
+                            </h2>
+                            <svg
+                              aria-hidden="true"
+                              className="w-52 max-w-full h-2.5 mt-0.5 block"
+                              viewBox="0 0 220 10"
+                              fill="none"
+                            >
+                              <path
+                                d="M3 6.5 C 65 2.5, 138 9, 216 4.2"
+                                stroke="var(--marker-h1)"
+                                strokeWidth="3.6"
+                                strokeLinecap="round"
+                              />
+                            </svg>
+                            {docSummary && (
+                              <p className="mt-2 text-sm text-ink-secondary leading-relaxed m-0">
+                                <SafeHtml as="span" html={docSummary} />
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="pt-2">
+                            {previewBlocks.length === 0 ? (
+                              <NotebookEmptyState
+                                title={s.previewEmptyTitle}
+                                description={s.previewEmptyDesc}
+                              />
+                            ) : (
+                              <NotebookBlockRenderer
+                                blocks={previewBlocks}
+                                copy={copy}
+                                theme={theme}
+                                stepChecks={{
+                                  checkedIds: previewCheckedIds,
+                                  onToggle: (itemId, checked) =>
+                                    setPreviewStepOverrides((prev) => ({
+                                      ...prev,
+                                      [itemId]: checked,
+                                    })),
+                                  onResetIds: (itemIds) =>
+                                    setPreviewStepOverrides((prev) => {
+                                      const next = { ...prev };
+                                      for (const id of itemIds) next[id] = false;
+                                      return next;
+                                    }),
+                                }}
+                              />
+                            )}
+                          </div>
+
+                          <div className="pt-4 border-t border-dashed border-border-subtle">
+                            <CcLicenseCard
+                              locale={editLocale}
+                              copy={UI_COPY[editLocale]}
+                              stepLicense={docLicense}
+                              siteDefaultLicense={siteSettings.default_license}
+                              authorName={combinedPreviewAuthor}
+                              compact
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Right Pane: Real-Time Compiled Notebook Sheet Preview (Unified Renderer) */}
-                <div className="notebook-sheet-stack min-w-0">
-                  <div className="notebook-sheet-card p-5 sm:p-7 space-y-4">
-                    <div className="flex items-baseline justify-between gap-2 pb-3 border-b border-dashed border-border-subtle">
-                      <span className="text-xs font-mono uppercase tracking-wider text-accent-ice font-semibold">
-                        {s.livePreviewBadge(editLocale)}
-                      </span>
-                      <span className="text-xs font-mono text-ink-muted tabular-nums">
-                        v{docSyncedRev} · {docStatus}
-                      </span>
-                    </div>
-
-                    <div>
-                      <h2
-                        className="text-2xl font-semibold text-ink-primary m-0 leading-tight"
-                        style={{ fontFamily: 'var(--font-hand)' }}
-                      >
-                        {docTitle || s.untitledPlaceholder}
-                      </h2>
-                      <svg
-                        aria-hidden="true"
-                        className="w-52 max-w-full h-2.5 mt-0.5 block"
-                        viewBox="0 0 220 10"
-                        fill="none"
-                      >
-                        <path
-                          d="M3 6.5 C 65 2.5, 138 9, 216 4.2"
-                          stroke="var(--marker-h1)"
-                          strokeWidth="3.6"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                      {docSummary && (
-                        <p className="mt-2 text-sm text-ink-secondary leading-relaxed m-0">
-                          {docSummary}
-                        </p>
-                      )}
-                    </div>
-
-                    <div className="pt-2">
-                      {previewBlocks.length === 0 ? (
-                        <NotebookEmptyState
-                          title={s.previewEmptyTitle}
-                          description={s.previewEmptyDesc}
-                        />
-                      ) : (
-                        <NotebookBlockRenderer
-                          blocks={previewBlocks}
-                          copy={copy}
-                          theme={theme}
-                          stepChecks={{
-                            checkedIds: previewCheckedIds,
-                            onToggle: (itemId, checked) =>
-                              setPreviewStepOverrides((prev) => ({
-                                ...prev,
-                                [itemId]: checked,
-                              })),
-                            onResetIds: (itemIds) =>
-                              setPreviewStepOverrides((prev) => {
-                                const next = { ...prev };
-                                for (const id of itemIds) next[id] = false;
-                                return next;
-                              }),
-                          }}
-                        />
-                      )}
-                    </div>
-
-                    <div className="pt-4 border-t border-dashed border-border-subtle">
-                      <CcLicenseCard
-                        locale={editLocale}
-                        copy={UI_COPY[editLocale]}
-                        stepLicense={docLicense}
-                        siteDefaultLicense={siteSettings.default_license}
-                        authorName={
-                          user?.display_name || siteSettings.default_author_name
-                        }
-                        compact
-                      />
-                    </div>
-                  </div>
-                </div>
+                {/* ZONE 3: Dedicated Collapsible Article Info Inspector (`信息栏`) */}
+                {inspectorOpen && (
+                  <StudioEditorInspector
+                    locale={locale}
+                    siteSettings={siteSettings}
+                    trackTitle={
+                      currentTrackObj ? stripHtmlTags(currentTrackObj.title) : selTrack
+                    }
+                    chapterTitle={
+                      currentChapterObj
+                        ? stripHtmlTags(currentChapterObj.title)
+                        : selChapter
+                    }
+                    stepSlug={selStep}
+                    docExists={docExists}
+                    docStatus={docStatus}
+                    docVersion={docVersion}
+                    docMinutes={docMinutes}
+                    docCanonicalRev={docCanonicalRev}
+                    docTitle={docTitle}
+                    onChangeTitle={setDocTitle}
+                    docSummary={docSummary}
+                    onChangeSummary={setDocSummary}
+                    docStepNum={docStepNum}
+                    onChangeStepNum={setDocStepNum}
+                    docLicense={docLicense}
+                    onChangeLicense={setDocLicense}
+                    docTagsText={docTagsText}
+                    onChangeTagsText={setDocTagsText}
+                    docAuthors={docAuthors}
+                    docPendingInvites={docPendingInvites}
+                    canManageCollaborators={canManageCollaborators}
+                    inviteEmail={inviteEmail}
+                    onChangeInviteEmail={setInviteEmail}
+                    inviting={inviting}
+                    lastInviteUrl={lastInviteUrl}
+                    onInviteCollaborator={(e) => void handleInviteCollaborator(e)}
+                    onCopyInviteLink={() => void handleCopyInviteLink()}
+                    onRevokeInvite={(id) => void handleRevokeInvite(id)}
+                    onRemoveCollaborator={(uid) => void handleRemoveCollaborator(uid)}
+                    onClose={() => setInspectorOpen(false)}
+                  />
+                )}
               </div>
             </div>
           )}
@@ -2000,12 +2510,28 @@ export function StudioPage({
                           {t.slug}
                         </span>
                         <h2 className="text-base font-semibold text-ink-primary m-0">
-                          {t.title}
+                          <SafeHtml as="span" html={t.title} />
                         </h2>
                       </div>
-                      <span className="text-xs font-mono px-2.5 py-0.5 rounded-full bg-surface-raised text-ink-secondary">
-                        {copy.difficultyLabels[t.difficulty] ?? t.difficulty}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono px-2.5 py-0.5 rounded-full bg-surface-raised text-ink-secondary">
+                          {copy.difficultyLabels[t.difficulty] ?? t.difficulty}
+                        </span>
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDeleteCatalogTarget({
+                                kind: 'track',
+                                trackSlug: t.slug,
+                              })
+                            }
+                            className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-accent-danger hover:bg-surface-raised cursor-pointer"
+                          >
+                            {rc3.studio.deleteTrackBtn}
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     {t.chapters.map((ch) => (
@@ -2015,20 +2541,37 @@ export function StudioPage({
                       >
                         <div className="flex flex-wrap items-baseline justify-between gap-2">
                           <span className="text-sm font-semibold text-ink-primary">
-                            {ch.title}{' '}
+                            <SafeHtml as="span" html={ch.title} />{' '}
                             <span className="font-mono text-xs text-ink-muted">
                               ({ch.slug})
                             </span>
                           </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleQuickNewStepFromSidebar(t.slug, ch.slug)
-                            }
-                            className="min-h-7 text-xs font-semibold text-link-ink hover:underline cursor-pointer shrink-0"
-                          >
-                            {s.addStepHereBtn}
-                          </button>
+                          <div className="flex items-center gap-2.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleQuickNewStepFromSidebar(t.slug, ch.slug)
+                              }
+                              className="min-h-7 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                            >
+                              {s.addStepHereBtn}
+                            </button>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDeleteCatalogTarget({
+                                    kind: 'chapter',
+                                    trackSlug: t.slug,
+                                    chapterSlug: ch.slug,
+                                  })
+                                }
+                                className="min-h-7 text-xs font-semibold text-accent-danger hover:underline cursor-pointer"
+                              >
+                                {rc3.studio.deleteChapterBtn}
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         <div className="space-y-2">
@@ -2037,16 +2580,33 @@ export function StudioPage({
                               key={st.step_id}
                               className="p-3 rounded-xl bg-surface-sheet flex flex-wrap items-baseline justify-between gap-3"
                             >
-                              <div className="min-w-0">
-                                <span className="font-mono text-xs text-ink-muted me-2 tabular-nums">
+                              <div className="min-w-0 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                                <span className="font-mono text-xs text-ink-muted tabular-nums">
                                   #{st.step_number}
                                 </span>
                                 <span className="text-sm font-semibold text-ink-primary">
-                                  {st.title}
+                                  <SafeHtml as="span" html={st.title} />
                                 </span>
-                                <span className="ms-2 font-mono text-xs text-ink-muted tabular-nums">
-                                  {s.canonicalRevMeta(st.canonical_revision)}
+                                <span className="font-mono text-xs text-ink-muted tabular-nums">
+                                  {s.canonicalRevMeta(st.version ?? st.canonical_revision)}
                                 </span>
+                                {st.authors && st.authors.length > 0 && (
+                                  <span className="text-xs text-ink-muted">
+                                    · {st.authors.map((a) => a.display_name).join(', ')}
+                                  </span>
+                                )}
+                                {st.takedown_reason && (
+                                  <span
+                                    title={st.takedown_reason}
+                                    className="px-1.5 py-0.5 rounded text-xs font-mono font-semibold"
+                                    style={{
+                                      backgroundColor: 'var(--alert-danger-badge-bg)',
+                                      color: 'var(--alert-danger-badge-fg)',
+                                    }}
+                                  >
+                                    {rc3.studio.takenDownBadge}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="flex flex-wrap items-center gap-1.5">
@@ -2113,6 +2673,39 @@ export function StudioPage({
                                     </button>
                                   );
                                 })}
+
+                                {isAdmin &&
+                                  (st.takedown_reason ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void handleRestoreStep(
+                                          t.slug,
+                                          ch.slug,
+                                          st.slug,
+                                        )
+                                      }
+                                      className="min-h-7 px-2 py-1 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle cursor-pointer"
+                                    >
+                                      {rc3.studio.restoreBtn}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setTakedownReasonInput('');
+                                        setTakedownTarget({
+                                          trackSlug: t.slug,
+                                          chapterSlug: ch.slug,
+                                          stepSlug: st.slug,
+                                          title: stripHtmlTags(st.title) || st.slug,
+                                        });
+                                      }}
+                                      className="min-h-7 px-2 py-1 rounded-lg text-xs font-semibold text-accent-danger hover:bg-surface-raised cursor-pointer"
+                                    >
+                                      {rc3.studio.takedownBtn}
+                                    </button>
+                                  ))}
                               </div>
                             </div>
                           ))}
@@ -2124,7 +2717,7 @@ export function StudioPage({
               )}
 
               {/* Create New Track & Chapter Forms */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
                 <form
                   onSubmit={(e) => void handleCreateTrack(e)}
                   className="studio-panel p-5"
@@ -2263,7 +2856,7 @@ export function StudioPage({
                     >
                       {tracks.map((t) => (
                         <option key={t.slug} value={t.slug}>
-                          {t.title}
+                          {stripHtmlTags(t.title)}
                         </option>
                       ))}
                     </select>
@@ -2338,36 +2931,36 @@ export function StudioPage({
           {isAdmin && activeSection === 'users' && (
             <div key="studio-sec-users" className="ui-panel-enter space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-4">
-                <h1
-                  id={usersTableCaptionId}
-                  className="text-xl font-semibold text-ink-primary m-0"
-                >
-                  {s.usersTitle}
-                </h1>
-
-                <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
-                  {roleFeedback && (
-                    <span
-                      aria-live="polite"
-                      className="text-xs font-mono font-semibold text-accent-success me-2"
-                    >
-                      {roleFeedback}
+                <div className="flex flex-wrap items-baseline gap-3">
+                  <h1
+                    id={usersTableCaptionId}
+                    className="text-xl font-semibold text-ink-primary m-0"
+                  >
+                    {s.usersTitle}
+                  </h1>
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
+                    <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-primary">
+                      {s.roleCountAdmin(adminCount)}
                     </span>
-                  )}
-                  <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-primary">
-                    {s.roleCountAdmin(adminCount)}
-                  </span>
-                  <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-secondary">
-                    {s.roleCountAuthor(authorCount)}
-                  </span>
-                  <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-muted">
-                    {s.roleCountReader(readerCount)}
-                  </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-secondary">
+                      {s.roleCountAuthor(authorCount)}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-surface-sheet border border-border-subtle text-ink-muted">
+                      {s.roleCountReader(readerCount)}
+                    </span>
+                  </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => setCreateUserOpen(true)}
+                  className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer"
+                >
+                  {rc3.users.createUserBtn}
+                </button>
               </div>
 
               <div className="studio-panel p-4 sm:p-5 space-y-4">
-
                 {usersList.length === 0 ? (
                   <NotebookEmptyState
                     title={s.usersEmptyTitle}
@@ -2393,73 +2986,146 @@ export function StudioPage({
                             {s.colAuthSource}
                           </th>
                           <th className="py-3 px-4 text-start font-semibold">
+                            {rc3.users.colStatus}
+                          </th>
+                          <th className="py-3 px-4 text-start font-semibold">
                             {s.colRole}
                           </th>
-                          <th className="py-3 px-4 text-end font-semibold">
-                            {s.colWpId}
+                          <th className="py-3 px-4 text-start font-semibold">
+                            {rc3.users.colActions}
                           </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {usersList.map((u) => (
-                          <tr
-                            key={u.id}
-                            className="border-b border-border-subtle/60 last:border-0 hover:bg-surface-raised/50"
-                          >
-                            <th
-                              scope="row"
-                              className="py-3.5 px-4 text-start font-normal"
+                        {usersList.map((u) => {
+                          const isSelf = u.id === user.id;
+                          return (
+                            <tr
+                              key={u.id}
+                              className="border-b border-border-subtle/60 last:border-0 hover:bg-surface-raised/50"
                             >
-                              <div className="flex items-center gap-3">
-                                <div
-                                  aria-hidden="true"
-                                  className="w-8 h-8 bg-action-bg text-action-fg font-mono font-semibold flex items-center justify-center text-xs shrink-0"
-                                  style={{
-                                    clipPath:
-                                      'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)',
-                                  }}
-                                >
-                                  {u.display_name.slice(0, 1).toUpperCase()}
-                                </div>
-                                <div className="min-w-0">
-                                  <div className="font-semibold text-ink-primary">
-                                    {u.display_name}{' '}
-                                    <span className="font-mono text-xs text-ink-muted">
-                                      @{u.username}
-                                    </span>
-                                  </div>
-                                  <div className="text-xs text-ink-muted truncate">
-                                    {u.email}
-                                  </div>
-                                </div>
-                              </div>
-                            </th>
-                            <td className="py-3.5 px-4 text-xs font-mono text-ink-secondary">
-                              {u.auth_source}
-                            </td>
-                            <td className="py-3.5 px-4">
-                              <select
-                                aria-label={s.changeRoleAria(u.display_name)}
-                                value={u.role}
-                                disabled={u.id === user.id}
-                                onChange={(e) =>
-                                  void handleRoleChange(
-                                    u.id,
-                                    e.target.value as UserRole,
-                                  )
-                                }
-                                className="min-h-8 px-2.5 py-1 rounded-lg bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono disabled:opacity-60"
+                              <th
+                                scope="row"
+                                className="py-3.5 px-4 text-start font-normal"
                               >
-                                <option value="reader">{s.roleOptReader}</option>
-                                <option value="author">{s.roleOptAuthor}</option>
-                                <option value="admin">{s.roleOptAdmin}</option>
-                              </select>
-                            </td>
-                            <td className="py-3.5 px-4 text-end font-mono text-xs tabular-nums text-ink-muted">
-                              {u.wp_user_id ? `#${u.wp_user_id}` : '—'}
-                            </td>
-                          </tr>
-                        ))}
+                                <div className="flex items-center gap-3">
+                                  <UserAvatar
+                                    name={u.display_name}
+                                    avatarUrl={u.avatar_url}
+                                    sizeClass="w-8 h-8"
+                                    textClass="text-xs"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="font-semibold text-ink-primary flex flex-wrap items-baseline gap-1.5">
+                                      <span>{u.display_name}</span>
+                                      <span className="font-mono text-xs text-ink-muted">
+                                        @{u.username}
+                                      </span>
+                                      {u.oauth_provider && (
+                                        <span className="px-1.5 py-0.5 rounded text-xs font-mono bg-surface-raised border border-border-subtle text-ink-secondary">
+                                          {u.oauth_provider}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-xs text-ink-muted truncate">
+                                      {u.email || '—'}
+                                    </div>
+                                  </div>
+                                </div>
+                              </th>
+                              <td className="py-3.5 px-4 text-xs font-mono text-ink-secondary">
+                                {u.auth_source}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                {u.is_banned ? (
+                                  <span
+                                    title={u.ban_reason || undefined}
+                                    className="inline-flex px-2 py-0.5 rounded text-xs font-mono font-semibold"
+                                    style={{
+                                      backgroundColor: 'var(--alert-danger-badge-bg)',
+                                      color: 'var(--alert-danger-badge-fg)',
+                                    }}
+                                  >
+                                    {rc3.users.statusBanned}
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="inline-flex px-2 py-0.5 rounded text-xs font-mono font-semibold"
+                                    style={{
+                                      backgroundColor: 'var(--alert-mint-badge-bg)',
+                                      color: 'var(--alert-mint-badge-fg)',
+                                    }}
+                                  >
+                                    {rc3.users.statusActive}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <select
+                                  aria-label={s.changeRoleAria(u.display_name)}
+                                  value={u.role}
+                                  disabled={isSelf}
+                                  onChange={(e) =>
+                                    void handleRoleChange(
+                                      u.id,
+                                      e.target.value as UserRole,
+                                    )
+                                  }
+                                  className="min-h-8 px-2.5 py-1 rounded-lg bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono disabled:opacity-60"
+                                >
+                                  <option value="reader">{s.roleOptReader}</option>
+                                  <option value="author">{s.roleOptAuthor}</option>
+                                  <option value="admin">{s.roleOptAdmin}</option>
+                                </select>
+                              </td>
+                              <td className="py-3.5 px-4 text-start">
+                                <div className="inline-flex flex-wrap items-center justify-start gap-1.5">
+                                  {u.is_banned ? (
+                                    <button
+                                      type="button"
+                                      disabled={isSelf}
+                                      onClick={() => void handleUnbanUser(u)}
+                                      className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle cursor-pointer disabled:opacity-40"
+                                    >
+                                      {rc3.users.unbanBtn}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={isSelf}
+                                      onClick={() => {
+                                        setBanReasonInput('');
+                                        setBanTarget(u);
+                                      }}
+                                      className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-ink-secondary hover:bg-surface-raised cursor-pointer disabled:opacity-40"
+                                    >
+                                      {rc3.users.banBtn}
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    disabled={isSelf}
+                                    onClick={() => {
+                                      setResetPwInput('');
+                                      setResetPwTarget(u);
+                                    }}
+                                    className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-ink-secondary hover:bg-surface-raised cursor-pointer disabled:opacity-40"
+                                  >
+                                    {rc3.users.resetPwBtn}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSelf}
+                                    onClick={() => setDeleteUserTarget(u)}
+                                    className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-accent-danger hover:bg-surface-raised cursor-pointer disabled:opacity-40"
+                                  >
+                                    {rc3.users.deleteUserBtn}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -2521,7 +3187,7 @@ export function StudioPage({
               >
                 {tracks.map((t) => (
                   <option key={t.slug} value={t.slug}>
-                    {t.title} ({t.slug})
+                    {stripHtmlTags(t.title)} ({t.slug})
                   </option>
                 ))}
               </select>
@@ -2542,7 +3208,7 @@ export function StudioPage({
               >
                 {(currentTrackObj?.chapters ?? []).map((ch) => (
                   <option key={ch.slug} value={ch.slug}>
-                    {ch.title} ({ch.slug})
+                    {stripHtmlTags(ch.title)} ({ch.slug})
                   </option>
                 ))}
               </select>
@@ -2561,7 +3227,7 @@ export function StudioPage({
                 required
                 value={newStepSlug}
                 onChange={(e) => setNewStepSlug(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-sm font-mono ink-input-inset"
+                className="ink-field-input font-mono"
               />
             </div>
           </div>
@@ -2613,6 +3279,373 @@ export function StudioPage({
             <button
               type="button"
               onClick={() => void handleConfirmDeleteStep()}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer"
+              style={{
+                backgroundColor: 'var(--palette-danger-500)',
+                boxShadow: 'var(--shadow-control)',
+              }}
+            >
+              {s.deleteConfirmBtn}
+            </button>
+          </div>
+        </div>
+      </ModalDialog>
+
+      {/* Admin Takedown Article Modal */}
+      <ModalDialog
+        open={Boolean(takedownTarget)}
+        onClose={() => setTakedownTarget(null)}
+        ariaLabelledBy={takedownTitleId}
+        maxWidthClass="max-w-md"
+      >
+        <form onSubmit={(e) => void handleConfirmTakedown(e)} className="p-5 space-y-4">
+          <h3
+            id={takedownTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {rc3.studio.takedownDialogTitle(takedownTarget?.title ?? '')}
+          </h3>
+          <div>
+            <label
+              htmlFor="admin-takedown-reason"
+              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
+            >
+              {rc3.studio.takedownReasonLabel}
+            </label>
+            <textarea
+              id="admin-takedown-reason"
+              rows={3}
+              required
+              value={takedownReasonInput}
+              onChange={(e) => setTakedownReasonInput(e.target.value)}
+              placeholder={rc3.studio.takedownReasonPlaceholder}
+              className="ink-field-input"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => setTakedownTarget(null)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="submit"
+              disabled={submittingTakedown}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer disabled:opacity-60"
+              style={{
+                backgroundColor: 'var(--palette-danger-500)',
+                boxShadow: 'var(--shadow-control)',
+              }}
+            >
+              {rc3.studio.takedownConfirmBtn}
+            </button>
+          </div>
+        </form>
+      </ModalDialog>
+
+      {/* Admin Delete Track / Chapter Confirmation Modal */}
+      <ModalDialog
+        open={Boolean(deleteCatalogTarget)}
+        onClose={() => setDeleteCatalogTarget(null)}
+        ariaLabelledBy={deleteCatalogTitleId}
+        maxWidthClass="max-w-sm"
+      >
+        <div className="p-5 space-y-4">
+          <h3
+            id={deleteCatalogTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {deleteCatalogTarget?.kind === 'track'
+              ? rc3.studio.deleteTrackDialogTitle(deleteCatalogTarget.trackSlug)
+              : rc3.studio.deleteChapterDialogTitle(
+                  deleteCatalogTarget?.kind === 'chapter'
+                    ? deleteCatalogTarget.chapterSlug
+                    : '',
+                )}
+          </h3>
+          <p className="text-xs text-ink-secondary leading-relaxed m-0">
+            {deleteCatalogTarget?.kind === 'track'
+              ? rc3.studio.deleteTrackDialogDesc
+              : rc3.studio.deleteChapterDialogDesc}
+          </p>
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setDeleteCatalogTarget(null)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirmDeleteCatalog()}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer"
+              style={{
+                backgroundColor: 'var(--palette-danger-500)',
+                boxShadow: 'var(--shadow-control)',
+              }}
+            >
+              {s.deleteConfirmBtn}
+            </button>
+          </div>
+        </div>
+      </ModalDialog>
+
+      {/* Admin Create User Modal */}
+      <ModalDialog
+        open={createUserOpen}
+        onClose={() => setCreateUserOpen(false)}
+        ariaLabelledBy={createUserTitleId}
+        maxWidthClass="max-w-md"
+      >
+        <form onSubmit={(e) => void handleCreateUser(e)} className="p-5 space-y-3.5">
+          <h3
+            id={createUserTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {rc3.users.createUserTitle}
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="admin-new-username" className="ink-field-label">
+                {rc3.users.usernameLabel}
+              </label>
+              <input
+                id="admin-new-username"
+                type="text"
+                required
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                className="ink-field-input font-mono"
+              />
+            </div>
+            <div>
+              <label htmlFor="admin-new-displayname" className="ink-field-label">
+                {rc3.users.displayNameLabel}
+              </label>
+              <input
+                id="admin-new-displayname"
+                type="text"
+                value={newDisplayName}
+                onChange={(e) => setNewDisplayName(e.target.value)}
+                className="ink-field-input"
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="admin-new-email" className="ink-field-label">
+                {rc3.users.emailLabel}
+              </label>
+              <input
+                id="admin-new-email"
+                type="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                className="ink-field-input"
+              />
+            </div>
+            <div>
+              <label htmlFor="admin-new-role" className="ink-field-label">
+                {rc3.users.roleLabel}
+              </label>
+              <select
+                id="admin-new-role"
+                value={newUserRole}
+                onChange={(e) => setNewUserRole(e.target.value as UserRole)}
+                className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
+              >
+                <option value="reader">{s.roleOptReader}</option>
+                <option value="author">{s.roleOptAuthor}</option>
+                <option value="admin">{s.roleOptAdmin}</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label htmlFor="admin-new-pw" className="ink-field-label">
+              {rc3.users.passwordLabel}
+            </label>
+            <input
+              id="admin-new-pw"
+              type="password"
+              required
+              minLength={8}
+              value={newUserPassword}
+              onChange={(e) => setNewUserPassword(e.target.value)}
+              className="ink-field-input"
+            />
+            <PasswordStrengthMeter
+              password={newUserPassword}
+              locale={locale}
+              id="admin-new-pw-strength"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setCreateUserOpen(false)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="submit"
+              disabled={creatingUser}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-60"
+            >
+              {rc3.users.createSubmitBtn}
+            </button>
+          </div>
+        </form>
+      </ModalDialog>
+
+      {/* Admin Suspend User Modal */}
+      <ModalDialog
+        open={Boolean(banTarget)}
+        onClose={() => setBanTarget(null)}
+        ariaLabelledBy={banUserTitleId}
+        maxWidthClass="max-w-sm"
+      >
+        <form onSubmit={(e) => void handleConfirmBanUser(e)} className="p-5 space-y-4">
+          <h3
+            id={banUserTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {rc3.users.banDialogTitle(banTarget?.display_name ?? '')}
+          </h3>
+          <div>
+            <label
+              htmlFor="admin-ban-reason"
+              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
+            >
+              {rc3.users.banReasonLabel}
+            </label>
+            <input
+              id="admin-ban-reason"
+              type="text"
+              value={banReasonInput}
+              onChange={(e) => setBanReasonInput(e.target.value)}
+              placeholder={rc3.users.banReasonPlaceholder}
+              className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm ink-input-inset"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => setBanTarget(null)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="submit"
+              disabled={submittingBan}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer disabled:opacity-60"
+              style={{
+                backgroundColor: 'var(--palette-danger-500)',
+                boxShadow: 'var(--shadow-control)',
+              }}
+            >
+              {rc3.users.banConfirmBtn}
+            </button>
+          </div>
+        </form>
+      </ModalDialog>
+
+      {/* Admin Reset User Password Modal */}
+      <ModalDialog
+        open={Boolean(resetPwTarget)}
+        onClose={() => setResetPwTarget(null)}
+        ariaLabelledBy={resetPwTitleId}
+        maxWidthClass="max-w-sm"
+      >
+        <form
+          onSubmit={(e) => void handleConfirmResetUserPw(e)}
+          className="p-5 space-y-4"
+        >
+          <h3
+            id={resetPwTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {rc3.users.resetPwDialogTitle(resetPwTarget?.display_name ?? '')}
+          </h3>
+          <div>
+            <label
+              htmlFor="admin-reset-pw"
+              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
+            >
+              {rc3.users.resetPwInputLabel}
+            </label>
+            <input
+              id="admin-reset-pw"
+              type="password"
+              required
+              minLength={8}
+              value={resetPwInput}
+              onChange={(e) => setResetPwInput(e.target.value)}
+              className="ink-field-input"
+            />
+            <PasswordStrengthMeter
+              password={resetPwInput}
+              locale={locale}
+              id="admin-reset-pw-strength"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => setResetPwTarget(null)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="submit"
+              disabled={submittingResetPw}
+              className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-60"
+            >
+              {rc3.users.resetPwConfirmBtn}
+            </button>
+          </div>
+        </form>
+      </ModalDialog>
+
+      {/* Admin Delete User Confirmation Modal */}
+      <ModalDialog
+        open={Boolean(deleteUserTarget)}
+        onClose={() => setDeleteUserTarget(null)}
+        ariaLabelledBy={deleteUserTitleId}
+        maxWidthClass="max-w-sm"
+      >
+        <div className="p-5 space-y-4">
+          <h3
+            id={deleteUserTitleId}
+            className="text-lg font-semibold text-ink-primary m-0"
+            style={{ fontFamily: 'var(--font-hand)' }}
+          >
+            {rc3.users.deleteUserDialogTitle(deleteUserTarget?.display_name ?? '')}
+          </h3>
+          <p className="text-xs text-ink-secondary leading-relaxed m-0">
+            {rc3.users.deleteUserDialogDesc}
+          </p>
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setDeleteUserTarget(null)}
+              className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
+            >
+              {s.deleteCancelBtn}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirmDeleteUser()}
               className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer"
               style={{
                 backgroundColor: 'var(--palette-danger-500)',

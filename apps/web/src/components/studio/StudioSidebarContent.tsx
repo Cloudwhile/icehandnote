@@ -7,6 +7,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { UI_COPY } from '../../lib/i18n';
+import { RC3_COPY } from '../../lib/i18nRc3';
+import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
 import type { LocaleCode, StudioTrackDto } from '../../lib/types';
 import {
   IconChevronDown,
@@ -192,9 +194,9 @@ export function StudioSidebarContent({
                           </span>
                           <span
                             className="flex-1 studio-ellipsis"
-                            title={track.title}
+                            title={stripHtmlTags(track.title)}
                           >
-                            {track.title}
+                            <SafeHtml as="span" html={track.title} />
                           </span>
                         </summary>
 
@@ -204,9 +206,9 @@ export function StudioSidebarContent({
                               <div className="px-1 flex items-center justify-between gap-1">
                                 <span
                                   className="text-xs text-ink-muted studio-ellipsis"
-                                  title={ch.title}
+                                  title={stripHtmlTags(ch.title)}
                                 >
-                                  {ch.title}
+                                  <SafeHtml as="span" html={ch.title} />
                                 </span>
                                 <button
                                   type="button"
@@ -214,7 +216,7 @@ export function StudioSidebarContent({
                                     onQuickNewStep(track.slug, ch.slug);
                                     onCloseMobileDrawer?.();
                                   }}
-                                  aria-label={s.addStepInChapterAria(ch.title)}
+                                  aria-label={s.addStepInChapterAria(stripHtmlTags(ch.title))}
                                   title={s.addStepInChapterTitle}
                                   className="min-w-6 min-h-6 inline-flex items-center justify-center rounded text-xs font-mono text-link-ink hover:bg-action-subtle cursor-pointer shrink-0"
                                 >
@@ -262,8 +264,22 @@ export function StudioSidebarContent({
                                           {st.step_number}.
                                         </span>
                                         <span className="flex-1 studio-ellipsis">
-                                          {st.title}
+                                          <SafeHtml as="span" html={st.title} />
                                         </span>
+                                        {st.takedown_reason && (
+                                          <span
+                                            className="text-xs font-mono px-1 rounded shrink-0"
+                                            style={{
+                                              backgroundColor:
+                                                'var(--alert-danger-badge-bg)',
+                                              color:
+                                                'var(--alert-danger-badge-fg)',
+                                            }}
+                                            title={st.takedown_reason}
+                                          >
+                                            {RC3_COPY[locale].studio.takenDownBadge}
+                                          </span>
+                                        )}
                                         {hasDraft && (
                                           <span
                                             className="text-xs font-mono px-1 rounded shrink-0"
@@ -366,7 +382,7 @@ export function StudioSidebarContent({
           href="https://github.com/Cloudwhile/icehandnote"
           target="_blank"
           rel="noopener noreferrer"
-          className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-center gap-1.5 transition-colors"
+          className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-baseline gap-1.5 transition-colors"
         >
           <span>IceHandnote · Cloudwhile</span>
           <span className="font-mono text-xs text-ink-muted">AGPL-3.0</span>

@@ -248,6 +248,57 @@ export function NotebookBlockRenderer({
         );
       }
 
+      case 'image': {
+        const figureEl = (
+          <figure className="my-5 mx-0 w-full rounded-2xl overflow-hidden border-2 border-border-ink bg-surface-raised">
+            <img
+              src={block.src}
+              alt={block.alt}
+              loading="lazy"
+              className="block w-full max-h-[34rem] object-contain bg-surface-sunken"
+            />
+            {(block.caption || block.alt) && (
+              <figcaption className="px-4 py-2 text-xs text-ink-secondary border-t border-dashed border-border-subtle bg-surface-sheet">
+                {block.caption || block.alt}
+              </figcaption>
+            )}
+          </figure>
+        );
+
+        if (interactive) {
+          const blockNotes = interactive.marginNotes.filter(
+            (n) => n.block_anchor_id === block.block_id,
+          );
+          return (
+            <BlockWithMargin
+              key={block.block_id}
+              blockId={block.block_id}
+              authorNote={block.margin_note}
+              userNotes={blockNotes}
+              copy={copy}
+              onAddNote={interactive.onAddNote}
+              onDeleteNote={interactive.onDeleteNote}
+            >
+              {figureEl}
+            </BlockWithMargin>
+          );
+        }
+
+        return (
+          <div key={block.block_id} className="space-y-2">
+            {figureEl}
+            {block.margin_note && (
+              <div className="max-w-[240px] -mt-2 mb-4">
+                <AuthorMarginSticker
+                  rawNote={block.margin_note}
+                  badgeLabel={copy.authorNoteBadge}
+                />
+              </div>
+            )}
+          </div>
+        );
+      }
+
       case 'quote':
         return (
           <blockquote

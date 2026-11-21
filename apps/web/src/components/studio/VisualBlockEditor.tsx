@@ -8,8 +8,10 @@
  *   stroke SVG icons (`Icons.tsx`), and >= 28px (`w-7 h-7` / `min-h-7`) touch targets.
  */
 
-import { type ReactNode, useId, useRef, useState } from 'react';
+import { type ChangeEvent, type ReactNode, useId, useRef, useState } from 'react';
+import { api } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
+import { RC3_COPY } from '../../lib/i18nRc3';
 import type {
   LocaleCode,
   SketchNode,
@@ -44,24 +46,82 @@ import {
   IconDiagram,
   IconFileCode,
   IconHeading,
+  IconImage,
   IconList,
   IconParagraph,
   IconPen,
   IconPlus,
   IconQuote,
   IconTrash,
+  IconUpload,
 } from '../ui/Icons';
+import { useToast } from '../ui/ToastProvider';
 
 interface VisualBlockEditorProps {
   locale: LocaleCode;
   blocks: VisualBlock[];
   onChange: (next: VisualBlock[]) => void;
+  hideTopInserter?: boolean;
+}
+
+interface VisualBlockToolStripProps {
+  locale: LocaleCode;
+  blockCount: number;
+  onInsertBlock: (kind: VisualBlock['type']) => void;
+  onInsertSectionTask: () => void;
+}
+
+export function VisualBlockToolStrip({
+  locale,
+  blockCount,
+  onInsertBlock,
+  onInsertSectionTask,
+}: VisualBlockToolStripProps) {
+  const copy = UI_COPY[locale];
+  const v = copy.studio.visual;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <button
+        type="button"
+        onClick={onInsertSectionTask}
+        className="ui-press-tactile min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold bg-action-subtle text-link-ink border border-action-bg/40 hover:border-border-ink inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+      >
+        <IconCheckSquare className="w-3.5 h-3.5 text-link-ink" />
+        <span>{copy.taskScopeSection}</span>
+      </button>
+
+      {INSERTABLE_TYPES.map((kind) => {
+        const isSteps = kind === 'steps';
+        return (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => onInsertBlock(kind)}
+            className={`ui-press-tactile min-h-8 px-2.5 py-1 rounded-lg text-xs inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+              isSteps
+                ? 'font-semibold bg-surface-raised text-accent-ice border border-border-subtle hover:border-border-ink'
+                : 'bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink'
+            }`}
+          >
+            {blockIcon(kind)}
+            <span>{isSteps ? copy.taskScopeParagraph : v.types[kind]}</span>
+          </button>
+        );
+      })}
+
+      <span className="ms-auto text-xs font-mono text-ink-muted tabular-nums ps-2">
+        {v.blockCount(blockCount)}
+      </span>
+    </div>
+  );
 }
 
 const INSERTABLE_TYPES: VisualBlock['type'][] = [
   'steps',
   'heading',
   'paragraph',
+  'image',
   'alert',
   'code_card',
   'list',
@@ -107,6 +167,8 @@ function blockIcon(type: VisualBlock['type']): ReactNode {
       return <IconHeading className="w-3.5 h-3.5" />;
     case 'paragraph':
       return <IconParagraph className="w-3.5 h-3.5" />;
+    case 'image':
+      return <IconImage className="w-3.5 h-3.5 text-link-ink" />;
     case 'steps':
       return <IconCheckSquare className="w-3.5 h-3.5 text-accent-ice" />;
     case 'alert':
@@ -130,6 +192,8 @@ function blockPreviewSummary(block: VisualBlock): string {
       return `H${block.level} · ${block.text || '…'}`;
     case 'paragraph':
       return block.text.slice(0, 48) || '…';
+    case 'image':
+      return block.caption || block.alt || block.src.slice(0, 42) || '…';
     case 'steps':
       return `${block.title || 'Steps'} (${block.items.length})`;
     case 'alert':
@@ -264,6 +328,113 @@ function ParagraphBlockBody({
   );
 }
 
+function ImageBlockBody({
+  block,
+  locale,
+  onUpdate,
+}: {
+  block: Extract<VisualBlock, { type: 'image' }>;
+  locale: LocaleCode;
+  onUpdate: (next: Extract<VisualBlock, { type: 'image' }>) => void;
+}) {
+  const v = UI_COPY[locale].studio.visual;
+  const rc3 = RC3_COPY[locale].studio;
+  const toast = useToast();
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || uploading) return;
+    setUploading(true);
+    try {
+      const uploaded = await api.uploadStudioMedia(file);
+      onUpdate({
+        ...block,
+        src: uploaded.url,
+        alt: block.alt || file.name.replace(/\.[^.]+$/, ''),
+      });
+      toast.success(rc3.imageUploadedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/x-icon,image/svg+xml"
+          onChange={(e) => void handleFileChange(e)}
+          className="sr-only"
+        />
+        <button
+          type="button"
+          disabled={uploading}
+          onClick={() => fileRef.current?.click()}
+          className="min-h-8 px-3 py-1 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0"
+        >
+          <IconUpload className="w-3.5 h-3.5 text-ink-muted" />
+          <span>{uploading ? v.imageUploading : v.imageUploadBtn}</span>
+        </button>
+
+        <input
+          type="text"
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="none"
+          aria-label={v.imageUrlLabel}
+          value={block.src}
+          onChange={(e) => onUpdate({ ...block, src: e.target.value })}
+          placeholder={v.imageUrlPlaceholder}
+          className="flex-1 min-w-44 px-3 py-1.5 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <input
+          type="text"
+          aria-label={v.imageAltLabel}
+          value={block.alt}
+          onChange={(e) => onUpdate({ ...block, alt: e.target.value })}
+          placeholder={v.imageAltLabel}
+          className="w-full px-3 py-1.5 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-xs"
+        />
+        <input
+          type="text"
+          aria-label={v.imageCaptionLabel}
+          value={block.caption}
+          onChange={(e) => onUpdate({ ...block, caption: e.target.value })}
+          placeholder={v.imageCaptionLabel}
+          className="w-full px-3 py-1.5 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-xs"
+        />
+      </div>
+
+      {block.src.trim() && (
+        <div className="rounded-xl overflow-hidden border border-border-subtle bg-surface-sunken p-2">
+          <img
+            src={block.src}
+            alt={block.alt}
+            loading="lazy"
+            className="max-h-48 mx-auto rounded-lg object-contain"
+          />
+        </div>
+      )}
+
+      <AuthorMarginNoteInput
+        locale={locale}
+        rawValue={block.marginNote}
+        onChange={(nextRaw) => onUpdate({ ...block, marginNote: nextRaw })}
+      />
+    </div>
+  );
+}
+
 function AuthorMarginNoteInput({
   locale,
   rawValue,
@@ -360,6 +531,7 @@ export function VisualBlockEditor({
   locale,
   blocks,
   onChange,
+  hideTopInserter = false,
 }: VisualBlockEditorProps) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
@@ -449,48 +621,22 @@ export function VisualBlockEditor({
         ))}
       </datalist>
 
-      {/* Top Block-Insert Toolbar */}
-      <div className="rounded-xl p-3 bg-surface-raised border border-border-subtle space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-ink-secondary">
-            {v.addBlockLabel}
-          </span>
-          <span className="text-xs font-mono text-ink-muted tabular-nums">
-            {v.blockCount(blocks.length)}
-          </span>
+      {/* Optional Embedded Top Block-Insert Toolbar (hidden when hosted by Studio's dedicated Toolbar) */}
+      {!hideTopInserter && (
+        <div className="rounded-xl p-3 bg-surface-raised border border-border-subtle space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-ink-secondary">
+              {v.addBlockLabel}
+            </span>
+          </div>
+          <VisualBlockToolStrip
+            locale={locale}
+            blockCount={blocks.length}
+            onInsertBlock={appendBlock}
+            onInsertSectionTask={appendSectionTaskHeading}
+          />
         </div>
-
-        <div className="flex flex-wrap gap-1.5">
-          {/* Quick-insert Section Task (whole section heading marked as task) */}
-          <button
-            type="button"
-            onClick={appendSectionTaskHeading}
-            className="ui-press-tactile min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold bg-action-subtle text-link-ink border border-border-ink hover:bg-surface-sheet inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-          >
-            <IconCheckSquare className="w-3.5 h-3.5 text-link-ink" />
-            <span>{copy.taskScopeSection}</span>
-          </button>
-
-          {INSERTABLE_TYPES.map((kind) => {
-            const isSteps = kind === 'steps';
-            return (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => appendBlock(kind)}
-                className={`ui-press-tactile min-h-8 px-2.5 py-1 rounded-lg text-xs inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
-                  isSteps
-                    ? 'font-semibold bg-surface-sheet text-accent-ice border border-border-subtle hover:border-border-ink'
-                    : 'bg-surface-sheet text-ink-primary border border-border-subtle hover:border-border-ink'
-                }`}
-              >
-                {blockIcon(kind)}
-                <span>{isSteps ? copy.taskScopeParagraph : v.types[kind]}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      )}
 
       {blocks.length === 0 ? (
         <div className="rounded-xl p-6 bg-surface-raised border border-dashed border-border-subtle text-center space-y-3">
@@ -1625,6 +1771,14 @@ export function VisualBlockEditor({
                             </div>
                           </div>
                         </div>
+                      )}
+
+                      {block.type === 'image' && (
+                        <ImageBlockBody
+                          block={block}
+                          locale={locale}
+                          onUpdate={(next) => updateBlock(idx, next)}
+                        />
                       )}
 
                       {block.type === 'raw_markdown' && (

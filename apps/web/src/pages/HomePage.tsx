@@ -16,6 +16,7 @@ import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
 import { IconSnowflake } from '../components/ui/Icons';
 import { api, runDirectionalTransition } from '../lib/api';
 import { UI_COPY } from '../lib/i18n';
+import { SafeHtml } from '../lib/sanitizer';
 import type {
   LocaleCode,
   SiteSettingsDto,
@@ -124,7 +125,10 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
               className="text-3xl sm:text-4xl font-semibold text-ink-primary leading-tight tracking-tight m-0"
               style={{ fontFamily: 'var(--font-hand)' }}
             >
-              {siteSettings.hero_title || siteSettings.site_name || copy.brandName}
+              <SafeHtml
+                as="span"
+                html={siteSettings.hero_title || siteSettings.site_name || copy.brandName}
+              />
             </h1>
 
             {/* Signature 2-stroke Ice Cyan + Violet hand-drawn marker underline */}
@@ -149,9 +153,11 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
             </svg>
 
             {siteSettings.hero_tagline && (
-              <p className="text-base text-ink-secondary leading-relaxed max-w-[60ch] m-0">
-                {siteSettings.hero_tagline}
-              </p>
+              <SafeHtml
+                as="p"
+                html={siteSettings.hero_tagline}
+                className="text-base text-ink-secondary leading-relaxed max-w-[60ch] m-0"
+              />
             )}
 
             {/* Strict Action Pyramid (§2.8): 1 Primary + 1 Secondary */}
@@ -282,13 +288,15 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
                           to={stepUrl}
                           className="no-underline text-ink-primary hover:text-link-ink transition-colors"
                         >
-                          {track.title}
+                          <SafeHtml as="span" html={track.title} />
                         </Link>
                       </h3>
 
-                      <p className="text-sm text-ink-secondary leading-relaxed m-0">
-                        {track.description}
-                      </p>
+                      <SafeHtml
+                        as="p"
+                        html={track.description}
+                        className="text-sm text-ink-secondary leading-relaxed m-0"
+                      />
                     </div>
 
                     <div className="mt-6 pt-4 border-t border-dashed border-border-subtle space-y-3">

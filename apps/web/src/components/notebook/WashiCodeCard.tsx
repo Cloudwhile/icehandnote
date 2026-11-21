@@ -205,7 +205,7 @@ export function WashiCodeCard({
         >
           <div className="flex items-center gap-2.5 min-w-0">
             {sheetStyle !== 'spiral' && (
-              <div className="flex items-center gap-1.5 shrink-0" aria-hidden="true">
+              <div className="hidden sm:flex items-center gap-1.5 shrink-0" aria-hidden="true">
                 <span
                   className="w-2.5 h-2.5 rounded-full border-[1.5px]"
                   style={{

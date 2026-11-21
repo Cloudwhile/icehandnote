@@ -247,9 +247,34 @@ export function ChapterSidebarAndDrawer({
     <>
       <aside
         aria-label={copy.chapterOutlineAria}
-        className="hidden lg:block w-64 shrink-0 sticky top-24 self-start max-h-[calc(100dvh-7rem)] pe-2 studio-scroll-pane"
+        className="hidden lg:block w-64 shrink-0 sticky top-24 self-start max-h-[calc(100dvh-7rem)] pe-2 studio-scroll-pane space-y-6"
       >
         {renderNavTree()}
+
+        {toc.length > 0 && (
+          <div className="pt-4 border-t border-dashed border-border-subtle space-y-2">
+            <div className="px-1 flex items-center gap-1.5 text-xs font-semibold text-ink-muted">
+              <IconPen className="w-3.5 h-3.5 text-ink-muted" />
+              <span>{copy.tocHeading}</span>
+            </div>
+            <ul className="list-none m-0 p-0 space-y-1">
+              {toc.map((item) => (
+                <li key={item.id}>
+                  <a
+                    href={`#${item.id}`}
+                    className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-link-ink hover:bg-surface-sheet/70 transition-colors"
+                    style={{ paddingInlineStart: `${6 + (item.level - 1) * 8}px` }}
+                  >
+                    <span className="font-mono font-semibold text-link-ink shrink-0">
+                      {item.number}
+                    </span>
+                    <span className="truncate">{item.text}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </aside>
 
       <SwipeDrawerDialog
@@ -270,7 +295,7 @@ export function ChapterSidebarAndDrawer({
       {toc.length > 0 && (
         <div
           ref={tocContainerRef}
-          className="fixed end-4 bottom-5 lg:start-4 lg:end-auto lg:bottom-6 z-40"
+          className="lg:hidden fixed end-4 bottom-5 z-40"
         >
           <button
             ref={tocTriggerRef}

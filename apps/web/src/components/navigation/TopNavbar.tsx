@@ -14,6 +14,8 @@ import {
   type LocalePreference,
   UI_COPY,
 } from '../../lib/i18n';
+import { RC3_COPY } from '../../lib/i18nRc3';
+import { SafeHtml } from '../../lib/sanitizer';
 import type { ResolvedTheme } from '../../lib/theme';
 import type { LocaleCode, SiteSettingsDto, UserProfileDto } from '../../lib/types';
 import {
@@ -24,9 +26,11 @@ import {
   IconMoon,
   IconPen,
   IconSearch,
+  IconSettings,
   IconSun,
 } from '../ui/Icons';
 import { PopupMenu } from '../ui/PopupMenu';
+import { UserAvatar } from '../ui/UserAvatar';
 
 interface TopNavbarProps {
   locale: LocaleCode;
@@ -38,6 +42,7 @@ interface TopNavbarProps {
   user: UserProfileDto | null;
   siteSettings: SiteSettingsDto;
   onOpenAuth: () => void;
+  onOpenProfile: () => void;
   onLogout: () => void;
 }
 
@@ -51,9 +56,11 @@ export function TopNavbar({
   user,
   siteSettings,
   onOpenAuth,
+  onOpenProfile,
   onLogout,
 }: TopNavbarProps) {
   const copy = UI_COPY[locale];
+  const profCopy = RC3_COPY[locale].profile;
   const visibleLocales = LOCALES.filter((l) =>
     siteSettings.enabled_locales.includes(l.code),
   );
@@ -131,27 +138,37 @@ export function TopNavbar({
             >
               <span
                 aria-hidden="true"
-                className="w-8 h-8 rounded-xl flex items-center justify-center border border-border-ink bg-surface-raised shrink-0"
+                className="w-8 h-8 rounded-xl flex items-center justify-center border border-border-ink bg-surface-raised overflow-hidden shrink-0"
               >
-                <svg
-                  className="w-5 h-5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="var(--accent-ice-ink)"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                >
-                  <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07" />
-                  <circle cx="12" cy="12" r="2.2" fill="var(--link-ink)" stroke="none" />
-                </svg>
+                {siteSettings.logo_url?.trim() ? (
+                  <img
+                    src={siteSettings.logo_url}
+                    alt=""
+                    className="w-full h-full object-contain p-0.5"
+                  />
+                ) : (
+                  <svg
+                    className="w-5 h-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="var(--accent-ice-ink)"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  >
+                    <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07" />
+                    <circle cx="12" cy="12" r="2.2" fill="var(--link-ink)" stroke="none" />
+                  </svg>
+                )}
               </span>
               <div className="leading-tight">
                 <div className="text-base font-semibold tracking-tight flex items-baseline gap-1.5">
-                  <span>{siteSettings.site_name || copy.brandName}</span>
+                  <SafeHtml as="span" html={siteSettings.site_name || copy.brandName} />
                   {siteSettings.brand_badge && (
-                    <span className="font-mono text-xs font-semibold uppercase tracking-wider text-accent-ice hidden sm:inline">
-                      {siteSettings.brand_badge}
-                    </span>
+                    <SafeHtml
+                      as="span"
+                      html={siteSettings.brand_badge}
+                      className="font-mono text-xs font-semibold uppercase tracking-wider text-accent-ice hidden sm:inline"
+                    />
                   )}
                 </div>
               </div>
@@ -293,15 +310,11 @@ export function TopNavbar({
                   triggerClassName="min-h-8 ps-1.5 pe-2.5 py-1 rounded-full bg-surface-raised border border-border-subtle hover:border-border-ink text-xs"
                   triggerLabel={
                     <>
-                      <span
-                        aria-hidden="true"
-                        className="w-5 h-5 bg-action-bg text-action-fg font-mono font-semibold inline-flex items-center justify-center text-xs shrink-0"
-                        style={{
-                          clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)',
-                        }}
-                      >
-                        {user.display_name.slice(0, 1).toUpperCase()}
-                      </span>
+                      <UserAvatar
+                        name={user.display_name}
+                        avatarUrl={user.avatar_url}
+                        sizeClass="w-5 h-5"
+                      />
                       <span className="font-semibold text-ink-primary max-w-24 studio-ellipsis">
                         {user.display_name}
                       </span>
@@ -326,6 +339,17 @@ export function TopNavbar({
                           </span>
                         </div>
                       </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          close(e.detail !== 0);
+                          onOpenProfile();
+                        }}
+                      >
+                        <IconSettings className="w-3.5 h-3.5 text-ink-muted" />
+                        <span>{profCopy.menuItem}</span>
+                      </button>
 
                       {canAuthor && (
                         <Link
@@ -474,40 +498,50 @@ export function TopNavbar({
 
             <div className="pt-3 border-t border-dashed border-border-subtle">
               {user ? (
-                <div className="flex items-center justify-between gap-2">
-                  <div className="inline-flex items-center gap-2 min-w-0">
-                    <span
-                      aria-hidden="true"
-                      className="w-6 h-6 bg-action-bg text-action-fg font-mono font-semibold inline-flex items-center justify-center text-xs shrink-0"
-                      style={{
-                        clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)',
-                      }}
-                    >
-                      {user.display_name.slice(0, 1).toUpperCase()}
-                    </span>
-                    <span className="text-sm font-semibold text-ink-primary truncate">
-                      {user.display_name}
-                    </span>
-                    <span
-                      className="font-mono text-xs uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold shrink-0"
-                      style={{
-                        backgroundColor: 'var(--alert-note-badge-bg)',
-                        color: 'var(--alert-note-badge-fg)',
-                      }}
-                    >
-                      {user.role}
-                    </span>
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-2 min-w-0">
+                      <UserAvatar
+                        name={user.display_name}
+                        avatarUrl={user.avatar_url}
+                        sizeClass="w-6 h-6"
+                      />
+                      <span className="text-sm font-semibold text-ink-primary truncate">
+                        {user.display_name}
+                      </span>
+                      <span
+                        className="font-mono text-xs uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold shrink-0"
+                        style={{
+                          backgroundColor: 'var(--alert-note-badge-bg)',
+                          color: 'var(--alert-note-badge-fg)',
+                        }}
+                      >
+                        {user.role}
+                      </span>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMobileMenuOpen(false);
-                      onLogout();
-                    }}
-                    className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer shrink-0"
-                  >
-                    {copy.logoutBtn}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileMenuOpen(false);
+                        onOpenProfile();
+                      }}
+                      className="flex-1 min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer"
+                    >
+                      {profCopy.menuItem}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileMenuOpen(false);
+                        onLogout();
+                      }}
+                      className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer shrink-0"
+                    >
+                      {copy.logoutBtn}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <button

@@ -6,8 +6,11 @@ import { NotebookAlert } from '../components/notebook/NotebookAlert';
 import { NotebookBlockRenderer } from '../components/notebook/NotebookBlockRenderer';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
 import { IconHome, IconMenu } from '../components/ui/Icons';
+import { useToast } from '../components/ui/ToastProvider';
+import { UserAvatar } from '../components/ui/UserAvatar';
 import { api, runDirectionalTransition } from '../lib/api';
 import { normalizeLocale, UI_COPY } from '../lib/i18n';
+import { SafeHtml, stripHtmlTags } from '../lib/sanitizer';
 import type { ResolvedTheme } from '../lib/theme';
 import type {
   LocaleCode,
@@ -72,6 +75,7 @@ export function StepReaderPage({
   const location = useLocation();
   const navigate = useNavigate();
   const copy = UI_COPY[locale];
+  const toast = useToast();
 
   const [detail, setDetail] = useState<StepDetailDto | null>(null);
   const [allTracks, setAllTracks] = useState<TrackSummaryDto[]>([]);
@@ -102,8 +106,9 @@ export function StepReaderPage({
 
   useEffect(() => {
     if (!detail) return;
-    const brand = siteSettings.site_name || copy.brandName;
-    document.title = detail.title ? `${detail.title} · ${brand}` : brand;
+    const brand = stripHtmlTags(siteSettings.site_name || copy.brandName);
+    const plainTitle = stripHtmlTags(detail.title);
+    document.title = plainTitle ? `${plainTitle} · ${brand}` : brand;
     return () => {
       document.title = brand;
     };
@@ -249,22 +254,33 @@ export function StepReaderPage({
   const handleAddNote = useCallback(
     async (blockId: string, color: string, content: string) => {
       if (!detail) return;
-      const created = await api.createMarginNote({
-        step_id: detail.step_id,
-        locale_code: locale,
-        block_anchor_id: blockId,
-        note_color: color,
-        content,
-      });
-      setMarginNotes((prev) => [...prev, created]);
+      try {
+        const created = await api.createMarginNote({
+          step_id: detail.step_id,
+          locale_code: locale,
+          block_anchor_id: blockId,
+          note_color: color,
+          content,
+        });
+        setMarginNotes((prev) => [...prev, created]);
+      } catch (err) {
+        toast.error(err);
+      }
     },
-    [detail, locale],
+    [detail, locale, toast],
   );
 
-  const handleDeleteNote = useCallback(async (noteId: string) => {
-    await api.deleteMarginNote(noteId);
-    setMarginNotes((prev) => prev.filter((n) => n.id !== noteId));
-  }, []);
+  const handleDeleteNote = useCallback(
+    async (noteId: string) => {
+      try {
+        await api.deleteMarginNote(noteId);
+        setMarginNotes((prev) => prev.filter((n) => n.id !== noteId));
+      } catch (err) {
+        toast.error(err);
+      }
+    },
+    [toast],
+  );
 
   const handleAdvance = () => {
     if (!detail) return;
@@ -479,8 +495,10 @@ export function StepReaderPage({
                       </span>
                     )}
                     <span>
-                      <span className="font-mono">v{detail.synced_revision}</span> ·{' '}
-                      {detail.estimated_minutes} {copy.minutesUnit}
+                      <span className="font-mono">
+                        v{detail.version ?? detail.synced_revision}
+                      </span>{' '}
+                      · {detail.estimated_minutes} {copy.minutesUnit}
                     </span>
                   </div>
                 </div>
@@ -490,7 +508,7 @@ export function StepReaderPage({
                     className="text-2xl sm:text-3xl font-semibold text-ink-primary leading-tight tracking-tight m-0"
                     style={{ fontFamily: 'var(--font-hand)' }}
                   >
-                    {detail.title}
+                    <SafeHtml as="span" html={detail.title} />
                   </h1>
                   {/* H1 Dusk Violet Marker Underline */}
                   <svg
@@ -508,33 +526,55 @@ export function StepReaderPage({
                   </svg>
                 </div>
 
-                <p className="text-base text-ink-secondary leading-relaxed m-0">
-                  {detail.summary}
-                </p>
+                <SafeHtml
+                  as="p"
+                  html={detail.summary}
+                  className="text-base text-ink-secondary leading-relaxed m-0"
+                />
 
-                <div className="pt-2 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-                  {(detail.author_name?.trim() ||
-                    siteSettings.default_author_name?.trim()) && (
+                <div className="pt-2 flex flex-wrap items-center gap-2.5 text-xs text-ink-muted">
+                  {detail.authors && detail.authors.length > 0 ? (
                     <>
-                      <span
-                        aria-hidden="true"
-                        className="w-6 h-6 bg-action-bg text-action-fg font-mono font-semibold inline-flex items-center justify-center text-xs shrink-0 uppercase"
-                        style={{
-                          clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)',
-                        }}
-                      >
-                        {(
-                          detail.author_name?.trim() ||
-                          siteSettings.default_author_name.trim()
-                        ).slice(0, 1)}
-                      </span>
-                      <span>
-                        @
-                        {detail.author_name?.trim() ||
-                          siteSettings.default_author_name.trim()}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {detail.authors.map((a, idx) => (
+                          <span
+                            key={a.user_id ?? `${a.username}-${idx}`}
+                            className="inline-flex items-center gap-1.5"
+                          >
+                            <UserAvatar
+                              name={a.display_name || a.username}
+                              avatarUrl={a.avatar_url}
+                              sizeClass="w-5 h-5"
+                            />
+                            <span className="font-semibold text-ink-secondary">
+                              {a.display_name || a.username}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
                       <span aria-hidden="true">•</span>
                     </>
+                  ) : (
+                    (detail.author_name?.trim() ||
+                      siteSettings.default_author_name?.trim()) && (
+                      <>
+                        <UserAvatar
+                          name={
+                            detail.author_name?.trim() ||
+                            siteSettings.default_author_name.trim()
+                          }
+                          sizeClass="w-5 h-5"
+                        />
+                        <span>
+                          @
+                          {stripHtmlTags(
+                            detail.author_name?.trim() ||
+                              siteSettings.default_author_name.trim(),
+                          )}
+                        </span>
+                        <span aria-hidden="true">•</span>
+                      </>
+                    )
                   )}
                   <span className="font-mono tabular-nums">
                     {String(detail.step_number).padStart(2, '0')} /{' '}
@@ -574,7 +614,11 @@ export function StepReaderPage({
                   stepLicense={detail.license}
                   siteDefaultLicense={siteSettings.default_license}
                   authorName={
-                    detail.author_name?.trim() || siteSettings.default_author_name
+                    detail.authors && detail.authors.length > 0
+                      ? detail.authors.map((a) => a.display_name || a.username).join(', ')
+                      : stripHtmlTags(
+                          detail.author_name?.trim() || siteSettings.default_author_name,
+                        )
                   }
                 />
 

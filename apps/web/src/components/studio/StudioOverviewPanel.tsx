@@ -10,6 +10,7 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { LOCALES, UI_COPY } from '../../lib/i18n';
+import { SafeHtml } from '../../lib/sanitizer';
 import {
   APP_VERSION,
   type LocaleCode,
@@ -284,9 +285,11 @@ export function StudioOverviewPanel({
                       >
                         {badgeStyle.label}
                       </span>
-                      <span className="text-sm text-ink-primary studio-ellipsis">
-                        {item.stepTitle}
-                      </span>
+                      <SafeHtml
+                        as="span"
+                        html={item.stepTitle}
+                        className="text-sm text-ink-primary studio-ellipsis"
+                      />
                     </div>
 
                     <button
@@ -362,9 +365,11 @@ export function StudioOverviewPanel({
                 return (
                   <div key={t.track_id} className="space-y-1.5">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-sm text-ink-primary studio-ellipsis">
-                        {t.title}
-                      </span>
+                      <SafeHtml
+                        as="span"
+                        html={t.title}
+                        className="text-sm text-ink-primary studio-ellipsis"
+                      />
                       <span className="text-xs font-mono text-ink-muted tabular-nums shrink-0">
                         {pct}% ({pubCount}/{maxDocs})
                       </span>
@@ -411,7 +416,7 @@ export function StudioOverviewPanel({
               <div className="py-2 flex items-baseline justify-between gap-3">
                 <dt className="text-ink-muted">{s.configSiteName}</dt>
                 <dd className="m-0 font-semibold text-ink-primary studio-ellipsis">
-                  {siteSettings.site_name}
+                  <SafeHtml as="span" html={siteSettings.site_name} />
                 </dd>
               </div>
               <div className="py-2 flex items-baseline justify-between gap-3">

@@ -1,3 +1,5 @@
+import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
+
 interface SectionTaskControl {
   checked: boolean;
   readOnly?: boolean;
@@ -101,13 +103,13 @@ export function SketchHeading({
                 >
                   §{number}
                 </span>
-                <span
+                <SafeHtml
+                  as="span"
+                  html={text}
                   className={`align-middle transition-colors ${
                     isChecked ? 'text-ink-secondary' : 'text-ink-primary'
                   }`}
-                >
-                  {text}
-                </span>
+                />
                 {isChecked && (
                   <span className="inline-flex align-middle items-center ms-2 px-2 py-0.5 rounded-md text-xs font-sans font-semibold leading-none ui-badge-pop bg-surface-sheet text-accent-success border border-border-subtle">
                     ✓ {taskControl.doneLabel}
@@ -119,7 +121,7 @@ export function SketchHeading({
 
           <a
             href={`#${id}`}
-            aria-label={jumpAriaLabel ?? `Jump to ${text}`}
+            aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
             className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-2 shrink-0"
           >
             #
@@ -154,10 +156,10 @@ export function SketchHeading({
         <span className="font-mono text-xs font-semibold px-1.5 py-0.5 rounded-lg bg-surface-sunken text-ink-muted shrink-0">
           §{number}
         </span>
-        <span>{text}</span>
+        <SafeHtml as="span" html={text} />
         <a
           href={`#${id}`}
-          aria-label={jumpAriaLabel ?? `Jump to ${text}`}
+          aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
           className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1"
         >
           #

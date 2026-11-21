@@ -72,6 +72,14 @@ export type VisualBlock =
     }
   | {
       id: string;
+      type: 'image';
+      src: string;
+      alt: string;
+      caption: string;
+      marginNote: string;
+    }
+  | {
+      id: string;
       type: 'quote';
       text: string;
     }
@@ -314,12 +322,38 @@ function isTableLine(trimmed: string): boolean {
   return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2;
 }
 
+function parseStandaloneImageLine(
+  trimmed: string,
+): { alt: string; src: string; caption: string } | null {
+  if (!trimmed.startsWith('![')) return null;
+  const closeAlt = trimmed.indexOf('](');
+  if (closeAlt === -1 || !trimmed.endsWith(')')) return null;
+  const alt = trimmed.slice(2, closeAlt).replace(/\\\]/g, ']');
+  const inner = trimmed.slice(closeAlt + 2, -1).trim();
+  if (!inner) return null;
+
+  let src = inner;
+  let caption = '';
+  const dqIdx = inner.indexOf(' "');
+  const sqIdx = inner.indexOf(" '");
+  if (dqIdx !== -1 && inner.endsWith('"')) {
+    src = inner.slice(0, dqIdx).trim();
+    caption = inner.slice(dqIdx + 2, -1).trim();
+  } else if (sqIdx !== -1 && inner.endsWith("'")) {
+    src = inner.slice(0, sqIdx).trim();
+    caption = inner.slice(sqIdx + 2, -1).trim();
+  }
+  if (!src || /\s/.test(src)) return null;
+  return { alt, src, caption };
+}
+
 function isBlockStart(trimmed: string): boolean {
   if (!trimmed) return true;
   if (/^#{1,6}\s+/.test(trimmed)) return true;
   if (trimmed.startsWith('```')) return true;
   if (trimmed.startsWith(':::')) return true;
   if (trimmed.startsWith('>')) return true;
+  if (parseStandaloneImageLine(trimmed) !== null) return true;
   if (isTaskListLine(trimmed) || isBulletListLine(trimmed) || isOrderedListLine(trimmed)) return true;
   if (isTableLine(trimmed)) return true;
   return false;
@@ -342,11 +376,15 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
       continue;
     }
 
-    // 1. Standalone :::margin[...] attaches to previous paragraph or code_card when possible
+    // 1. Standalone :::margin[...] attaches to previous paragraph, code_card, or image when possible
     if (trimmed.startsWith(':::margin[') && trimmed.endsWith(']')) {
       const note = trimmed.slice(':::margin['.length, -1).trim();
       const prev = blocks[blocks.length - 1];
-      if (prev && (prev.type === 'paragraph' || prev.type === 'code_card') && !prev.marginNote) {
+      if (
+        prev &&
+        (prev.type === 'paragraph' || prev.type === 'code_card' || prev.type === 'image') &&
+        !prev.marginNote
+      ) {
         prev.marginNote = note;
       } else if (note) {
         blocks.push({ id: createVisualId(), type: 'raw_markdown', content: trimmed });
@@ -609,6 +647,29 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
       continue;
     }
 
+    // 8b. Standalone Markdown Image (+ optional trailing :::margin[...])
+    const parsedImage = parseStandaloneImageLine(trimmed);
+    if (parsedImage) {
+      i += 1;
+      let marginNote = '';
+      if (i < lines.length) {
+        const nextTrim = lines[i].trim();
+        if (nextTrim.startsWith(':::margin[') && nextTrim.endsWith(']')) {
+          marginNote = nextTrim.slice(':::margin['.length, -1).trim();
+          i += 1;
+        }
+      }
+      blocks.push({
+        id: createVisualId(),
+        type: 'image',
+        src: parsedImage.src,
+        alt: parsedImage.alt,
+        caption: parsedImage.caption,
+        marginNote,
+      });
+      continue;
+    }
+
     // 9. Regular Paragraph (+ optional trailing :::margin[...])
     const paraLines: string[] = [];
     let marginNote = '';
@@ -735,6 +796,16 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
         );
         break;
       }
+      case 'image': {
+        const src = block.src.trim();
+        if (!src) break;
+        const alt = block.alt.trim().replace(/\]/g, '\\]');
+        const cap = block.caption.trim().replace(/"/g, "'");
+        const mdImg = cap ? `![${alt}](${src} "${cap}")` : `![${alt}](${src})`;
+        const note = block.marginNote.trim();
+        chunks.push(note ? `${mdImg}\n:::margin[${note}]` : mdImg);
+        break;
+      }
       case 'quote': {
         const text = block.text.trim();
         if (!text) break;
@@ -808,6 +879,8 @@ export function createDefaultVisualBlock(kind: VisualBlock['type']): VisualBlock
       };
     case 'list':
       return { id, type: 'list', ordered: false, items: ['', ''] };
+    case 'image':
+      return { id, type: 'image', src: '', alt: '', caption: '', marginNote: '' };
     case 'quote':
       return { id, type: 'quote', text: '' };
     case 'rough_diagram':

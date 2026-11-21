@@ -509,7 +509,7 @@ mark {
   border: 2px solid var(--sticker-border, var(--border-ink));
   background-color: var(--sticker-bg, var(--surface-sheet));
   color: var(--sticker-body, var(--ink-primary));
-  box-shadow: 3px 3px 0 0 var(--border-ink);
+  box-shadow: var(--shadow-control-hover);
 }
 
 .sticker-card[data-sticker-style="stamp"] {
@@ -827,13 +827,21 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   border-radius: 12px;
   border: 1px solid var(--border-subtle);
 }
+@media (max-width: 640px) {
+  .responsive-table-region {
+    max-block-size: none;
+    overflow: visible;
+    border: 0;
+  }
+}
 .responsive-table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   --col-2: "Auth Source";
-  --col-3: "Role";
-  --col-4: "WP ID";
+  --col-3: "Status";
+  --col-4: "Role";
+  --col-5: "Actions";
 }
 .responsive-table thead {
   position: sticky;
@@ -888,6 +896,11 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   }
   .responsive-table td:nth-child(4)::before {
     content: var(--col-4) ": ";
+    font-weight: 600;
+    color: var(--ink-muted);
+  }
+  .responsive-table td:nth-child(5)::before {
+    content: var(--col-5) ": ";
     font-weight: 600;
     color: var(--ink-muted);
   }
@@ -1572,63 +1585,446 @@ input[type="checkbox"][switch]:focus-visible {
   color: var(--ink-muted);
 }
 
-/* Branded Stationery Select (`modern-web-guidance/branded-select-styling`)
- * Progressively opts into `appearance: base-select` top-layer picker where supported,
- * while gracefully falling back to standard themed OS `<select>` in Firefox / Safari < 27. */
+/* Branded Stationery Select — native single-line truncation + crisp native chevron
+ * Adapts automatically to light/dark via viewport `color-scheme: light dark`. */
 .ink-select {
   inline-size: 100%;
+  min-inline-size: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
 
-@supports (appearance: base-select) {
-  .ink-select,
-  .ink-select::picker(select) {
-    appearance: base-select;
+.ink-select option {
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+}
+
+/* ============================================================================
+ * Unified Form Field System (Refactoring UI §1.5.3 & §2.5.3)
+ * Uniform subtle border at rest, crisp ink border on focus, inset well shadow
+ * ============================================================================ */
+@layer components {
+  .ink-field-label {
+    display: block;
+    margin-block-end: 0.375rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--ink-secondary);
   }
 
-  .ink-select {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
+  .ink-field-input {
     inline-size: 100%;
-  }
-
-  .ink-select::picker(select) {
-    margin-block-start: 0.25rem;
-    padding: 0.375rem;
+    padding: 0.5rem 0.75rem;
     border-radius: 12px;
-    background-color: var(--surface-sheet);
-    color: var(--ink-primary);
-    border: 2px solid var(--border-ink);
-    box-shadow: var(--shadow-floating);
-  }
-
-  .ink-select::picker-icon {
-    color: var(--ink-muted);
-  }
-
-  .ink-select option {
-    padding: 0.45rem 0.625rem;
-    border-radius: 8px;
-    color: var(--ink-primary);
-    font-size: 0.8125rem;
-    cursor: pointer;
-  }
-
-  .ink-select option:hover,
-  .ink-select option:focus-visible {
     background-color: var(--surface-raised);
+    color: var(--ink-primary);
+    border: 1px solid var(--border-subtle);
+    font-size: 0.875rem;
+    box-shadow: var(--shadow-inset);
+    transition: border-color 140ms ease-out;
   }
 
-  .ink-select option:checked {
-    background-color: var(--action-subtle);
-    color: var(--link-ink);
-    font-weight: 600;
+  .ink-field-input:hover:not(:disabled) {
+    border-color: var(--ink-muted);
   }
 
-  .ink-select option::checkmark {
-    color: var(--link-ink);
-    font-weight: 600;
+  .ink-field-input:focus {
+    border-color: var(--border-ink);
+    outline: none;
   }
+
+  .ink-field-input:focus-visible {
+    border-color: var(--border-ink);
+    outline: 2px solid var(--action-bg);
+    outline-offset: 2px;
+  }
+}
+
+/* ============================================================================
+ * Top-Layer Toast Stack (Popover API `popover="manual"`)
+ * Renders ABOVE native `<dialog>.showModal()` backdrops so modal errors stay crisp
+ * ============================================================================ */
+.ink-toast-stack {
+  position: fixed;
+  inset: auto 1rem 1rem auto;
+  z-index: 90;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  inline-size: min(24rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.ink-toast-stack[popover]:not(:popover-open) {
+  display: none;
+}
+
+.ink-toast-stack[popover]:popover-open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+/* ============================================================================
+ * WordPress / Canva-Inspired 3-Zone Studio Article Editor Layout
+ * Clean separation: Top Action & Contextual Tool Bar | Center Canvas | Right Inspector
+ * ============================================================================ */
+.studio-editor-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-inline-size: 0;
+}
+
+.studio-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-inline-size: 0;
+  align-items: stretch;
+}
+
+@media (min-width: 1280px) {
+  .studio-editor-body {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .studio-editor-inspector {
+    inline-size: 20rem;
+    flex-shrink: 0;
+    position: sticky;
+    inset-block-start: 1rem;
+    max-block-size: calc(100dvh - 5.5rem);
+    overflow-y: auto;
+  }
+}
+
+/* ============================================================================
+ * Modern Web Guidance Primitives (`forms`, `validate-input-after-interaction`,
+ * `autofill-highlight-inputs`, `style-parent-with-has`, `sms-otp-form`, `tabs`,
+ * `improve-text-layout-and-legibility`)
+ * ============================================================================ */
+
+/* Canonical accessible visually-hidden utility */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* Editorial stationery backdrop for standalone Auth Flow pages */
+.auth-canvas-bg {
+  background-color: var(--surface-page);
+  background-image:
+    radial-gradient(
+      circle at 50% -10%,
+      color-mix(in srgb, var(--action-bg) 9%, transparent),
+      transparent 55%
+    ),
+    radial-gradient(
+      color-mix(in srgb, var(--ink-muted) 22%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 100% 100%, 24px 24px;
+  background-position: 0 0, 12px 12px;
+}
+
+.auth-heading-balance {
+  text-wrap: balance;
+}
+
+.auth-copy-pretty {
+  text-wrap: pretty;
+}
+
+/* Standalone Auth Form Inputs: >= 16px on mobile (prevents iOS auto-zoom),
+   44px+ touch target (48px on coarse pointers), post-interaction :user-invalid,
+   and non-layout-shifting :autofill highlight */
+.auth-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.625rem 0.875rem;
+  border-radius: 12px;
+  background-color: var(--surface-raised);
+  color: var(--ink-primary);
+  border: 1px solid var(--border-subtle);
+  font: inherit;
+  font-size: max(1rem, 1em);
+  line-height: 1.4;
+  box-shadow: var(--shadow-inset);
+  transition: border-color 140ms ease-out, background-color 140ms ease-out;
+}
+
+@media (min-width: 640px) {
+  .auth-input {
+    font-size: 0.9375rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .auth-input {
+    min-height: 48px;
+  }
+}
+
+.auth-input:hover:not(:disabled) {
+  border-color: var(--ink-muted);
+}
+
+.auth-input:focus {
+  border-color: var(--border-ink);
+  outline: none;
+}
+
+.auth-input:focus-visible {
+  border-color: var(--action-bg);
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+/* Brand-harmonized autofill highlight with non-color inset ring (`autofill-highlight-inputs`) */
+.auth-input:is(:autofill, :-webkit-autofill),
+.ink-field-input:is(:autofill, :-webkit-autofill) {
+  border-color: var(--action-bg);
+  box-shadow:
+    inset 0 0 0 2px color-mix(in srgb, var(--action-bg) 55%, transparent),
+    inset 0 0 0 100vmax var(--surface-raised);
+  -webkit-text-fill-color: var(--ink-primary);
+  caret-color: var(--ink-primary);
+}
+
+.auth-input:is(:autofill, :-webkit-autofill):focus-visible,
+.ink-field-input:is(:autofill, :-webkit-autofill):focus-visible {
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+/* Post-interaction validation feedback (`validate-input-after-interaction` + `style-parent-with-has`) */
+.auth-input:is(:user-invalid, .user-invalid-fallback, [aria-invalid="true"]) {
+  border-color: var(--accent-danger-ink);
+  background-color: color-mix(in srgb, var(--accent-danger-ink) 7%, var(--surface-raised));
+}
+
+.auth-input:required:is(:user-valid, .user-valid-fallback) {
+  border-color: color-mix(in srgb, var(--accent-success-ink) 65%, var(--border-subtle));
+}
+
+.auth-error-msg {
+  display: none;
+  margin-top: 0.375rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--accent-danger-ink);
+  align-items: flex-start;
+  gap: 0.35rem;
+}
+
+.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) .auth-error-msg,
+.auth-field:has(.otp-native-input:is(:user-invalid, .user-invalid-fallback)) .auth-error-msg,
+.auth-field.has-error-fallback .auth-error-msg {
+  display: flex;
+}
+
+.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) > label,
+.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) > div > label,
+.auth-field:has(.otp-native-input:is(:user-invalid, .user-invalid-fallback)) > label,
+.auth-field.has-error-fallback > label {
+  color: var(--accent-danger-ink);
+}
+
+/* Single-input 6-slot tactile OTP Form (`sms-otp-form` & `forms` §3) */
+.otp-shell {
+  position: relative;
+  width: 100%;
+}
+
+.otp-native-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: max(1rem, 16px);
+  letter-spacing: 0.5em;
+  z-index: 2;
+  cursor: text;
+}
+
+.otp-slot {
+  border: 1.5px solid var(--border-subtle);
+  background-color: var(--surface-raised);
+  color: var(--ink-primary);
+  box-shadow: var(--shadow-inset);
+  transition: border-color 140ms ease-out, background-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.otp-slot[data-filled="true"] {
+  border-color: var(--border-ink);
+  background-color: var(--surface-sheet);
+}
+
+.otp-shell:has(.otp-native-input:focus-visible) .otp-slot[data-active="true"],
+.otp-shell:has(.otp-native-input:focus) .otp-slot[data-active="true"] {
+  border-color: var(--action-bg);
+  background-color: var(--surface-sheet);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--action-bg) 22%, transparent);
+}
+
+.otp-shell:has(.otp-native-input:is(:user-invalid, .user-invalid-fallback)) .otp-slot {
+  border-color: var(--accent-danger-ink);
+  background-color: color-mix(in srgb, var(--accent-danger-ink) 7%, var(--surface-raised));
+}
+
+@keyframes otp-caret-blink {
+  0%, 48% { opacity: 1; }
+  52%, 100% { opacity: 0; }
+}
+
+.otp-caret {
+  width: 2px;
+  height: 1.35rem;
+  border-radius: 999px;
+  background-color: var(--action-bg);
+  animation: otp-caret-blink 1.05s steps(1, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .otp-caret {
+    animation: none;
+  }
+}
+
+/* Accessible Single-Row Tabs with WCAG 1.4.1 non-color shape indicator (`tabs`) */
+.mwg-tablist {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0.25rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  scroll-snap-type: inline proximity;
+  padding: 0.25rem;
+  border-radius: 12px;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+}
+
+.mwg-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.mwg-tab {
+  position: relative;
+  flex: none;
+  scroll-snap-align: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.mwg-tab-fill {
+  flex: 1 1 0%;
+}
+
+.mwg-tab:hover {
+  color: var(--ink-primary);
+}
+
+.mwg-tab:focus-visible {
+  outline: 2px solid var(--action-bg);
+  outline-offset: -2px;
+}
+
+.mwg-tab[aria-selected="true"] {
+  color: var(--ink-primary);
+  background-color: var(--surface-sheet);
+  border-color: var(--border-subtle);
+}
+
+/* Forced-colors-safe shape underline that never shifts tab dimensions */
+.mwg-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0.625rem 0.125rem;
+  border-block-end: 2.5px solid var(--action-bg);
+  border-radius: 999px;
+}
+
+/* Native <progress> Password Strength Bar (`modern-web-guidance/progress`)
+ * - Mandatory appearance: none + border: 0 solid + overflow: clip (no border-radius: inherit)
+ * - Separate -webkit- and -moz- pseudo-element rules so neither browser invalidates the selector
+ * - Dynamic fill color routed through --progress-bar-fill on the <progress> element */
+.pw-strength-track {
+  position: relative;
+  display: block;
+  inline-size: 100%;
+  block-size: 0.45rem;
+}
+
+.pw-strength-meter {
+  --progress-bar-radius: 1e5px;
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  appearance: none;
+  border: 0 solid;
+  border-radius: var(--progress-bar-radius);
+  overflow: clip;
+  background: var(--surface-sunken);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.1);
+}
+
+.pw-strength-meter::-webkit-progress-bar {
+  background: transparent;
+}
+
+.pw-strength-meter::-webkit-progress-value {
+  background: var(--progress-bar-fill, var(--action-bg));
+  transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+}
+
+.pw-strength-meter::-moz-progress-bar {
+  background: var(--progress-bar-fill, var(--action-bg));
+  transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+}
+
+/* Subtle 4-tier segment tick overlays across the native <progress> bar */
+.pw-strength-ticks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.pw-strength-ticks > span:not(:last-child) {
+  border-inline-end: 2px solid var(--surface-sheet);
 }
