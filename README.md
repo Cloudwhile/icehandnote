@@ -52,9 +52,9 @@ Pre-built standalone bundles (containing `icehandnote-api`, `icehandnote-cli`, c
 
 | Image Tag | Description |
 | :--- | :--- |
-| `ghcr.io/cloudwhile/icehandnote:<tag>` | Published release tag version (e.g. `v0.1.0-rc.2`) |
-| `ghcr.io/cloudwhile/icehandnote:sha256-<digest>` | Unreleased latest build versioned by container `sha256` digest |
-| `ghcr.io/cloudwhile/icehandnote:latest` | Latest build from the default `main` branch |
+| `ghcr.io/cloudwhile/icehandnote:<tag>` | Published release tag version (e.g. `v0.1.0-rc.3`) |
+| `ghcr.io/cloudwhile/icehandnote:latest` | Latest published `v*` release tag (only updated on tag pushes, never on `sha256-*` branch builds) |
+| `ghcr.io/cloudwhile/icehandnote:sha256-<digest>` | Unreleased `main` branch snapshot versioned by container `sha256` digest |
 
 ---
 

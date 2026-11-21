@@ -41,7 +41,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract Docker metadata (release tag vs. latest build)
+      - name: Extract Docker metadata (release tag & latest vs. branch digest build)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -49,7 +49,12 @@ jobs:
           tags: |
             type=ref,event=pr
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (github.ref_type == 'tag' && !contains(github.ref_name, '-')) }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+
+      - name: Resolve lowercase image name
+        id: img
+        run: |
+          echo "name=$(echo "${{ env.REGISTRY }}/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build image locally for container smoke test
         uses: docker/build-push-action@v6
@@ -96,9 +101,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push image to GHCR
-        id: push
-        if: github.event_name != 'pull_request'
+      - name: Push release tag & latest to GHCR (v* tag events only)
+        id: push_tag
+        if: github.event_name != 'pull_request' && github.ref_type == 'tag'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -111,50 +116,97 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Version GHCR image, verify pull & refresh README badge cache
+      - name: Push branch build by digest to GHCR without touching latest (branch events)
+        id: push_branch
+        if: github.event_name != 'pull_request' && github.ref_type != 'tag'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
+          provenance: false
+          sbom: false
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.img.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Version GHCR image, enforce tag-only latest & update Shields.io badge
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_SLUG: ${{ github.repository }}
-          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST: ${{ steps.push_tag.outputs.digest || steps.push_branch.outputs.digest }}
           IS_TAG: ${{ github.ref_type == 'tag' }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
           REPO_LOWER=$(echo "$REPO_SLUG" | tr '[:upper:]' '[:lower:]')
           IMAGE_LOWER="ghcr.io/${REPO_LOWER}"
           PKG_NAME=$(basename "$REPO_LOWER")
           OWNER="${{ github.repository_owner }}"
+          ACCEPT_HDR="application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json"
+
+          TOKEN=$(curl -fsSL -u "${GITHUB_ACTOR}:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO_LOWER}:pull,push" | jq -r .token)
+
+          attach_tag_to_digest() {
+            local src_ref="$1"
+            local dst_tag="$2"
+            local headers_file body_file ct
+            headers_file=$(mktemp)
+            body_file=$(mktemp)
+            curl -fsSL -D "$headers_file" -o "$body_file" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: ${ACCEPT_HDR}" \
+              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${src_ref}"
+            ct=$(awk 'tolower($0) ~ /^content-type:/ {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); c=$0} END{print c}' "$headers_file")
+            curl -fsSL -X PUT \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Content-Type: ${ct}" \
+              --data-binary @"$body_file" \
+              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${dst_tag}" > /dev/null
+            rm -f "$headers_file" "$body_file"
+          }
 
           if [ "$IS_TAG" != "true" ]; then
             HEX="${DIGEST#sha256:}"
             GHCR_VERSION="sha256-${HEX:0:12}"
-            echo "Attaching :${GHCR_VERSION} directly to manifest ${DIGEST}"
-
-            TOKEN=$(curl -fsSL -u "${GITHUB_ACTOR}:${GH_TOKEN}" \
-              "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO_LOWER}:pull,push" | jq -r .token)
-            HEADERS_FILE=$(mktemp)
-            BODY_FILE=$(mktemp)
-            curl -fsSL -D "$HEADERS_FILE" -o "$BODY_FILE" \
-              -H "Authorization: Bearer ${TOKEN}" \
-              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
-              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${DIGEST}"
-            CT=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/\r$/, ""); print $2; exit}' "$HEADERS_FILE")
-            curl -fsSL -X PUT \
-              -H "Authorization: Bearer ${TOKEN}" \
-              -H "Content-Type: ${CT}" \
-              --data-binary @"$BODY_FILE" \
-              "https://ghcr.io/v2/${REPO_LOWER}/manifests/${GHCR_VERSION}" > /dev/null
-
+            echo "Attaching :${GHCR_VERSION} directly to manifest ${DIGEST} (never attaching :latest on branch builds)"
+            attach_tag_to_digest "${DIGEST}" "${GHCR_VERSION}"
             docker pull "${IMAGE_LOWER}:${GHCR_VERSION}"
-            docker pull "${IMAGE_LOWER}:latest"
           else
             GHCR_VERSION="${REF_NAME}"
             docker pull "${IMAGE_LOWER}:${REF_NAME}"
+            docker pull "${IMAGE_LOWER}:latest"
           fi
 
-          # Prune superseded non-release sha256-* / sha-* / main versions (never touch untagged child manifests)
+          # Fetch GHCR package versions to self-heal any legacy :latest stuck on sha256-* and prune old branch snapshots
           VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
+
+          if [ "$IS_TAG" != "true" ]; then
+            # If :latest was historically attached to a non-v* sha256-* manifest, move :latest onto the newest v* release tag
+            LATEST_HAS_VTAG=$(echo "$VERSIONS_JSON" | jq -r '
+              [.[] | select((.metadata.container.tags // []) | index("latest"))]
+              | if length == 0 then "none"
+                elif ((.[0].metadata.container.tags // []) | any(test("^v"))) then "ok"
+                else "drift"
+                end
+            ')
+            if [ "$LATEST_HAS_VTAG" = "drift" ]; then
+              NEWEST_VTAG_DIGEST=$(echo "$VERSIONS_JSON" | jq -r '
+                [.[] | select((.metadata.container.tags // []) | any(test("^v")))]
+                | sort_by(.created_at) | reverse | .[0].name // ""
+              ')
+              if [ -n "$NEWEST_VTAG_DIGEST" ]; then
+                echo "Healing :latest off non-tag manifest onto newest release tag digest ${NEWEST_VTAG_DIGEST}"
+                attach_tag_to_digest "${NEWEST_VTAG_DIGEST}" "latest"
+                VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || gh api "/orgs/${OWNER}/packages/container/${PKG_NAME}/versions?per_page=100" 2>/dev/null || echo "[]")
+              fi
+            fi
+          fi
+
+          # Prune superseded non-release sha256-* / sha-* / main versions (never touch release tags or untagged child manifests)
           echo "$VERSIONS_JSON" | jq -r --arg cur "$DIGEST" '
             .[] | select(.name != $cur)
             | select((.metadata.container.tags // []) | (length > 0) and all(test("^(main|master|sha-[0-9a-f]+|sha256-[0-9a-f]+)$")))
@@ -166,25 +218,43 @@ jobs:
               || true
           done
 
-          # Record instant 0-latency GHCR version in GitHub Deployments API for the README Shields.io badge
-          DEPLOY_ID=$(jq -n \
-            --arg sha "$COMMIT_SHA" \
-            --arg ver "$GHCR_VERSION" \
-            --arg dig "$DIGEST" \
-            '{ref:$sha, environment:"ghcr", auto_merge:false, required_contexts:[], transient_environment:false, payload:{version:$ver, digest:$dig}}' \
-            | gh api --method POST "/repos/${REPO_SLUG}/deployments" --input - --jq .id 2>/dev/null || echo "")
-          if [ -n "$DEPLOY_ID" ]; then
-            gh api --method POST "/repos/${REPO_SLUG}/deployments/${DEPLOY_ID}/statuses" \
-              -f state=success \
-              -f environment_url="https://github.com/${REPO_SLUG}/pkgs/container/${PKG_NAME}" > /dev/null 2>&1 || true
+          # Record instant 0-latency GHCR version in GitHub Deployments API for the README Shields.io badge.
+          # Guard against branch build racing and overwriting a v* tag deployment for the exact same commit.
+          RECORD_DEPLOYMENT="true"
+          if [ "$IS_TAG" != "true" ]; then
+            TAG_ON_SHA=$( (gh api "/repos/${REPO_SLUG}/tags?per_page=30" 2>/dev/null || echo "[]") | jq -r --arg sha "$COMMIT_SHA" '
+              [.[] | select(.commit.sha == $sha and (.name | test("^v")))] | .[0].name // ""
+            ' )
+            if [ -n "$TAG_ON_SHA" ]; then
+              echo "Commit ${COMMIT_SHA} already carries release tag ${TAG_ON_SHA}; keeping tag badge intact."
+              RECORD_DEPLOYMENT="false"
+            fi
+          fi
+
+          if [ "$RECORD_DEPLOYMENT" = "true" ]; then
+            DEPLOY_ID=$(jq -n \
+              --arg sha "$COMMIT_SHA" \
+              --arg ver "$GHCR_VERSION" \
+              --arg dig "$DIGEST" \
+              --argjson is_tag "$([ "$IS_TAG" = "true" ] && echo true || echo false)" \
+              '{ref:$sha, environment:"ghcr", auto_merge:false, required_contexts:[], transient_environment:false, payload:{version:$ver, digest:$dig, is_tag:$is_tag}}' \
+              | gh api --method POST "/repos/${REPO_SLUG}/deployments" --input - --jq .id 2>/dev/null || echo "")
+            if [ -n "$DEPLOY_ID" ]; then
+              echo "Recorded GHCR Shields deployment #${DEPLOY_ID} -> version=${GHCR_VERSION} (${DIGEST})"
+              gh api --method POST "/repos/${REPO_SLUG}/deployments/${DEPLOY_ID}/statuses" \
+                -f state=success \
+                -f environment_url="https://github.com/${REPO_SLUG}/pkgs/container/${PKG_NAME}" > /dev/null 2>&1 || true
+            else
+              echo "::warning::Failed to record GHCR deployment for Shields.io badge"
+            fi
           fi
 
           # Immediately purge GitHub Camo README image cache so the GHCR badge updates in seconds
           for PAGE in "https://github.com/${REPO_SLUG}" "https://github.com/${REPO_SLUG}/blob/main/locales/README.zh-CN.md"; do
-            curl -fsSL "$PAGE" 2>/dev/null \
+            curl -fsSL --max-time 10 "$PAGE" 2>/dev/null \
               | grep -oE 'https://camo\.githubusercontent\.com/[0-9a-f]+/[0-9a-f]+' \
               | sort -u \
               | while read -r camo_url; do
-                  curl -fsSL -X PURGE "$camo_url" > /dev/null 2>&1 || true
+                  curl -fsSL --max-time 10 -X PURGE "$camo_url" > /dev/null 2>&1 || true
                 done
           done
