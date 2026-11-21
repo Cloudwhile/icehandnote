@@ -75,17 +75,19 @@ import { RC3_COPY } from '../lib/i18nRc3';
 import { normalizeLicenseId } from '../lib/licenses';
 import { SafeHtml, stripHtmlTags } from '../lib/sanitizer';
 import type { ResolvedTheme } from '../lib/theme';
-import type {
-  ArticleAuthorDto,
-  CollaboratorInviteDto,
-  LicenseId,
-  LocaleCode,
-  NotebookBlock,
-  SiteSettingsDto,
-  StudioStepEditorDto,
-  StudioTrackDto,
-  UserProfileDto,
-  UserRole,
+import {
+  getEffectiveOAuthProviders,
+  type ArticleAuthorDto,
+  type CollaboratorInviteDto,
+  type LicenseId,
+  type LocaleCode,
+  type NotebookBlock,
+  type SiteSettingsDto,
+  type StudioSettingsTabId,
+  type StudioStepEditorDto,
+  type StudioTrackDto,
+  type UserProfileDto,
+  type UserRole,
 } from '../lib/types';
 import {
   createDefaultVisualBlock,
@@ -270,6 +272,19 @@ export function StudioPage({
 
   // Dashboard shell navigation state
   const [activeSection, setActiveSection] = useState<StudioSectionId>('overview');
+  const [activeSettingsTab, setActiveSettingsTab] =
+    useState<StudioSettingsTabId>('general');
+  const handleSelectSettingsTab = useCallback((tab: StudioSettingsTabId) => {
+    setActiveSettingsTab(tab);
+    mainScrollRef.current?.scrollTo({ top: 0 });
+  }, []);
+  const enabledOAuthCount = useMemo(
+    () =>
+      getEffectiveOAuthProviders(siteSettings).filter(
+        (p) => p.enabled && p.client_id.trim(),
+      ).length,
+    [siteSettings],
+  );
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1280 : true,
@@ -1067,7 +1082,10 @@ export function StudioPage({
   };
 
   const handleSaveStep = async () => {
-    if (!docTitle.trim() || !selStep.trim() || saving) {
+    if (saving || (!isEditorDirty && docExists)) {
+      return;
+    }
+    if (!docTitle.trim() || !selStep.trim()) {
       toast.warning(s.missingTitleOrSlugBanner);
       return;
     }
@@ -1724,6 +1742,9 @@ export function StudioPage({
           locale={locale}
           activeSection={activeSection}
           onSelectSection={setActiveSection}
+          activeSettingsTab={activeSettingsTab}
+          onSelectSettingsTab={handleSelectSettingsTab}
+          enabledOAuthCount={enabledOAuthCount}
           isAdmin={isAdmin}
           tracks={tracks}
           usersCount={usersList.length}
@@ -1745,6 +1766,9 @@ export function StudioPage({
           locale={locale}
           activeSection={activeSection}
           onSelectSection={setActiveSection}
+          activeSettingsTab={activeSettingsTab}
+          onSelectSettingsTab={handleSelectSettingsTab}
+          enabledOAuthCount={enabledOAuthCount}
           isAdmin={isAdmin}
           tracks={tracks}
           usersCount={usersList.length}
@@ -2103,10 +2127,10 @@ export function StudioPage({
                     {/* ONE Primary Action on the Editor view (§2.8) + unsaved dirty dot */}
                     <button
                       type="button"
-                      disabled={saving}
+                      disabled={saving || (!isEditorDirty && docExists)}
                       onClick={() => void handleSaveStep()}
                       title="Ctrl+S / ⌘S"
-                      className="min-h-8 px-4 py-1.5 rounded-xl text-xs sm:text-sm font-semibold ink-btn-primary inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
+                      className="min-h-8 px-4 py-1.5 rounded-xl text-xs sm:text-sm font-semibold ink-btn-primary inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {isEditorDirty && !saving && (
                         <span
@@ -3138,9 +3162,11 @@ export function StudioPage({
           {/* SECTION E: Admin Site Settings                                  */}
           {/* --------------------------------------------------------------- */}
           {isAdmin && activeSection === 'settings' && (
-            <div key="studio-sec-settings" className="ui-panel-enter">
+            <div key={`studio-sec-settings-${activeSettingsTab}`} className="ui-panel-enter">
               <StudioSettingsPanel
                 locale={locale}
+                activeTab={activeSettingsTab}
+                onSelectTab={handleSelectSettingsTab}
                 settings={siteSettings}
                 onSettingsUpdated={onSettingsUpdated}
               />

@@ -414,6 +414,22 @@ export const api = {
       body: JSON.stringify({ current_password, new_password }),
     }),
 
+  sendEmailChangeCode: (new_email: string, locale?: LocaleCode) =>
+    fetchJson<{
+      ok: boolean;
+      cooldown_seconds: number;
+      expires_in_seconds: number;
+    }>('/api/v1/auth/me/email/send-code', {
+      method: 'POST',
+      body: JSON.stringify({ new_email, locale }),
+    }),
+
+  verifyEmailChange: (new_email: string, code: string) =>
+    fetchJson<UserProfileDto>('/api/v1/auth/me/email/verify', {
+      method: 'POST',
+      body: JSON.stringify({ new_email, code }),
+    }),
+
   getOAuthOnboarding: (token: string) =>
     fetchJson<OAuthOnboardingInfoDto>(
       `/api/v1/auth/oauth/onboarding/${encodeURIComponent(token)}`,
@@ -669,10 +685,20 @@ export const api = {
   },
 
   adminGetOAuthSecretStatus: () =>
-    fetchJson<{ has_client_secret: boolean }>('/api/v1/admin/oauth-secret'),
+    fetchJson<{
+      has_client_secret: boolean;
+      provider_secrets: Record<string, boolean>;
+    }>('/api/v1/admin/oauth-secret'),
 
-  adminUpdateOAuthSecret: (payload: { client_secret?: string; clear?: boolean }) =>
-    fetchJson<{ has_client_secret: boolean }>('/api/v1/admin/oauth-secret', {
+  adminUpdateOAuthSecret: (payload: {
+    provider_id?: string;
+    client_secret?: string;
+    clear?: boolean;
+  }) =>
+    fetchJson<{
+      has_client_secret: boolean;
+      provider_secrets: Record<string, boolean>;
+    }>('/api/v1/admin/oauth-secret', {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
@@ -701,7 +727,14 @@ export const api = {
     }),
 
   adminPreviewSmtpTemplate: (payload: {
-    template_kind: 'register_code' | 'login_anomaly' | 'invite' | 'reset' | 'takedown' | 'test';
+    template_kind:
+      | 'register_code'
+      | 'login_anomaly'
+      | 'email_change'
+      | 'invite'
+      | 'reset'
+      | 'takedown'
+      | 'test';
     locale?: LocaleCode;
     subject?: string;
     html?: string;

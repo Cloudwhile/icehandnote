@@ -50,13 +50,14 @@ import {
 import { RC3_COPY } from '../lib/i18nRc3';
 import { SafeHtml } from '../lib/sanitizer';
 import type { ResolvedTheme } from '../lib/theme';
-import type {
-  AvatarSource,
-  LocaleCode,
-  LoginOtpChallengeResponse,
-  OAuthOnboardingInfoDto,
-  SiteSettingsDto,
-  UserProfileDto,
+import {
+  getEffectiveOAuthProviders,
+  type AvatarSource,
+  type LocaleCode,
+  type LoginOtpChallengeResponse,
+  type OAuthOnboardingInfoDto,
+  type SiteSettingsDto,
+  type UserProfileDto,
 } from '../lib/types';
 import { useAccessibleFormValidation } from '../lib/useFormValidation';
 
@@ -909,11 +910,16 @@ export function AuthFlowPage({
   const activeLocaleShort =
     LOCALES.find((l) => l.code === locale)?.short ?? locale;
 
-  const oauthEnabled = siteSettings.oauth_enabled;
-  const oauthLabel = siteSettings.oauth_provider_name.trim() || 'OAuth';
+  const enabledOAuthProviders = getEffectiveOAuthProviders(siteSettings).filter(
+    (p) => p.enabled && p.client_id.trim().length > 0,
+  );
+  const oauthEnabled = enabledOAuthProviders.length > 0;
+  const oauthLabel =
+    enabledOAuthProviders[0]?.name.trim() ||
+    siteSettings.oauth_provider_name.trim() ||
+    'OAuth';
   const ssoEnabled =
     siteSettings.sso_enabled && Boolean(siteSettings.blog_origin_url.trim());
-  const oauthUrl = `/api/v1/auth/oauth/authorize?return_to=${encodeURIComponent(returnTo)}`;
 
   const anomalyDescription =
     loginChallenge?.anomaly_reason === 'new_ip'
@@ -1219,14 +1225,21 @@ export function AuthFlowPage({
                         <span className="h-px flex-1 bg-border-subtle" />
                       </div>
 
-                      {oauthEnabled && (
-                        <a
-                          href={oauthUrl}
-                          className="w-full min-h-10 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center justify-center no-underline"
-                        >
-                          {copy.oauthSignInBtn(oauthLabel)}
-                        </a>
-                      )}
+                      {oauthEnabled &&
+                        enabledOAuthProviders.map((provider) => {
+                          const label =
+                            provider.name.trim() || provider.id || 'OAuth';
+                          const href = `/api/v1/auth/oauth/authorize?provider=${encodeURIComponent(provider.id)}&return_to=${encodeURIComponent(returnTo)}`;
+                          return (
+                            <a
+                              key={provider.id}
+                              href={href}
+                              className="w-full min-h-10 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center justify-center no-underline"
+                            >
+                              {copy.oauthSignInBtn(label)}
+                            </a>
+                          );
+                        })}
 
                       {ssoEnabled && blogSsoEntryUrl && (
                         <a

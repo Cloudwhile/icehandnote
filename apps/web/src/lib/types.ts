@@ -450,6 +450,24 @@ export interface TakedownStepResponseDto {
 
 export type DefaultThemeSetting = 'system' | 'dark' | 'light';
 
+export type StudioSettingsTabId =
+  | 'general'
+  | 'oauth'
+  | 'storage'
+  | 'smtp'
+  | 'updates';
+
+export interface OAuthProviderDto {
+  id: string;
+  enabled: boolean;
+  name: string;
+  client_id: string;
+  authorize_url: string;
+  token_url: string;
+  userinfo_url: string;
+  scopes: string;
+}
+
 export interface SiteSettingsDto {
   site_name: string;
   brand_badge: string;
@@ -476,11 +494,45 @@ export interface SiteSettingsDto {
   oauth_token_url: string;
   oauth_userinfo_url: string;
   oauth_scopes: string;
+  oauth_providers?: OAuthProviderDto[];
   enable_margin_notes: boolean;
   enable_likes: boolean;
   enable_progress_tracking: boolean;
   enable_draft_autosave: boolean;
   draft_autosave_interval_secs: number;
+}
+
+export function getEffectiveOAuthProviders(
+  settings: SiteSettingsDto,
+): OAuthProviderDto[] {
+  if (settings.oauth_providers && settings.oauth_providers.length > 0) {
+    return settings.oauth_providers;
+  }
+  if (
+    settings.oauth_enabled ||
+    settings.oauth_client_id.trim() ||
+    settings.oauth_authorize_url.trim()
+  ) {
+    const fallbackId =
+      settings.oauth_provider_name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'default';
+    return [
+      {
+        id: fallbackId,
+        enabled: settings.oauth_enabled,
+        name: settings.oauth_provider_name,
+        client_id: settings.oauth_client_id,
+        authorize_url: settings.oauth_authorize_url,
+        token_url: settings.oauth_token_url,
+        userinfo_url: settings.oauth_userinfo_url,
+        scopes: settings.oauth_scopes || 'openid profile email',
+      },
+    ];
+  }
+  return [];
 }
 
 export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
@@ -509,6 +561,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   oauth_token_url: '',
   oauth_userinfo_url: '',
   oauth_scopes: 'openid profile email',
+  oauth_providers: [],
   enable_margin_notes: true,
   enable_likes: true,
   enable_progress_tracking: true,

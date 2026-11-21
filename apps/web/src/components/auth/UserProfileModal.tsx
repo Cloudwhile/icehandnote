@@ -11,18 +11,20 @@ import {
 import { api, clearAuthSession, getSessionToken } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
 import { RC3_COPY } from '../../lib/i18nRc3';
-import type {
-  AvatarSource,
-  LocaleCode,
-  SiteSettingsDto,
-  UserProfileDto,
-  UserSessionDto,
+import {
+  getEffectiveOAuthProviders,
+  type AvatarSource,
+  type LocaleCode,
+  type SiteSettingsDto,
+  type UserProfileDto,
+  type UserSessionDto,
 } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { IconMonitor, IconSmartphone, IconUpload } from '../ui/Icons';
 import { ModalDialog } from '../ui/ModalDialog';
 import { useToast } from '../ui/ToastProvider';
 import { UserAvatar } from '../ui/UserAvatar';
+import { OtpInput } from './OtpInput';
 import { PasswordStrengthMeter } from './PasswordStrengthMeter';
 
 interface UserProfileModalProps {
@@ -77,9 +79,20 @@ export function UserProfileModal({
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [savingPw, setSavingPw] = useState(false);
+
+  // Email change (new email OTP verification) state
+  const [changingEmail, setChangingEmail] = useState(false);
+  const [newEmailInput, setNewEmailInput] = useState('');
+  const [emailCodeSentTo, setEmailCodeSentTo] = useState('');
+  const [emailOtpCode, setEmailOtpCode] = useState('');
+  const [sendingEmailCode, setSendingEmailCode] = useState(false);
+  const [verifyingEmail, setVerifyingEmail] = useState(false);
+  const [emailCooldownSecs, setEmailCooldownSecs] = useState(0);
+
   const fileRef = useRef<HTMLInputElement | null>(null);
   const pwFormRef = useRef<HTMLFormElement | null>(null);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const wasOpenRef = useRef(false);
   const tabOrder = ['profile', 'security', 'sessions'] as const;
 
   useAccessibleFormValidation(pwFormRef, [open, tab]);
@@ -118,16 +131,35 @@ export function UserProfileModal({
   }, [toast]);
 
   useEffect(() => {
-    if (!open || !user) return;
-    setTab('profile');
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (!user) return;
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true;
+      setTab('profile');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setChangingEmail(false);
+      setNewEmailInput('');
+      setEmailCodeSentTo('');
+      setEmailOtpCode('');
+    }
     setDisplayName(user.display_name);
     setBio(user.bio ?? '');
     setAvatarSource(user.avatar_source ?? 'default');
     setUploadedAvatarUrl(user.uploaded_avatar_url ?? '');
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
   }, [open, user]);
+
+  useEffect(() => {
+    if (emailCooldownSecs <= 0) return;
+    const timer = window.setInterval(() => {
+      setEmailCooldownSecs((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [emailCooldownSecs]);
 
   useEffect(() => {
     if (!open || !user || tab !== 'sessions') return;
@@ -229,6 +261,61 @@ export function UserProfileModal({
     }
   };
 
+  const handleSendEmailChangeCode = async () => {
+    const clean = newEmailInput.trim();
+    if (!clean || !clean.includes('@') || sendingEmailCode || emailCooldownSecs > 0) {
+      return;
+    }
+    if (clean.toLowerCase() === (user.email || '').trim().toLowerCase()) {
+      toast.warning(p.emailSameAsCurrentErr);
+      return;
+    }
+    setSendingEmailCode(true);
+    try {
+      const res = await api.sendEmailChangeCode(clean, locale);
+      setEmailCodeSentTo(clean);
+      setEmailOtpCode('');
+      setEmailCooldownSecs(res.cooldown_seconds || 60);
+      toast.success(p.emailCodeSentMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setSendingEmailCode(false);
+    }
+  };
+
+  const handleVerifyEmailChange = async (e: FormEvent) => {
+    e.preventDefault();
+    const targetEmail = (emailCodeSentTo || newEmailInput).trim();
+    const cleanCode = emailOtpCode.trim();
+    if (!targetEmail || cleanCode.length < 6 || verifyingEmail) return;
+    setVerifyingEmail(true);
+    try {
+      const updated = await api.verifyEmailChange(targetEmail, cleanCode);
+      onUserUpdated(updated);
+      setChangingEmail(false);
+      setNewEmailInput('');
+      setEmailCodeSentTo('');
+      setEmailOtpCode('');
+      setEmailCooldownSecs(0);
+      toast.success(p.emailChangedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setVerifyingEmail(false);
+    }
+  };
+
+  const isProfileDirty =
+    displayName.trim() !== (user.display_name || '').trim() ||
+    bio.trim() !== (user.bio || '').trim() ||
+    avatarSource !== (user.avatar_source || 'default') ||
+    (avatarSource === 'upload' &&
+      uploadedAvatarUrl.trim() !== (user.uploaded_avatar_url || '').trim());
+
+  const isPasswordFormReady =
+    newPassword.length >= 8 && confirmPassword.length >= 8;
+
   const previewUrl =
     avatarSource === 'upload'
       ? uploadedAvatarUrl
@@ -243,10 +330,9 @@ export function UserProfileModal({
   const sessionToken = getSessionToken();
   const returnPath =
     typeof window !== 'undefined' ? window.location.pathname : `/${locale}`;
-  const bindOAuthUrl = sessionToken
-    ? `/api/v1/auth/oauth/authorize?bind_token=${encodeURIComponent(sessionToken)}&return_to=${encodeURIComponent(returnPath)}`
-    : '';
-  const providerLabel = siteSettings.oauth_provider_name.trim() || 'OAuth';
+  const enabledOAuthProviders = getEffectiveOAuthProviders(siteSettings).filter(
+    (prov) => prov.enabled && prov.client_id.trim().length > 0,
+  );
 
   return (
     <ModalDialog
@@ -346,7 +432,7 @@ export function UserProfileModal({
                 </div>
 
                 {avatarSource === 'upload' && (
-                  <div className="pt-0.5">
+                  <div className="relative pt-0.5">
                     <input
                       ref={fileRef}
                       type="file"
@@ -385,6 +471,27 @@ export function UserProfileModal({
               </div>
 
               <div>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-xs font-semibold text-ink-secondary">
+                    {p.currentEmailLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTab('security');
+                      setChangingEmail(true);
+                    }}
+                    className="text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                  >
+                    {p.changeEmailBtn}
+                  </button>
+                </div>
+                <div className="px-3 py-2 rounded-xl bg-surface-sunken text-ink-secondary border border-border-subtle text-xs font-mono truncate">
+                  {user.email || '—'}
+                </div>
+              </div>
+
+              <div>
                 <label htmlFor="prof-bio" className="ink-field-label">
                   {p.bioLabel}
                 </label>
@@ -403,8 +510,8 @@ export function UserProfileModal({
             <div className="flex items-center justify-end gap-3 pt-1">
               <button
                 type="submit"
-                disabled={savingProfile}
-                className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-60"
+                disabled={savingProfile || !isProfileDirty}
+                className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {savingProfile ? p.savingProfileBtn : p.saveProfileBtn}
               </button>
@@ -413,7 +520,114 @@ export function UserProfileModal({
           </div>
         ) : tab === 'security' ? (
           <div role="tabpanel" aria-labelledby="profile-tab-security" className="mt-5 space-y-6">
-            {siteSettings.oauth_enabled && (
+            {/* Email Address Change with New-Email OTP Verification */}
+            <div className="p-4 rounded-xl bg-surface-raised border border-border-subtle space-y-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="space-y-0.5 min-w-0">
+                  <div className="text-xs font-semibold text-ink-primary">
+                    {p.emailSectionTitle}
+                  </div>
+                  <div className="text-xs font-mono text-ink-muted truncate">
+                    {user.email || '—'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setChangingEmail((v) => !v);
+                    setEmailCodeSentTo('');
+                    setEmailOtpCode('');
+                  }}
+                  className="min-h-8 px-3 py-1 rounded-xl text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-ink-primary cursor-pointer shrink-0 transition-colors"
+                >
+                  {changingEmail ? p.cancelChangeEmailBtn : p.changeEmailBtn}
+                </button>
+              </div>
+
+              {changingEmail && (
+                <form
+                  method="POST"
+                  onSubmit={(e) => void handleVerifyEmailChange(e)}
+                  className="pt-3 border-t border-dashed border-border-subtle space-y-3.5 ui-panel-enter"
+                >
+                  <div>
+                    <label htmlFor="sec-new-email" className="ink-field-label">
+                      {p.newEmailLabel}
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        id="sec-new-email"
+                        type="email"
+                        required
+                        autoComplete="email"
+                        value={newEmailInput}
+                        onChange={(e) => {
+                          setNewEmailInput(e.target.value);
+                          if (
+                            emailCodeSentTo &&
+                            e.target.value.trim().toLowerCase() !==
+                              emailCodeSentTo.toLowerCase()
+                          ) {
+                            setEmailCodeSentTo('');
+                            setEmailOtpCode('');
+                          }
+                        }}
+                        placeholder={p.newEmailPlaceholder}
+                        className="flex-1 min-w-44 ink-field-input text-xs font-mono"
+                      />
+                      <button
+                        type="button"
+                        disabled={
+                          sendingEmailCode ||
+                          emailCooldownSecs > 0 ||
+                          !newEmailInput.trim().includes('@')
+                        }
+                        onClick={() => void handleSendEmailChangeCode()}
+                        className="min-h-9 px-3 py-1.5 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {sendingEmailCode
+                          ? p.sendingEmailCodeBtn
+                          : emailCooldownSecs > 0
+                            ? p.resendEmailCodeIn(emailCooldownSecs)
+                            : p.sendEmailCodeBtn}
+                      </button>
+                    </div>
+                  </div>
+
+                  {emailCodeSentTo && (
+                    <div className="space-y-3 ui-panel-enter">
+                      <div>
+                        <label
+                          htmlFor="sec-new-email-otp"
+                          className="ink-field-label"
+                        >
+                          {p.emailOtpLabel}
+                        </label>
+                        <OtpInput
+                          id="sec-new-email-otp"
+                          value={emailOtpCode}
+                          onChange={setEmailOtpCode}
+                          disabled={verifyingEmail}
+                          autoFocus
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          disabled={verifyingEmail || emailOtpCode.trim().length < 6}
+                          className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {verifyingEmail
+                            ? p.verifyingEmailChangeBtn
+                            : p.verifyEmailChangeBtn}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </form>
+              )}
+            </div>
+            {(enabledOAuthProviders.length > 0 || Boolean(user.oauth_provider)) && (
               <div className="p-4 rounded-xl bg-surface-raised border border-border-subtle flex flex-wrap items-center justify-between gap-3">
                 <div className="space-y-0.5">
                   <div className="text-xs font-semibold text-ink-primary">
@@ -425,13 +639,22 @@ export function UserProfileModal({
                       : p.oauthNotLinkedText}
                   </div>
                 </div>
-                {!user.oauth_provider && bindOAuthUrl && (
-                  <a
-                    href={bindOAuthUrl}
-                    className="min-h-8 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-ink-primary no-underline inline-flex items-center transition-colors"
-                  >
-                    {p.oauthBindBtn(providerLabel)}
-                  </a>
+                {!user.oauth_provider && sessionToken && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {enabledOAuthProviders.map((prov) => {
+                      const label = prov.name.trim() || prov.id || 'OAuth';
+                      const bindUrl = `/api/v1/auth/oauth/authorize?provider=${encodeURIComponent(prov.id)}&bind_token=${encodeURIComponent(sessionToken)}&return_to=${encodeURIComponent(returnPath)}`;
+                      return (
+                        <a
+                          key={prov.id}
+                          href={bindUrl}
+                          className="min-h-8 px-3 py-1.5 rounded-xl text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-ink-primary no-underline inline-flex items-center transition-colors"
+                        >
+                          {p.oauthBindBtn(label)}
+                        </a>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             )}
@@ -498,8 +721,8 @@ export function UserProfileModal({
               <div className="flex justify-end pt-1">
                 <button
                   type="submit"
-                  disabled={savingPw}
-                  className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-60"
+                  disabled={savingPw || !isPasswordFormReady}
+                  className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {savingPw ? p.changingPasswordBtn : p.changePasswordBtn}
                 </button>

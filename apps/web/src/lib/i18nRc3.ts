@@ -133,6 +133,21 @@ export interface Rc3Messages {
     changePasswordBtn: string;
     changingPasswordBtn: string;
     passwordChangedMsg: string;
+    emailSectionTitle: string;
+    currentEmailLabel: string;
+    changeEmailBtn: string;
+    cancelChangeEmailBtn: string;
+    newEmailLabel: string;
+    newEmailPlaceholder: string;
+    sendEmailCodeBtn: string;
+    sendingEmailCodeBtn: string;
+    resendEmailCodeIn: (secs: number) => string;
+    emailCodeSentMsg: string;
+    emailOtpLabel: string;
+    verifyEmailChangeBtn: string;
+    verifyingEmailChangeBtn: string;
+    emailChangedMsg: string;
+    emailSameAsCurrentErr: string;
   };
   settings: {
     allowAuthorRegistrationLabel: string;
@@ -154,6 +169,27 @@ export interface Rc3Messages {
     smtpFromEmailLabel: string;
     smtpEmailFooterLabel: string;
     smtpEmailFooterPlaceholder: string;
+    smtpEmailFooterHint: string;
+    settingsTabs: {
+      general: string;
+      oauth: string;
+      storage: string;
+      smtp: string;
+      updates: string;
+    };
+    oauthSharedCallbackHint: string;
+    oauthAddGithubBtn: string;
+    oauthAddGoogleBtn: string;
+    oauthAddAuthentikBtn: string;
+    oauthAddCustomBtn: string;
+    oauthProviderIdLabel: string;
+    oauthProviderIdHint: string;
+    oauthRemoveProviderBtn: string;
+    oauthStatusEnabled: string;
+    oauthStatusDisabled: string;
+    oauthEmptyTitle: string;
+    oauthEmptyDesc: string;
+    oauthProvidersCount: (enabled: number, total: number) => string;
     smtpSaveBtn: string;
     smtpSavingBtn: string;
     smtpSavedMsg: string;
@@ -166,6 +202,7 @@ export interface Rc3Messages {
     smtpLoginAnomalyTab: string;
     smtpInviteTab: string;
     smtpResetTab: string;
+    smtpEmailChangeTab: string;
     smtpTakedownTab: string;
     smtpRegisterSubjectLabel: string;
     smtpRegisterHtmlLabel: string;
@@ -420,6 +457,21 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       changePasswordBtn: '更新密码',
       changingPasswordBtn: '更新中…',
       passwordChangedMsg: '登录密码已更新',
+      emailSectionTitle: '绑定邮箱',
+      currentEmailLabel: '当前邮箱',
+      changeEmailBtn: '更换邮箱',
+      cancelChangeEmailBtn: '取消',
+      newEmailLabel: '新邮箱地址',
+      newEmailPlaceholder: 'new@example.com',
+      sendEmailCodeBtn: '发送验证码',
+      sendingEmailCodeBtn: '发送中…',
+      resendEmailCodeIn: (secs) => `${secs}s 后可重发`,
+      emailCodeSentMsg: '验证码已发送至新邮箱，请查收并输入',
+      emailOtpLabel: '新邮箱 6 位验证码',
+      verifyEmailChangeBtn: '验证并更换邮箱',
+      verifyingEmailChangeBtn: '验证中…',
+      emailChangedMsg: '绑定邮箱已更新',
+      emailSameAsCurrentErr: '新邮箱不能与当前邮箱相同',
     },
     settings: {
       allowAuthorRegistrationLabel: '允许新用户注册时直接选择创作者身份',
@@ -439,8 +491,29 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpClearPasswordBtn: '清除密码',
       smtpFromNameLabel: '发件人名称',
       smtpFromEmailLabel: '发件人邮箱',
-      smtpEmailFooterLabel: '自定义邮件页脚（可选，支持 {{site_name}}）',
-      smtpEmailFooterPlaceholder: '留空则使用默认多语言手账页脚，例如：© 2026 {{site_name}} · 联系支持 support@example.com',
+      smtpEmailFooterLabel: '自定义邮件页脚（可选，支持安全 HTML 与 {{site_name}}）',
+      smtpEmailFooterPlaceholder: '留空则使用默认多语言手账页脚，例如：© 2026 <strong>{{site_name}}</strong> · <a href="https://example.com">访问官网</a>',
+      smtpEmailFooterHint: '支持 <a>、<strong>、<em>、<code>、<br> 等安全 HTML 标签及 {{site_name}} 变量，自动剥离脚本与不安全链接。',
+      settingsTabs: {
+        general: '常规设置',
+        oauth: 'OAuth 登录',
+        storage: '数据存储',
+        smtp: 'SMTP 邮件',
+        updates: '版本更新',
+      },
+      oauthSharedCallbackHint: '所有 OAuth 提供商共用下方回调地址，请在各平台应用的 Redirect URI 中填写：',
+      oauthAddGithubBtn: '+ GitHub',
+      oauthAddGoogleBtn: '+ Google',
+      oauthAddAuthentikBtn: '+ Authentik / OIDC',
+      oauthAddCustomBtn: '+ 自定义提供商',
+      oauthProviderIdLabel: '提供商标识 (ID)',
+      oauthProviderIdHint: '用于区分多个提供商的唯一英文标识（如 github、google、authentik）',
+      oauthRemoveProviderBtn: '移除',
+      oauthStatusEnabled: '已启用',
+      oauthStatusDisabled: '已停用',
+      oauthEmptyTitle: '尚未配置任何 OAuth 登录提供商',
+      oauthEmptyDesc: '点击上方按钮可添加一个或多个 OAuth 2.0 / OIDC 登录源（如 GitHub、Google、Authentik、Authelia）。',
+      oauthProvidersCount: (enabled, total) => `已启用 ${enabled} / 共 ${total} 个提供商`,
       smtpSaveBtn: '保存 SMTP 设置',
       smtpSavingBtn: '保存中…',
       smtpSavedMsg: 'SMTP 设置已保存',
@@ -453,6 +526,7 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpLoginAnomalyTab: '异常登录 OTP',
       smtpInviteTab: '协作邀请',
       smtpResetTab: '密码重置',
+      smtpEmailChangeTab: '更换邮箱',
       smtpTakedownTab: '下架通知',
       smtpRegisterSubjectLabel: '注册验证码邮件标题',
       smtpRegisterHtmlLabel: '注册验证码 HTML 源码',
@@ -706,6 +780,21 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       changePasswordBtn: 'Update Password',
       changingPasswordBtn: 'Updating…',
       passwordChangedMsg: 'Password updated successfully.',
+      emailSectionTitle: 'Email Address',
+      currentEmailLabel: 'Current email',
+      changeEmailBtn: 'Change Email',
+      cancelChangeEmailBtn: 'Cancel',
+      newEmailLabel: 'New email address',
+      newEmailPlaceholder: 'new@example.com',
+      sendEmailCodeBtn: 'Send Code',
+      sendingEmailCodeBtn: 'Sending…',
+      resendEmailCodeIn: (secs) => `Resend in ${secs}s`,
+      emailCodeSentMsg: 'Verification code sent to your new email address.',
+      emailOtpLabel: '6-digit verification code',
+      verifyEmailChangeBtn: 'Verify & Update Email',
+      verifyingEmailChangeBtn: 'Verifying…',
+      emailChangedMsg: 'Email address updated successfully.',
+      emailSameAsCurrentErr: 'New email must differ from your current email.',
     },
     settings: {
       allowAuthorRegistrationLabel: 'Allow new users to register directly as Authors',
@@ -725,8 +814,29 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpClearPasswordBtn: 'Clear password',
       smtpFromNameLabel: 'Sender Name',
       smtpFromEmailLabel: 'Sender Email',
-      smtpEmailFooterLabel: 'Custom Email Footer (optional, supports {{site_name}})',
-      smtpEmailFooterPlaceholder: 'Leave blank for localized default footer, e.g. © 2026 {{site_name}} · support@example.com',
+      smtpEmailFooterLabel: 'Custom Email Footer (optional, supports safe HTML & {{site_name}})',
+      smtpEmailFooterPlaceholder: 'Leave blank for default footer, e.g. © 2026 <strong>{{site_name}}</strong> · <a href="https://example.com">Website</a>',
+      smtpEmailFooterHint: 'Allows safe HTML tags (<a>, <strong>, <em>, <code>, <br>) and {{site_name}}; scripts and unsafe links are stripped automatically.',
+      settingsTabs: {
+        general: 'General',
+        oauth: 'OAuth Login',
+        storage: 'Data Storage',
+        smtp: 'SMTP Mail',
+        updates: 'Updates',
+      },
+      oauthSharedCallbackHint: 'All OAuth providers share this callback URL — register it as the Redirect URI in each provider app:',
+      oauthAddGithubBtn: '+ GitHub',
+      oauthAddGoogleBtn: '+ Google',
+      oauthAddAuthentikBtn: '+ Authentik / OIDC',
+      oauthAddCustomBtn: '+ Custom Provider',
+      oauthProviderIdLabel: 'Provider ID (slug)',
+      oauthProviderIdHint: 'Unique ASCII slug identifying this provider (e.g. github, google, authentik)',
+      oauthRemoveProviderBtn: 'Remove',
+      oauthStatusEnabled: 'Enabled',
+      oauthStatusDisabled: 'Disabled',
+      oauthEmptyTitle: 'No OAuth providers configured yet',
+      oauthEmptyDesc: 'Use the buttons above to add one or more OAuth 2.0 / OIDC providers (GitHub, Google, Authentik, Authelia, etc.).',
+      oauthProvidersCount: (enabled, total) => `${enabled} enabled / ${total} total`,
       smtpSaveBtn: 'Save SMTP Settings',
       smtpSavingBtn: 'Saving…',
       smtpSavedMsg: 'SMTP settings saved.',
@@ -739,6 +849,7 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpLoginAnomalyTab: 'Anomaly Login OTP',
       smtpInviteTab: 'Co-Author Invite',
       smtpResetTab: 'Password Reset',
+      smtpEmailChangeTab: 'Email Change',
       smtpTakedownTab: 'Takedown Notice',
       smtpRegisterSubjectLabel: 'Verification Code Subject',
       smtpRegisterHtmlLabel: 'Verification Code HTML Source',
@@ -994,6 +1105,21 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       changePasswordBtn: '更新密碼',
       changingPasswordBtn: '更新中…',
       passwordChangedMsg: '登入密碼已更新',
+      emailSectionTitle: '綁定信箱',
+      currentEmailLabel: '目前信箱',
+      changeEmailBtn: '更換信箱',
+      cancelChangeEmailBtn: '取消',
+      newEmailLabel: '新信箱地址',
+      newEmailPlaceholder: 'new@example.com',
+      sendEmailCodeBtn: '發送驗證碼',
+      sendingEmailCodeBtn: '發送中…',
+      resendEmailCodeIn: (secs) => `${secs}s 後可重寄`,
+      emailCodeSentMsg: '驗證碼已寄送至新信箱，請查收並輸入',
+      emailOtpLabel: '新信箱 6 位驗證碼',
+      verifyEmailChangeBtn: '驗證並更換信箱',
+      verifyingEmailChangeBtn: '驗證中…',
+      emailChangedMsg: '綁定信箱已更新',
+      emailSameAsCurrentErr: '新信箱不可與目前信箱相同',
     },
     settings: {
       allowAuthorRegistrationLabel: '允許新用戶註冊時直接選擇創作者身分',
@@ -1013,8 +1139,29 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpClearPasswordBtn: '清除密碼',
       smtpFromNameLabel: '寄件人名稱',
       smtpFromEmailLabel: '寄件人信箱',
-      smtpEmailFooterLabel: '自訂郵件頁尾（選填，支援 {{site_name}}）',
-      smtpEmailFooterPlaceholder: '留空則使用預設多語言手帳頁尾，例如：© 2026 {{site_name}} · support@example.com',
+      smtpEmailFooterLabel: '自訂郵件頁尾（選填，支援安全 HTML 與 {{site_name}}）',
+      smtpEmailFooterPlaceholder: '留空則使用預設多語言手帳頁尾，例如：© 2026 <strong>{{site_name}}</strong> · <a href="https://example.com">前往官網</a>',
+      smtpEmailFooterHint: '支援 <a>、<strong>、<em>、<code>、<br> 等安全 HTML 標籤與 {{site_name}} 變數，會自動移除腳本與不安全連結。',
+      settingsTabs: {
+        general: '常規設定',
+        oauth: 'OAuth 登入',
+        storage: '資料儲存',
+        smtp: 'SMTP 郵件',
+        updates: '版本更新',
+      },
+      oauthSharedCallbackHint: '所有 OAuth 提供商共用下方回呼網址，請於各平台應用的 Redirect URI 欄位填寫：',
+      oauthAddGithubBtn: '+ GitHub',
+      oauthAddGoogleBtn: '+ Google',
+      oauthAddAuthentikBtn: '+ Authentik / OIDC',
+      oauthAddCustomBtn: '+ 自訂提供商',
+      oauthProviderIdLabel: '提供商識別碼 (ID)',
+      oauthProviderIdHint: '用於區分多個提供商的唯一英文識別碼（如 github、google、authentik）',
+      oauthRemoveProviderBtn: '移除',
+      oauthStatusEnabled: '已啟用',
+      oauthStatusDisabled: '已停用',
+      oauthEmptyTitle: '尚未設定任何 OAuth 登入提供商',
+      oauthEmptyDesc: '點擊上方按鈕即可新增一個或多個 OAuth 2.0 / OIDC 登入來源（如 GitHub、Google、Authentik、Authelia）。',
+      oauthProvidersCount: (enabled, total) => `已啟用 ${enabled} / 共 ${total} 個提供商`,
       smtpSaveBtn: '儲存 SMTP 設定',
       smtpSavingBtn: '儲存中…',
       smtpSavedMsg: 'SMTP 設定已儲存',
@@ -1027,6 +1174,7 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpLoginAnomalyTab: '異常登入 OTP',
       smtpInviteTab: '協作邀請',
       smtpResetTab: '密碼重設',
+      smtpEmailChangeTab: '更換信箱',
       smtpTakedownTab: '下架通知',
       smtpRegisterSubjectLabel: '註冊驗證碼主旨',
       smtpRegisterHtmlLabel: '註冊驗證碼 HTML 原始碼',
@@ -1280,6 +1428,21 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       changePasswordBtn: 'パスワードを更新',
       changingPasswordBtn: '更新中…',
       passwordChangedMsg: 'パスワードを変更しました',
+      emailSectionTitle: 'メールアドレス',
+      currentEmailLabel: '現在のメールアドレス',
+      changeEmailBtn: 'メールアドレスを変更',
+      cancelChangeEmailBtn: 'キャンセル',
+      newEmailLabel: '新しいメールアドレス',
+      newEmailPlaceholder: 'new@example.com',
+      sendEmailCodeBtn: '確認コードを送信',
+      sendingEmailCodeBtn: '送信中…',
+      resendEmailCodeIn: (secs) => `${secs}秒後に再送信可`,
+      emailCodeSentMsg: '新しいメールアドレスに確認コードを送信しました',
+      emailOtpLabel: '新しいメール宛の 6 桁確認コード',
+      verifyEmailChangeBtn: '確認して変更する',
+      verifyingEmailChangeBtn: '確認中…',
+      emailChangedMsg: 'メールアドレスを変更しました',
+      emailSameAsCurrentErr: '現在のメールアドレスと同じです',
     },
     settings: {
       allowAuthorRegistrationLabel: '新規登録時に執筆者ロールの選択を許可する',
@@ -1299,8 +1462,29 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpClearPasswordBtn: 'クリア',
       smtpFromNameLabel: '差出人名',
       smtpFromEmailLabel: '差出人メールアドレス',
-      smtpEmailFooterLabel: 'カスタムメールフッター（任意・{{site_name}} 対応）',
-      smtpEmailFooterPlaceholder: '空欄で標準の多言語フッターを使用（例：© 2026 {{site_name}} · support@example.com）',
+      smtpEmailFooterLabel: 'カスタムメールフッター（任意・安全な HTML と {{site_name}} 対応）',
+      smtpEmailFooterPlaceholder: '空欄で標準フッターを使用（例：© 2026 <strong>{{site_name}}</strong> · <a href="https://example.com">公式サイト</a>）',
+      smtpEmailFooterHint: '<a>・<strong>・<em>・<code>・<br> などの安全な HTML タグと {{site_name}} が利用可能です（スクリプト等は自動除去）。',
+      settingsTabs: {
+        general: '一般設定',
+        oauth: 'OAuth ログイン',
+        storage: 'データ保存',
+        smtp: 'SMTP メール',
+        updates: 'アップデート',
+      },
+      oauthSharedCallbackHint: 'すべての OAuth プロバイダーで共通のコールバック URL を使用します。各アプリの Redirect URI に登録してください：',
+      oauthAddGithubBtn: '+ GitHub',
+      oauthAddGoogleBtn: '+ Google',
+      oauthAddAuthentikBtn: '+ Authentik / OIDC',
+      oauthAddCustomBtn: '+ カスタム追加',
+      oauthProviderIdLabel: 'プロバイダー ID (slug)',
+      oauthProviderIdHint: 'プロバイダーを識別する英数字スラッグ（例：github、google、authentik）',
+      oauthRemoveProviderBtn: '削除',
+      oauthStatusEnabled: '有効',
+      oauthStatusDisabled: '無効',
+      oauthEmptyTitle: 'OAuth プロバイダーがまだ設定されていません',
+      oauthEmptyDesc: '上のボタンから GitHub・Google・Authentik・カスタム OIDC プロバイダーを複数追加できます。',
+      oauthProvidersCount: (enabled, total) => `有効 ${enabled} / 全 ${total} 件`,
       smtpSaveBtn: 'SMTP 設定を保存',
       smtpSavingBtn: '保存中…',
       smtpSavedMsg: 'SMTP 設定を保存しました',
@@ -1313,6 +1497,7 @@ export const RC3_COPY: Record<LocaleCode, Rc3Messages> = {
       smtpLoginAnomalyTab: '異常ログイン OTP',
       smtpInviteTab: '共同執筆招待',
       smtpResetTab: 'パスワード再設定',
+      smtpEmailChangeTab: 'メール変更',
       smtpTakedownTab: '公開停止通知',
       smtpRegisterSubjectLabel: '登録確認コード件名',
       smtpRegisterHtmlLabel: '登録確認コード HTML ソース',

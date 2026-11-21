@@ -9,7 +9,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { UI_COPY } from '../../lib/i18n';
 import { RC3_COPY } from '../../lib/i18nRc3';
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
-import type { LocaleCode, StudioTrackDto } from '../../lib/types';
+import type {
+  LocaleCode,
+  StudioSettingsTabId,
+  StudioTrackDto,
+} from '../../lib/types';
 import {
   IconChevronDown,
   IconGrid,
@@ -26,10 +30,21 @@ export type StudioSectionId =
   | 'users'
   | 'settings';
 
+const SETTINGS_SUB_ITEMS: readonly StudioSettingsTabId[] = [
+  'general',
+  'oauth',
+  'storage',
+  'smtp',
+  'updates',
+];
+
 interface StudioSidebarContentProps {
   locale: LocaleCode;
   activeSection: StudioSectionId;
   onSelectSection: (section: StudioSectionId) => void;
+  activeSettingsTab: StudioSettingsTabId;
+  onSelectSettingsTab: (tab: StudioSettingsTabId) => void;
+  enabledOAuthCount: number;
   isAdmin: boolean;
   tracks: StudioTrackDto[];
   usersCount: number;
@@ -46,6 +61,9 @@ export function StudioSidebarContent({
   locale,
   activeSection,
   onSelectSection,
+  activeSettingsTab,
+  onSelectSettingsTab,
+  enabledOAuthCount,
   isAdmin,
   tracks,
   usersCount,
@@ -58,15 +76,22 @@ export function StudioSidebarContent({
   onCloseMobileDrawer,
 }: StudioSidebarContentProps) {
   const s = UI_COPY[locale].studio;
+  const settingsTabs = RC3_COPY[locale].settings.settingsTabs;
   const [treeQuery, setTreeQuery] = useState('');
   const [editorTreeOpen, setEditorTreeOpen] = useState(
     activeSection === 'editor',
   );
+  const [settingsTreeOpen, setSettingsTreeOpen] = useState(
+    activeSection === 'settings',
+  );
 
-  // Auto-expand the nested article tree whenever the author enters Editor mode
+  // Auto-expand the nested article tree or settings sub-menu when entering those sections
   useEffect(() => {
     if (activeSection === 'editor') {
       setEditorTreeOpen(true);
+    }
+    if (activeSection === 'settings') {
+      setSettingsTreeOpen(true);
     }
   }, [activeSection]);
 
@@ -361,17 +386,74 @@ export function StudioSidebarContent({
                 )}
               </button>
 
-              <button
-                type="button"
-                aria-current={activeSection === 'settings' ? 'page' : undefined}
-                onClick={() => navigateSection('settings')}
-                className="studio-nav-item"
-              >
-                <IconSettings className="w-4 h-4 text-ink-muted" />
-                <span className="flex-1 studio-ellipsis">
-                  {s.sections.settings}
-                </span>
-              </button>
+              <div>
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    aria-current={activeSection === 'settings' ? 'page' : undefined}
+                    onClick={() => {
+                      setSettingsTreeOpen(true);
+                      onSelectSection('settings');
+                    }}
+                    className="studio-nav-item flex-1 min-w-0"
+                  >
+                    <IconSettings className="w-4 h-4 text-ink-muted" />
+                    <span className="flex-1 studio-ellipsis">
+                      {s.sections.settings}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    aria-expanded={settingsTreeOpen}
+                    aria-label={s.sections.settings}
+                    onClick={() => setSettingsTreeOpen((v) => !v)}
+                    className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
+                  >
+                    <IconChevronDown
+                      className={`w-3.5 h-3.5 transition-transform ${
+                        settingsTreeOpen ? '' : '-rotate-90'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {settingsTreeOpen && (
+                  <ul className="ui-panel-enter m-0 ms-3.5 mt-1 mb-1.5 ps-2.5 py-0.5 list-none border-s border-border-subtle space-y-0.5">
+                    {SETTINGS_SUB_ITEMS.map((subId) => {
+                      const isSubActive =
+                        activeSection === 'settings' && activeSettingsTab === subId;
+                      return (
+                        <li key={subId}>
+                          <button
+                            type="button"
+                            aria-current={isSubActive ? 'location' : undefined}
+                            onClick={() => {
+                              onSelectSettingsTab(subId);
+                              onSelectSection('settings');
+                              onCloseMobileDrawer?.();
+                            }}
+                            className={`w-full min-h-8 px-2.5 py-1 rounded-lg text-xs flex items-center justify-between gap-2 text-start cursor-pointer transition-colors ${
+                              isSubActive
+                                ? 'bg-action-subtle text-ink-primary font-semibold'
+                                : 'text-ink-secondary hover:bg-surface-sheet hover:text-ink-primary'
+                            }`}
+                          >
+                            <span className="studio-ellipsis">
+                              {settingsTabs[subId]}
+                            </span>
+                            {subId === 'oauth' && enabledOAuthCount > 0 && (
+                              <span className="text-xs font-mono text-ink-muted tabular-nums shrink-0">
+                                {enabledOAuthCount}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
             </>
           )}
         </nav>
