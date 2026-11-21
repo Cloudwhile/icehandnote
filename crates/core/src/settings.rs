@@ -63,7 +63,7 @@ pub fn slugify_oauth_provider_id(raw: &str) -> String {
         }
     }
     let trimmed = out.trim_matches(['-', '_']).to_string();
-    if trimmed.len() >= 2 {
+    if !trimmed.is_empty() {
         trimmed
     } else {
         String::new()
@@ -121,6 +121,8 @@ pub struct SiteSettingsDto {
     /// Multi-provider OAuth 2.0 / OIDC configurations (preferred over legacy single-provider fields).
     #[serde(default)]
     pub oauth_providers: Vec<OAuthProviderDto>,
+    #[serde(default = "default_true")]
+    pub enable_passkeys: bool,
     #[serde(default = "default_true")]
     pub enable_margin_notes: bool,
     #[serde(default = "default_true")]
@@ -265,6 +267,9 @@ impl SiteSettingsDto {
                     Vec::new()
                 }
             },
+            enable_passkeys: env_non_empty("ENABLE_PASSKEYS")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(true),
             enable_margin_notes: true,
             enable_likes: true,
             enable_progress_tracking: true,
@@ -457,6 +462,17 @@ impl SiteSettingsDto {
             p.token_url = p.token_url.trim().chars().take(512).collect();
             p.userinfo_url = p.userinfo_url.trim().chars().take(512).collect();
             p.scopes = p.scopes.trim().chars().take(256).collect();
+            if p.name.is_empty()
+                && p.client_id.is_empty()
+                && p.authorize_url.is_empty()
+                && p.token_url.is_empty()
+                && p.userinfo_url.is_empty()
+            {
+                continue;
+            }
+            if !p.is_complete() {
+                p.enabled = false;
+            }
             if p.scopes.is_empty() {
                 p.scopes = default_oauth_scopes();
             }
@@ -611,5 +627,34 @@ mod tests {
         assert_eq!(lifted.oauth_providers.len(), 1);
         assert_eq!(lifted.oauth_providers[0].id, "authentik");
         assert!(lifted.oauth_providers[0].enabled);
+
+        // Blank entries are dropped and incomplete entries cannot stay enabled
+        let mut with_blanks = SiteSettingsDto::default_with_env("zh-CN", "");
+        with_blanks.oauth_providers = vec![
+            OAuthProviderDto {
+                id: "custom-oidc".to_string(),
+                enabled: true,
+                name: "".to_string(),
+                client_id: "".to_string(),
+                authorize_url: "".to_string(),
+                token_url: "".to_string(),
+                userinfo_url: "".to_string(),
+                scopes: "openid profile email".to_string(),
+            },
+            OAuthProviderDto {
+                id: "github".to_string(),
+                enabled: true,
+                name: "GitHub".to_string(),
+                client_id: "".to_string(),
+                authorize_url: "https://github.com/login/oauth/authorize".to_string(),
+                token_url: "https://github.com/login/oauth/access_token".to_string(),
+                userinfo_url: "https://api.github.com/user".to_string(),
+                scopes: "read:user user:email".to_string(),
+            },
+        ];
+        let scrubbed = with_blanks.sanitize().expect("scrub blanks");
+        assert_eq!(scrubbed.oauth_providers.len(), 1);
+        assert_eq!(scrubbed.oauth_providers[0].id, "github");
+        assert!(!scrubbed.oauth_providers[0].enabled);
     }
 }

@@ -37,11 +37,15 @@ pub enum ErrorCode {
     SessionNotFound,
     SsoInvalidSignature,
     DevSsoDisabled,
-    // OAuth
+    // OAuth & Passkeys
     OAuthNotConfigured,
     OAuthSessionExpired,
     OAuthTicketInvalid,
     OAuthAlreadyBound,
+    CannotUnbindLastAuth,
+    PasskeysDisabled,
+    PasskeyInvalid,
+    PasskeyNotFound,
     // Uploads
     UploadEmpty,
     UploadTooLarge,
@@ -118,6 +122,10 @@ impl ErrorCode {
             Self::OAuthSessionExpired => "OAUTH_SESSION_EXPIRED",
             Self::OAuthTicketInvalid => "OAUTH_TICKET_INVALID",
             Self::OAuthAlreadyBound => "OAUTH_ALREADY_BOUND",
+            Self::CannotUnbindLastAuth => "CANNOT_UNBIND_LAST_AUTH",
+            Self::PasskeysDisabled => "PASSKEYS_DISABLED",
+            Self::PasskeyInvalid => "PASSKEY_INVALID",
+            Self::PasskeyNotFound => "PASSKEY_NOT_FOUND",
             Self::UploadEmpty => "UPLOAD_EMPTY",
             Self::UploadTooLarge => "UPLOAD_TOO_LARGE",
             Self::UploadMissingField => "UPLOAD_MISSING_FIELD",
@@ -189,7 +197,9 @@ impl ErrorCode {
             | Self::StorageUrlRequired
             | Self::StorageModeInvalid
             | Self::TakedownReasonRequired
-            | Self::OAuthNotConfigured => 400,
+            | Self::OAuthNotConfigured
+            | Self::CannotUnbindLastAuth
+            | Self::PasskeyInvalid => 400,
 
             Self::Unauthorized
             | Self::SessionExpired
@@ -202,6 +212,7 @@ impl ErrorCode {
             | Self::AccountBanned
             | Self::RegistrationDisabled
             | Self::DevSsoDisabled
+            | Self::PasskeysDisabled
             | Self::StepTakenDown
             | Self::StepEditForbidden
             | Self::StepDeleteForbidden
@@ -215,7 +226,8 @@ impl ErrorCode {
             | Self::ChapterNotFound
             | Self::InviteTargetDeleted
             | Self::UserNotFound
-            | Self::SessionNotFound => 404,
+            | Self::SessionNotFound
+            | Self::PasskeyNotFound => 404,
 
             Self::Conflict
             | Self::UsernameTaken

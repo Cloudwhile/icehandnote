@@ -25,6 +25,16 @@ use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredOAuthBinding {
+    pub provider: String,
+    pub subject: String,
+    #[serde(default)]
+    pub oauth_avatar_url: String,
+    #[serde(default = "default_now_utc")]
+    pub bound_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredUserRecord {
     pub profile: UserProfileDto,
     pub password_hash: Option<String>,
@@ -32,6 +42,8 @@ pub struct StoredUserRecord {
     pub oauth_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_sub: Option<String>,
+    #[serde(default)]
+    pub oauth_bindings: Vec<StoredOAuthBinding>,
 }
 
 fn default_session_uuid() -> Uuid {
@@ -159,6 +171,8 @@ pub fn default_seeded_blog_users() -> Vec<StoredUserRecord> {
             oauth_avatar_url: String::new(),
             uploaded_avatar_url: String::new(),
             oauth_provider: None,
+            oauth_bindings: Vec::new(),
+            has_password: true,
             bio: "Site Administrator".to_string(),
             role: UserRole::Admin,
             auth_source: "local".to_string(),
@@ -169,6 +183,7 @@ pub fn default_seeded_blog_users() -> Vec<StoredUserRecord> {
         password_hash: Some(hash_password("admin", "icehandnote2026")),
         oauth_provider: None,
         oauth_sub: None,
+        oauth_bindings: Vec::new(),
     }]
 }
 
@@ -258,6 +273,8 @@ pub fn upsert_local_blog_user(
         oauth_avatar_url: claims.avatar_url.clone(),
         uploaded_avatar_url: String::new(),
         oauth_provider: None,
+        oauth_bindings: Vec::new(),
+        has_password: false,
         bio: String::new(),
         role: wp_role,
         auth_source,
@@ -270,6 +287,7 @@ pub fn upsert_local_blog_user(
         password_hash: None,
         oauth_provider: None,
         oauth_sub: None,
+        oauth_bindings: Vec::new(),
     });
     profile
 }

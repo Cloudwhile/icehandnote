@@ -8,7 +8,7 @@ use crate::{
         generate_raw_session_token, match_local_user_password, read_step_editor_from_bundle,
         resolve_local_step_authors, upsert_local_blog_user, user_can_edit_local_step,
         StoredCollabInviteRecord, StoredEmailVerificationRecord, StoredLoginOtpChallengeRecord,
-        StoredPasswordResetRecord, StoredSessionRecord, StoredStepMetaRecord,
+        StoredOAuthBinding, StoredPasswordResetRecord, StoredSessionRecord, StoredStepMetaRecord,
         StoredTrustedDeviceRecord, StoredUserRecord,
     },
     domain_err, TutorialRepository,
@@ -23,11 +23,13 @@ use icehandnote_core::{
         normalize_avatar_source, parse_user_agent_device, verify_password, BlogSsoClaims,
         CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, SaveStudioStepInput,
         SiteSettingsDto, StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput,
-        UserProfileDto, UserRole, UserSessionDto,
+        UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
     },
     build_highlighted_snippet,
     error::{DomainError, ErrorCode},
-    sanitize_user_note, ArticleTaskChecksDto, ChapterNavDto,
+    sanitize_user_note,
+    webauthn::StoredPasskeyCredential,
+    ArticleTaskChecksDto, ChapterNavDto,
     CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto, StepNavItemDto,
     StepNeighborDto, TrackSummaryDto, UserMarginNoteDto,
 };
@@ -67,6 +69,8 @@ struct PersistedUserState {
     #[serde(default)]
     collab_invites: Vec<StoredCollabInviteRecord>,
     #[serde(default)]
+    passkeys: Vec<StoredPasskeyCredential>,
+    #[serde(default)]
     site_settings: Option<SiteSettingsDto>,
 }
 
@@ -101,9 +105,37 @@ impl LocalSeedRepository {
         }
 
         for rec in &mut state.users {
+            if let (Some(prov), Some(sub)) = (rec.oauth_provider.clone(), rec.oauth_sub.clone()) {
+                let p_clean = prov.trim().to_ascii_lowercase();
+                let s_clean = sub.trim().to_string();
+                if !p_clean.is_empty()
+                    && !s_clean.is_empty()
+                    && !rec
+                        .oauth_bindings
+                        .iter()
+                        .any(|b| b.provider.eq_ignore_ascii_case(&p_clean))
+                {
+                    rec.oauth_bindings.push(StoredOAuthBinding {
+                        provider: p_clean.clone(),
+                        subject: s_clean,
+                        oauth_avatar_url: rec.profile.oauth_avatar_url.clone(),
+                        bound_at: rec.profile.last_login_at,
+                    });
+                }
+            }
             if rec.oauth_provider.is_some() && rec.profile.oauth_provider.is_none() {
                 rec.profile.oauth_provider = rec.oauth_provider.clone();
             }
+            rec.profile.oauth_bindings = rec
+                .oauth_bindings
+                .iter()
+                .map(|b| b.provider.clone())
+                .collect();
+            rec.profile.has_password = rec
+                .password_hash
+                .as_deref()
+                .map(|h| !h.trim().is_empty())
+                .unwrap_or(false);
         }
 
         Ok(Self {
@@ -133,7 +165,21 @@ impl LocalSeedRepository {
 
     fn resolve_user_dto(rec: &StoredUserRecord, gravatar_base: &str) -> UserProfileDto {
         let mut p = rec.profile.clone();
-        p.oauth_provider = rec.oauth_provider.clone();
+        p.oauth_bindings = rec
+            .oauth_bindings
+            .iter()
+            .map(|b| b.provider.clone())
+            .collect();
+        p.oauth_provider = p
+            .oauth_bindings
+            .first()
+            .cloned()
+            .or_else(|| rec.oauth_provider.clone());
+        p.has_password = rec
+            .password_hash
+            .as_deref()
+            .map(|h| !h.trim().is_empty())
+            .unwrap_or(false);
         p.with_resolved_avatar(gravatar_base)
     }
 
@@ -616,7 +662,7 @@ impl TutorialRepository for LocalSeedRepository {
         subject: &str,
         oauth_avatar_url: &str,
     ) -> Result<Option<UserProfileDto>> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         if clean_provider.is_empty() || clean_sub.is_empty() {
             return Ok(None);
@@ -624,11 +670,21 @@ impl TutorialRepository for LocalSeedRepository {
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
         if let Some(existing) = state.users.iter_mut().find(|u| {
-            u.oauth_provider.as_deref() == Some(clean_provider)
-                && u.oauth_sub.as_deref() == Some(clean_sub)
+            u.oauth_bindings.iter().any(|b| {
+                b.provider.eq_ignore_ascii_case(&clean_provider) && b.subject == clean_sub
+            }) || (u.oauth_provider.as_deref().map(|p| p.eq_ignore_ascii_case(&clean_provider))
+                == Some(true)
+                && u.oauth_sub.as_deref() == Some(clean_sub))
         }) {
             if !oauth_avatar_url.trim().is_empty() {
                 existing.profile.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+                if let Some(b) = existing
+                    .oauth_bindings
+                    .iter_mut()
+                    .find(|b| b.provider.eq_ignore_ascii_case(&clean_provider))
+                {
+                    b.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+                }
             }
             existing.profile.last_login_at = Utc::now();
             let dto = Self::resolve_user_dto(existing, &grav);
@@ -650,15 +706,18 @@ impl TutorialRepository for LocalSeedRepository {
         oauth_avatar_url: &str,
         uploaded_avatar_url: &str,
     ) -> Result<UserProfileDto> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         let clean_username = username.trim();
         let clean_email = email.trim();
 
         let mut state = self.state.write().await;
         if state.users.iter().any(|u| {
-            u.oauth_provider.as_deref() == Some(clean_provider)
-                && u.oauth_sub.as_deref() == Some(clean_sub)
+            u.oauth_bindings.iter().any(|b| {
+                b.provider.eq_ignore_ascii_case(&clean_provider) && b.subject == clean_sub
+            }) || (u.oauth_provider.as_deref().map(|p| p.eq_ignore_ascii_case(&clean_provider))
+                == Some(true)
+                && u.oauth_sub.as_deref() == Some(clean_sub))
         }) {
             return Err(domain_err(
                 ErrorCode::OAuthAlreadyBound,
@@ -698,6 +757,7 @@ impl TutorialRepository for LocalSeedRepository {
         } else {
             display_name.trim().to_string()
         };
+        let now = Utc::now();
 
         let prof = UserProfileDto {
             id: Uuid::new_v4(),
@@ -709,21 +769,29 @@ impl TutorialRepository for LocalSeedRepository {
             avatar_source: norm_source,
             oauth_avatar_url: oauth_avatar_url.trim().to_string(),
             uploaded_avatar_url: uploaded_avatar_url.trim().to_string(),
-            oauth_provider: Some(clean_provider.to_string()),
+            oauth_provider: Some(clean_provider.clone()),
+            oauth_bindings: vec![clean_provider.clone()],
+            has_password: false,
             bio: String::new(),
             role: safe_role,
-            auth_source: clean_provider.to_string(),
+            auth_source: clean_provider.clone(),
             is_banned: false,
             ban_reason: String::new(),
-            last_login_at: Utc::now(),
+            last_login_at: now,
         }
         .with_resolved_avatar(&grav);
 
         state.users.push(StoredUserRecord {
             profile: prof.clone(),
             password_hash: None,
-            oauth_provider: Some(clean_provider.to_string()),
+            oauth_provider: Some(clean_provider.clone()),
             oauth_sub: Some(clean_sub.to_string()),
+            oauth_bindings: vec![StoredOAuthBinding {
+                provider: clean_provider,
+                subject: clean_sub.to_string(),
+                oauth_avatar_url: oauth_avatar_url.trim().to_string(),
+                bound_at: now,
+            }],
         });
         self.persist_state(&state);
         Ok(prof)
@@ -736,14 +804,20 @@ impl TutorialRepository for LocalSeedRepository {
         subject: &str,
         oauth_avatar_url: &str,
     ) -> Result<UserProfileDto> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         let mut state = self.state.write().await;
 
         if state.users.iter().any(|u| {
             u.profile.id != user_id
-                && u.oauth_provider.as_deref() == Some(clean_provider)
-                && u.oauth_sub.as_deref() == Some(clean_sub)
+                && (u.oauth_bindings.iter().any(|b| {
+                    b.provider.eq_ignore_ascii_case(&clean_provider) && b.subject == clean_sub
+                }) || (u
+                    .oauth_provider
+                    .as_deref()
+                    .map(|p| p.eq_ignore_ascii_case(&clean_provider))
+                    == Some(true)
+                    && u.oauth_sub.as_deref() == Some(clean_sub)))
         }) {
             return Err(domain_err(
                 ErrorCode::OAuthAlreadyBound,
@@ -755,9 +829,29 @@ impl TutorialRepository for LocalSeedRepository {
         let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "Target user not found."));
         };
-        rec.oauth_provider = Some(clean_provider.to_string());
-        rec.oauth_sub = Some(clean_sub.to_string());
-        rec.profile.oauth_provider = Some(clean_provider.to_string());
+
+        if let Some(existing_b) = rec
+            .oauth_bindings
+            .iter_mut()
+            .find(|b| b.provider.eq_ignore_ascii_case(&clean_provider))
+        {
+            existing_b.subject = clean_sub.to_string();
+            if !oauth_avatar_url.trim().is_empty() {
+                existing_b.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+            }
+        } else {
+            rec.oauth_bindings.push(StoredOAuthBinding {
+                provider: clean_provider.clone(),
+                subject: clean_sub.to_string(),
+                oauth_avatar_url: oauth_avatar_url.trim().to_string(),
+                bound_at: Utc::now(),
+            });
+        }
+
+        if rec.oauth_provider.is_none() {
+            rec.oauth_provider = Some(clean_provider.clone());
+            rec.oauth_sub = Some(clean_sub.to_string());
+        }
         if !oauth_avatar_url.trim().is_empty() {
             rec.profile.oauth_avatar_url = oauth_avatar_url.trim().to_string();
             if rec.profile.avatar_source == "default" && rec.profile.avatar_url.is_empty() {
@@ -767,6 +861,183 @@ impl TutorialRepository for LocalSeedRepository {
         let dto = Self::resolve_user_dto(rec, &grav);
         self.persist_state(&state);
         Ok(dto)
+    }
+
+    async fn unbind_oauth_from_user(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+    ) -> Result<UserProfileDto> {
+        let clean_provider = provider.trim().to_ascii_lowercase();
+        let mut state = self.state.write().await;
+        let passkey_count = state.passkeys.iter().filter(|pk| pk.user_id == user_id).count();
+        let grav = Self::gravatar_base(&state).to_string();
+        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+            return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
+        };
+        let has_pw = rec
+            .password_hash
+            .as_deref()
+            .map(|h| !h.trim().is_empty())
+            .unwrap_or(false);
+        let remaining_oauth = rec
+            .oauth_bindings
+            .iter()
+            .filter(|b| !b.provider.eq_ignore_ascii_case(&clean_provider))
+            .count();
+        if !has_pw && passkey_count == 0 && remaining_oauth == 0 {
+            return Err(domain_err(
+                ErrorCode::CannotUnbindLastAuth,
+                "Cannot unlink your only sign-in method. Set a password or register a passkey first.",
+            ));
+        }
+
+        rec.oauth_bindings
+            .retain(|b| !b.provider.eq_ignore_ascii_case(&clean_provider));
+        if let Some(first) = rec.oauth_bindings.first() {
+            rec.oauth_provider = Some(first.provider.clone());
+            rec.oauth_sub = Some(first.subject.clone());
+        } else {
+            rec.oauth_provider = None;
+            rec.oauth_sub = None;
+        }
+        let dto = Self::resolve_user_dto(rec, &grav);
+        self.persist_state(&state);
+        Ok(dto)
+    }
+
+    async fn list_user_passkeys(&self, user_id: Uuid) -> Result<Vec<UserPasskeyDto>> {
+        let state = self.state.read().await;
+        let mut items: Vec<UserPasskeyDto> = state
+            .passkeys
+            .iter()
+            .filter(|pk| pk.user_id == user_id)
+            .map(StoredPasskeyCredential::to_dto)
+            .collect();
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(items)
+    }
+
+    async fn save_user_passkey(&self, cred: StoredPasskeyCredential) -> Result<UserPasskeyDto> {
+        let mut state = self.state.write().await;
+        if state
+            .passkeys
+            .iter()
+            .any(|pk| pk.credential_id == cred.credential_id)
+        {
+            return Err(domain_err(
+                ErrorCode::Conflict,
+                "This passkey credential is already registered.",
+            ));
+        }
+        let dto = cred.to_dto();
+        state.passkeys.push(cred);
+        self.persist_state(&state);
+        Ok(dto)
+    }
+
+    async fn find_passkey_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<(StoredPasskeyCredential, UserProfileDto)>> {
+        let clean_id = credential_id.trim();
+        let state = self.state.read().await;
+        let Some(pk) = state
+            .passkeys
+            .iter()
+            .find(|pk| pk.credential_id == clean_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let grav = Self::gravatar_base(&state);
+        let Some(user_rec) = state.users.iter().find(|u| u.profile.id == pk.user_id) else {
+            return Ok(None);
+        };
+        let dto = Self::resolve_user_dto(user_rec, grav);
+        Ok(Some((pk, dto)))
+    }
+
+    async fn touch_passkey_usage(&self, credential_id: &str, new_counter: u32) -> Result<()> {
+        let clean_id = credential_id.trim();
+        let mut state = self.state.write().await;
+        if let Some(pk) = state
+            .passkeys
+            .iter_mut()
+            .find(|pk| pk.credential_id == clean_id)
+        {
+            pk.counter = new_counter;
+            pk.last_used_at = Some(Utc::now());
+            self.persist_state(&state);
+        }
+        Ok(())
+    }
+
+    async fn rename_user_passkey(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+        new_name: &str,
+    ) -> Result<Option<UserPasskeyDto>> {
+        let clean_id = credential_id.trim();
+        let clean_name: String = new_name.trim().chars().take(80).collect();
+        if clean_name.is_empty() {
+            return Err(domain_err(
+                ErrorCode::BadRequest,
+                "Passkey name cannot be empty.",
+            ));
+        }
+        let mut state = self.state.write().await;
+        let Some(pk) = state
+            .passkeys
+            .iter_mut()
+            .find(|pk| pk.user_id == user_id && pk.credential_id == clean_id)
+        else {
+            return Ok(None);
+        };
+        pk.name = clean_name;
+        let dto = pk.to_dto();
+        self.persist_state(&state);
+        Ok(Some(dto))
+    }
+
+    async fn delete_user_passkey(&self, user_id: Uuid, credential_id: &str) -> Result<bool> {
+        let clean_id = credential_id.trim();
+        let mut state = self.state.write().await;
+        let exists = state
+            .passkeys
+            .iter()
+            .any(|pk| pk.user_id == user_id && pk.credential_id == clean_id);
+        if !exists {
+            return Ok(false);
+        }
+        let remaining_passkeys = state
+            .passkeys
+            .iter()
+            .filter(|pk| pk.user_id == user_id && pk.credential_id != clean_id)
+            .count();
+        if let Some(rec) = state.users.iter().find(|u| u.profile.id == user_id) {
+            let has_pw = rec
+                .password_hash
+                .as_deref()
+                .map(|h| !h.trim().is_empty())
+                .unwrap_or(false);
+            if !has_pw && rec.oauth_bindings.is_empty() && remaining_passkeys == 0 {
+                return Err(domain_err(
+                    ErrorCode::CannotUnbindLastAuth,
+                    "Cannot remove your only sign-in method. Set a password or link an OAuth account first.",
+                ));
+            }
+        }
+        let before = state.passkeys.len();
+        state
+            .passkeys
+            .retain(|pk| !(pk.user_id == user_id && pk.credential_id == clean_id));
+        let removed = state.passkeys.len() < before;
+        if removed {
+            self.persist_state(&state);
+        }
+        Ok(removed)
     }
 
     async fn register_local_account(
@@ -825,6 +1096,8 @@ impl TutorialRepository for LocalSeedRepository {
             oauth_avatar_url: String::new(),
             uploaded_avatar_url: String::new(),
             oauth_provider: None,
+            oauth_bindings: Vec::new(),
+            has_password: true,
             bio: String::new(),
             role: safe_role,
             auth_source: "local".to_string(),
@@ -839,6 +1112,7 @@ impl TutorialRepository for LocalSeedRepository {
             password_hash: Some(pw_hash),
             oauth_provider: None,
             oauth_sub: None,
+            oauth_bindings: Vec::new(),
         });
         self.persist_state(&state);
         Ok(prof)
@@ -2248,6 +2522,8 @@ impl TutorialRepository for LocalSeedRepository {
                 oauth_avatar_url: String::new(),
                 uploaded_avatar_url: String::new(),
                 oauth_provider: None,
+                oauth_bindings: Vec::new(),
+                has_password: true,
                 bio: String::new(),
                 role,
                 auth_source: "local".to_string(),
@@ -2261,6 +2537,7 @@ impl TutorialRepository for LocalSeedRepository {
                 password_hash: Some(pw_hash),
                 oauth_provider: None,
                 oauth_sub: None,
+                oauth_bindings: Vec::new(),
             });
             prof
         };
@@ -2324,6 +2601,8 @@ impl TutorialRepository for LocalSeedRepository {
             oauth_avatar_url: String::new(),
             uploaded_avatar_url: String::new(),
             oauth_provider: None,
+            oauth_bindings: Vec::new(),
+            has_password: true,
             bio: String::new(),
             role,
             auth_source: "local".to_string(),
@@ -2338,6 +2617,7 @@ impl TutorialRepository for LocalSeedRepository {
             password_hash: Some(pw_hash),
             oauth_provider: None,
             oauth_sub: None,
+            oauth_bindings: Vec::new(),
         });
         self.persist_state(&state);
         Ok(prof)
@@ -2414,6 +2694,7 @@ impl TutorialRepository for LocalSeedRepository {
         if removed {
             state.sessions.retain(|s| s.user_id != target_user_id);
             state.password_resets.retain(|r| r.user_id != target_user_id);
+            state.passkeys.retain(|pk| pk.user_id != target_user_id);
             for meta in state.step_meta.values_mut() {
                 if meta.owner_user_id == Some(target_user_id) {
                     meta.owner_user_id = None;

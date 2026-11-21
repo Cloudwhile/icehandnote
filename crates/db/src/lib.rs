@@ -20,8 +20,9 @@ use icehandnote_core::{
     auth::{
         BlogSsoClaims, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
         SaveStudioStepInput, SiteSettingsDto, StudioStepEditorDto, StudioTrackDto,
-        UpdateUserProfileInput, UserProfileDto, UserRole, UserSessionDto,
+        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
     },
+    webauthn::StoredPasskeyCredential,
     ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto,
     TrackSummaryDto, UserMarginNoteDto,
 };
@@ -97,6 +98,25 @@ pub trait TutorialRepository: Send + Sync {
         subject: &str,
         oauth_avatar_url: &str,
     ) -> Result<UserProfileDto>;
+    async fn unbind_oauth_from_user(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+    ) -> Result<UserProfileDto>;
+    async fn list_user_passkeys(&self, user_id: Uuid) -> Result<Vec<UserPasskeyDto>>;
+    async fn save_user_passkey(&self, cred: StoredPasskeyCredential) -> Result<UserPasskeyDto>;
+    async fn find_passkey_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<(StoredPasskeyCredential, UserProfileDto)>>;
+    async fn touch_passkey_usage(&self, credential_id: &str, new_counter: u32) -> Result<()>;
+    async fn rename_user_passkey(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+        new_name: &str,
+    ) -> Result<Option<UserPasskeyDto>>;
+    async fn delete_user_passkey(&self, user_id: Uuid, credential_id: &str) -> Result<bool>;
     async fn register_local_account(
         &self,
         username: &str,

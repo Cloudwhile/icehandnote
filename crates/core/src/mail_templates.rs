@@ -42,6 +42,10 @@ pub struct SmtpSettingsDto {
     pub takedown_subject: String,
     #[serde(default)]
     pub takedown_html: String,
+    #[serde(default)]
+    pub ban_subject: String,
+    #[serde(default)]
+    pub ban_html: String,
 }
 
 fn default_smtp_port() -> u16 {
@@ -73,6 +77,8 @@ impl Default for SmtpSettingsDto {
             reset_html: String::new(),
             takedown_subject: String::new(),
             takedown_html: String::new(),
+            ban_subject: String::new(),
+            ban_html: String::new(),
         }
     }
 }
@@ -102,6 +108,8 @@ impl SmtpSettingsDto {
         self.reset_html = self.reset_html.trim().to_string();
         self.takedown_subject = self.takedown_subject.trim().to_string();
         self.takedown_html = self.takedown_html.trim().to_string();
+        self.ban_subject = self.ban_subject.trim().to_string();
+        self.ban_html = self.ban_html.trim().to_string();
         self
     }
 }
@@ -730,6 +738,70 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
             )
         }
 
+        "account_ban" | "ban" => {
+            let (subj, stamp_label, heading, intro, reason_label, time_label, footer_note) = match loc {
+                "zh-CN" => (
+                    "[{{site_name}}] 账号状态变更通知：已被暂停访问",
+                    "账号停权",
+                    "你的账号已被管理员暂停访问",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>（<code style="font-size:13px;color:#5c5046;">@{{username}}</code>），你的 <strong style="color:#1f1411;">{{site_name}}</strong> 账号已被站点管理员暂停访问，当前活跃会话已自动退出。"#,
+                    "处理说明 / 原因",
+                    "执行时间",
+                    "如对本次处理有疑问，请联系站点管理员申诉或核实。",
+                ),
+                "zh-TW" => (
+                    "[{{site_name}}] 帳號狀態變更通知：已被停權",
+                    "帳號停權",
+                    "您的帳號已被管理員停權",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>（<code style="font-size:13px;color:#5c5046;">@{{username}}</code>），您的 <strong style="color:#1f1411;">{{site_name}}</strong> 帳號已被站點管理員停權，目前活躍工作階段已自動登出。"#,
+                    "處理說明 / 原因",
+                    "執行時間",
+                    "若對本次處理有任何疑問，請聯繫站點管理員申訴或確認。",
+                ),
+                "ja" => (
+                    "[{{site_name}}] アカウント利用停止のお知らせ",
+                    "利用停止",
+                    "アカウントが停止されました",
+                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong>（<code style="font-size:13px;color:#5c5046;">@{{username}}</code>）さん、<strong style="color:#1f1411;">{{site_name}}</strong> のアカウントが管理者により一時停止され、既存のセッションはすべて終了しました。"#,
+                    "停止理由",
+                    "実行日時",
+                    "ご不明な点がある場合は、サイト管理者までお問い合わせください。",
+                ),
+                _ => (
+                    "[{{site_name}}] Account suspension notice",
+                    "SUSPENDED",
+                    "Your account has been suspended",
+                    r#"Hi <strong style="color:#1f1411;">{{recipient_name}}</strong> (<code style="font-size:13px;color:#5c5046;">@{{username}}</code>), your <strong style="color:#1f1411;">{{site_name}}</strong> account has been suspended by an administrator and active sessions have been signed out."#,
+                    "REASON",
+                    "EFFECTIVE AT",
+                    "If you believe this was a mistake, please reach out to the site administrator.",
+                ),
+            };
+            let title_block = hand_heading_html(heading, "#fecdd3");
+            let body = format!(
+                r#"{title_block}
+              <p style="margin:0 0 20px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
+              <div style="margin:0 0 20px;padding:16px 18px;background-color:#fff5f6;border:1.5px dashed #e27d8e;border-left:4px solid #be123c;border-radius:11px 14px 12px 13px;box-shadow:inset 0 0 0 2px #fffef8,2px 2px 0 #ead8dc;">
+                <div style="margin:0 0 6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#9f1239;">{reason_label}</div>
+                <div style="margin:0 0 12px;font-size:14px;line-height:1.68;color:#1f1411;font-weight:600;">{{{{reason}}}}</div>
+                <div style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#6d5f54;">{time_label}: {{{{occurred_at}}}}</div>
+              </div>
+              <p style="margin:0;font-size:13px;line-height:1.68;color:#5c5046;">{footer_note}</p>"#
+            );
+            (
+                subj.to_string(),
+                wrap_stationery_email(
+                    StampBadge {
+                        label: stamp_label,
+                        bg_color: "#fff1f3",
+                        border_color: "#e27d8e",
+                        text_color: "#9f1239",
+                    },
+                    &body,
+                ),
+            )
+        }
+
         _ => {
             let (subj, stamp_label, heading, intro, channels) = match loc {
                 "zh-CN" => (
@@ -956,6 +1028,25 @@ pub fn render_mail_preview(
                 render_mail_html(&html, &vars, &logo_html, &footer_tpl),
             )
         }
+        "account_ban" | "ban" => {
+            let reason = match loc {
+                "zh-CN" => "多次发布垃圾外链与广告内容，违反社区使用规范。",
+                "zh-TW" => "多次發佈垃圾外鏈與廣告內容，違反社群使用規範。",
+                "ja" => "コミュニティガイドラインに違反するスパム投稿が確認されたため。",
+                _ => "Repeated spam links violating community guidelines.",
+            };
+            let vars = [
+                ("site_name", site_label),
+                ("recipient_name", "Alice"),
+                ("username", "alice_demo"),
+                ("reason", reason),
+                ("occurred_at", "2026-11-21 12:30 UTC"),
+            ];
+            (
+                render_mail_subject(&subj, &vars),
+                render_mail_html(&html, &vars, &logo_html, &footer_tpl),
+            )
+        }
         _ => {
             let vars = [("site_name", site_label)];
             (
@@ -980,6 +1071,7 @@ mod tests {
                 "email_change",
                 "invite",
                 "takedown",
+                "account_ban",
                 "test",
             ] {
                 let (subj, html) = render_mail_preview(

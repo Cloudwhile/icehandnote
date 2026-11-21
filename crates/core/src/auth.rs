@@ -1,5 +1,6 @@
 pub use crate::crypto::*;
 pub use crate::settings::*;
+pub use crate::webauthn::UserPasskeyDto;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,10 @@ pub struct UserProfileDto {
     pub uploaded_avatar_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_provider: Option<String>,
+    #[serde(default)]
+    pub oauth_bindings: Vec<String>,
+    #[serde(default)]
+    pub has_password: bool,
     pub bio: String,
     pub role: UserRole,
     pub auth_source: String,

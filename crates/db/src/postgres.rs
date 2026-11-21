@@ -15,12 +15,14 @@ use icehandnote_core::{
         verify_password, ArticleAuthorDto, BlogSsoClaims,
         CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, SaveStudioStepInput,
         SiteSettingsDto, StudioChapterDto, StudioLocaleBadgeDto, StudioStepEditorDto,
-        StudioStepRowDto, StudioTrackDto, UpdateUserProfileInput, UserProfileDto, UserRole,
-        UserSessionDto,
+        StudioStepRowDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto, UserProfileDto,
+        UserRole, UserSessionDto,
     },
     build_highlighted_snippet, compile_notebook_markdown,
     error::{DomainError, ErrorCode},
-    reading_time::estimate_reading_minutes, sanitize_user_note, ArticleTaskChecksDto,
+    reading_time::estimate_reading_minutes, sanitize_user_note,
+    webauthn::StoredPasskeyCredential,
+    ArticleTaskChecksDto,
     ChapterNavDto, CreateMarginNoteInput, LearnerProgressDto, NotebookBlock, SearchHitDto,
     StepDetailDto, StepNavItemDto, StepNeighborDto, TocItem, TrackSummaryDto, UserMarginNoteDto,
 };
@@ -30,7 +32,9 @@ use uuid::Uuid;
 
 const USER_SELECT_COLS: &str = "id, wp_user_id, username, display_name, email, avatar_url, \
     avatar_source, oauth_avatar_url, uploaded_avatar_url, oauth_provider, bio, role, \
-    auth_source, is_banned, ban_reason, last_login_at";
+    auth_source, is_banned, ban_reason, last_login_at, \
+    (password_hash IS NOT NULL AND password_hash <> '') AS has_password, \
+    ARRAY(SELECT provider FROM user_oauth_bindings uob WHERE uob.user_id = users.id ORDER BY uob.bound_at ASC) AS oauth_bindings";
 
 pub struct PostgresRepository {
     pool: PgPool,
@@ -52,9 +56,10 @@ impl PostgresRepository {
             include_str!("../migrations/0005_drop_glossary.sql"),
             include_str!("../migrations/0006_step_license.sql"),
             include_str!("../migrations/0007_oauth_identity.sql"),
-            include_str!("../migrations/0008_rc3_platform_features.sql"),
+            include_str!("../migrations/0008_collaboration_and_moderation.sql"),
             include_str!("../migrations/0009_email_verification_codes.sql"),
             include_str!("../migrations/0010_sessions_and_login_otp.sql"),
+            include_str!("../migrations/0011_multi_oauth_and_passkeys.sql"),
         ] {
             sqlx::raw_sql(sql).execute(&pool).await?;
         }
@@ -108,6 +113,17 @@ impl PostgresRepository {
 
     fn row_to_user(r: &PgRow, gravatar_base: &str) -> Result<UserProfileDto> {
         let role_str: String = r.try_get("role")?;
+        let legacy_provider: Option<String> = r.try_get("oauth_provider").ok().flatten();
+        let mut oauth_bindings: Vec<String> = r.try_get("oauth_bindings").unwrap_or_default();
+        if oauth_bindings.is_empty() {
+            if let Some(ref lp) = legacy_provider {
+                if !lp.trim().is_empty() {
+                    oauth_bindings.push(lp.trim().to_ascii_lowercase());
+                }
+            }
+        }
+        let primary_oauth = oauth_bindings.first().cloned().or(legacy_provider);
+        let has_password: bool = r.try_get("has_password").unwrap_or(false);
         let prof = UserProfileDto {
             id: r.try_get("id")?,
             wp_user_id: r.try_get("wp_user_id")?,
@@ -120,7 +136,9 @@ impl PostgresRepository {
                 .unwrap_or_else(|_| "default".to_string()),
             oauth_avatar_url: r.try_get("oauth_avatar_url").unwrap_or_default(),
             uploaded_avatar_url: r.try_get("uploaded_avatar_url").unwrap_or_default(),
-            oauth_provider: r.try_get("oauth_provider").ok().flatten(),
+            oauth_provider: primary_oauth,
+            oauth_bindings,
+            has_password,
             bio: r.try_get("bio").unwrap_or_default(),
             role: UserRole::from_db(&role_str),
             auth_source: r.try_get("auth_source")?,
@@ -129,6 +147,26 @@ impl PostgresRepository {
             last_login_at: r.try_get("last_login_at")?,
         };
         Ok(prof.with_resolved_avatar(gravatar_base))
+    }
+
+    fn row_to_stored_passkey(r: &PgRow) -> Result<StoredPasskeyCredential> {
+        let counter_i64: i64 = r.try_get("counter").unwrap_or(0);
+        Ok(StoredPasskeyCredential {
+            credential_id: r.try_get("credential_id")?,
+            user_id: r.try_get("user_id")?,
+            public_key_b64: r.try_get("public_key_b64")?,
+            alg: r.try_get("alg").unwrap_or(-7),
+            counter: u32::try_from(counter_i64.max(0)).unwrap_or(0),
+            aaguid: r.try_get("aaguid").unwrap_or_default(),
+            name: r.try_get("name").unwrap_or_else(|_| "Passkey".to_string()),
+            transports: r.try_get("transports").unwrap_or_default(),
+            device_type: r
+                .try_get("device_type")
+                .unwrap_or_else(|_| "multiDevice".to_string()),
+            backed_up: r.try_get("backed_up").unwrap_or(true),
+            created_at: r.try_get("created_at")?,
+            last_used_at: r.try_get("last_used_at").ok().flatten(),
+        })
     }
 
     async fn load_step_authors(
@@ -1120,23 +1158,52 @@ impl TutorialRepository for PostgresRepository {
         subject: &str,
         oauth_avatar_url: &str,
     ) -> Result<Option<UserProfileDto>> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         if clean_provider.is_empty() || clean_sub.is_empty() {
             return Ok(None);
         }
+        let target_uid: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT user_id FROM user_oauth_bindings
+            WHERE LOWER(provider) = $1 AND subject = $2
+            UNION
+            SELECT id FROM users
+            WHERE LOWER(oauth_provider) = $1 AND oauth_sub = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(&clean_provider)
+        .bind(clean_sub)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(uid) = target_uid else {
+            return Ok(None);
+        };
+
+        if !oauth_avatar_url.trim().is_empty() {
+            let _ = sqlx::query(
+                "UPDATE user_oauth_bindings SET oauth_avatar_url = $3 WHERE user_id = $1 AND LOWER(provider) = $2",
+            )
+            .bind(uid)
+            .bind(&clean_provider)
+            .bind(oauth_avatar_url.trim())
+            .execute(&self.pool)
+            .await;
+        }
+
         let q = format!(
             r#"
             UPDATE users
-            SET oauth_avatar_url = CASE WHEN $3 <> '' THEN $3 ELSE oauth_avatar_url END,
+            SET oauth_avatar_url = CASE WHEN $2 <> '' THEN $2 ELSE oauth_avatar_url END,
                 last_login_at = NOW()
-            WHERE oauth_provider = $1 AND oauth_sub = $2
+            WHERE id = $1
             RETURNING {USER_SELECT_COLS}
             "#
         );
         let row_opt = sqlx::query(&q)
-            .bind(clean_provider)
-            .bind(clean_sub)
+            .bind(uid)
             .bind(oauth_avatar_url.trim())
             .fetch_optional(&self.pool)
             .await?;
@@ -1162,15 +1229,20 @@ impl TutorialRepository for PostgresRepository {
         oauth_avatar_url: &str,
         uploaded_avatar_url: &str,
     ) -> Result<UserProfileDto> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         let clean_username = username.trim();
         let clean_email = email.trim();
 
         let existing_oauth: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM users WHERE oauth_provider = $1 AND oauth_sub = $2",
+            r#"
+            SELECT 1 FROM user_oauth_bindings WHERE LOWER(provider) = $1 AND subject = $2
+            UNION
+            SELECT 1 FROM users WHERE LOWER(oauth_provider) = $1 AND oauth_sub = $2
+            LIMIT 1
+            "#,
         )
-        .bind(clean_provider)
+        .bind(&clean_provider)
         .bind(clean_sub)
         .fetch_optional(&self.pool)
         .await?;
@@ -1217,28 +1289,51 @@ impl TutorialRepository for PostgresRepository {
             display_name.trim()
         };
 
-        let q = format!(
+        let mut tx = self.pool.begin().await?;
+        let inserted_id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO users (
                 username, display_name, email, avatar_source, oauth_avatar_url,
                 uploaded_avatar_url, bio, role, auth_source, oauth_provider, oauth_sub, last_login_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, '', $7, $8, $8, $9, NOW())
-            RETURNING {USER_SELECT_COLS}
-            "#
-        );
+            RETURNING id
+            "#,
+        )
+        .bind(clean_username)
+        .bind(clean_display)
+        .bind(clean_email)
+        .bind(&norm_source)
+        .bind(oauth_avatar_url.trim())
+        .bind(uploaded_avatar_url.trim())
+        .bind(safe_role.as_str())
+        .bind(&clean_provider)
+        .bind(clean_sub)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_oauth_bindings (id, user_id, provider, subject, oauth_avatar_url)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id, provider) DO UPDATE
+            SET subject = EXCLUDED.subject, oauth_avatar_url = EXCLUDED.oauth_avatar_url
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(inserted_id)
+        .bind(&clean_provider)
+        .bind(clean_sub)
+        .bind(oauth_avatar_url.trim())
+        .execute(&mut *tx)
+        .await?;
+
+        let q = format!("SELECT {USER_SELECT_COLS} FROM users WHERE id = $1");
         let row = sqlx::query(&q)
-            .bind(clean_username)
-            .bind(clean_display)
-            .bind(clean_email)
-            .bind(&norm_source)
-            .bind(oauth_avatar_url.trim())
-            .bind(uploaded_avatar_url.trim())
-            .bind(safe_role.as_str())
-            .bind(clean_provider)
-            .bind(clean_sub)
-            .fetch_one(&self.pool)
+            .bind(inserted_id)
+            .fetch_one(&mut *tx)
             .await?;
+        tx.commit().await?;
 
         let grav = self.fetch_gravatar_base().await;
         Self::row_to_user(&row, &grav)
@@ -1251,12 +1346,19 @@ impl TutorialRepository for PostgresRepository {
         subject: &str,
         oauth_avatar_url: &str,
     ) -> Result<UserProfileDto> {
-        let clean_provider = provider.trim();
+        let clean_provider = provider.trim().to_ascii_lowercase();
         let clean_sub = subject.trim();
         let conflict: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM users WHERE oauth_provider = $1 AND oauth_sub = $2 AND id <> $3",
+            r#"
+            SELECT user_id FROM user_oauth_bindings
+            WHERE LOWER(provider) = $1 AND subject = $2 AND user_id <> $3
+            UNION
+            SELECT id FROM users
+            WHERE LOWER(oauth_provider) = $1 AND oauth_sub = $2 AND id <> $3
+            LIMIT 1
+            "#,
         )
-        .bind(clean_provider)
+        .bind(&clean_provider)
         .bind(clean_sub)
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -1268,11 +1370,29 @@ impl TutorialRepository for PostgresRepository {
             ));
         }
 
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO user_oauth_bindings (id, user_id, provider, subject, oauth_avatar_url)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id, provider) DO UPDATE
+            SET subject = EXCLUDED.subject,
+                oauth_avatar_url = CASE WHEN EXCLUDED.oauth_avatar_url <> '' THEN EXCLUDED.oauth_avatar_url ELSE user_oauth_bindings.oauth_avatar_url END
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(&clean_provider)
+        .bind(clean_sub)
+        .bind(oauth_avatar_url.trim())
+        .execute(&mut *tx)
+        .await?;
+
         let q = format!(
             r#"
             UPDATE users
-            SET oauth_provider = $2,
-                oauth_sub = $3,
+            SET oauth_provider = COALESCE(NULLIF(oauth_provider, ''), $2),
+                oauth_sub = COALESCE(NULLIF(oauth_sub, ''), $3),
                 oauth_avatar_url = CASE WHEN $4 <> '' THEN $4 ELSE oauth_avatar_url END,
                 avatar_source = CASE WHEN avatar_source = 'default' AND $4 <> '' THEN 'oauth' ELSE avatar_source END
             WHERE id = $1
@@ -1281,16 +1401,278 @@ impl TutorialRepository for PostgresRepository {
         );
         let row_opt = sqlx::query(&q)
             .bind(user_id)
-            .bind(clean_provider)
+            .bind(&clean_provider)
             .bind(clean_sub)
             .bind(oauth_avatar_url.trim())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
         let Some(row) = row_opt else {
             return Err(domain_err(ErrorCode::UserNotFound, "Target user not found."));
         };
+        tx.commit().await?;
         let grav = self.fetch_gravatar_base().await;
         Self::row_to_user(&row, &grav)
+    }
+
+    async fn unbind_oauth_from_user(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+    ) -> Result<UserProfileDto> {
+        let clean_provider = provider.trim().to_ascii_lowercase();
+        let has_pw: bool = sqlx::query_scalar(
+            "SELECT COALESCE(password_hash IS NOT NULL AND password_hash <> '', FALSE) FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| domain_err(ErrorCode::UserNotFound, "User not found."))?;
+
+        let passkey_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_passkeys WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let remaining_oauth: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_oauth_bindings WHERE user_id = $1 AND LOWER(provider) <> $2",
+        )
+        .bind(user_id)
+        .bind(&clean_provider)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if !has_pw && passkey_count == 0 && remaining_oauth == 0 {
+            return Err(domain_err(
+                ErrorCode::CannotUnbindLastAuth,
+                "Cannot unlink your only sign-in method. Set a password or register a passkey first.",
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM user_oauth_bindings WHERE user_id = $1 AND LOWER(provider) = $2",
+        )
+        .bind(user_id)
+        .bind(&clean_provider)
+        .execute(&mut *tx)
+        .await?;
+
+        let next_primary: Option<(String, String)> = sqlx::query_as(
+            "SELECT provider, subject FROM user_oauth_bindings WHERE user_id = $1 ORDER BY bound_at ASC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let q = format!(
+            r#"
+            UPDATE users
+            SET oauth_provider = $2,
+                oauth_sub = $3
+            WHERE id = $1
+            RETURNING {USER_SELECT_COLS}
+            "#
+        );
+        let row = sqlx::query(&q)
+            .bind(user_id)
+            .bind(next_primary.as_ref().map(|(p, _)| p.as_str()))
+            .bind(next_primary.as_ref().map(|(_, s)| s.as_str()))
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let grav = self.fetch_gravatar_base().await;
+        Self::row_to_user(&row, &grav)
+    }
+
+    async fn list_user_passkeys(&self, user_id: Uuid) -> Result<Vec<UserPasskeyDto>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT credential_id, user_id, public_key_b64, alg, counter, aaguid, name,
+                   transports, device_type, backed_up, created_at, last_used_at
+            FROM user_passkeys
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(Self::row_to_stored_passkey(&r)?.to_dto());
+        }
+        Ok(out)
+    }
+
+    async fn save_user_passkey(&self, cred: StoredPasskeyCredential) -> Result<UserPasskeyDto> {
+        let existing: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM user_passkeys WHERE credential_id = $1",
+        )
+        .bind(&cred.credential_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if existing.is_some() {
+            return Err(domain_err(
+                ErrorCode::Conflict,
+                "This passkey credential is already registered.",
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_passkeys (
+                credential_id, user_id, public_key_b64, alg, counter, aaguid,
+                name, transports, device_type, backed_up, created_at, last_used_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(&cred.credential_id)
+        .bind(cred.user_id)
+        .bind(&cred.public_key_b64)
+        .bind(cred.alg)
+        .bind(i64::from(cred.counter))
+        .bind(&cred.aaguid)
+        .bind(&cred.name)
+        .bind(&cred.transports)
+        .bind(&cred.device_type)
+        .bind(cred.backed_up)
+        .bind(cred.created_at)
+        .bind(cred.last_used_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(cred.to_dto())
+    }
+
+    async fn find_passkey_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<(StoredPasskeyCredential, UserProfileDto)>> {
+        let clean_id = credential_id.trim();
+        let pk_row_opt = sqlx::query(
+            r#"
+            SELECT credential_id, user_id, public_key_b64, alg, counter, aaguid, name,
+                   transports, device_type, backed_up, created_at, last_used_at
+            FROM user_passkeys
+            WHERE credential_id = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(clean_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(pk_row) = pk_row_opt else {
+            return Ok(None);
+        };
+        let stored_pk = Self::row_to_stored_passkey(&pk_row)?;
+        let q = format!("SELECT {USER_SELECT_COLS} FROM users WHERE id = $1");
+        let Some(u_row) = sqlx::query(&q)
+            .bind(stored_pk.user_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let grav = self.fetch_gravatar_base().await;
+        let user_dto = Self::row_to_user(&u_row, &grav)?;
+        Ok(Some((stored_pk, user_dto)))
+    }
+
+    async fn touch_passkey_usage(&self, credential_id: &str, new_counter: u32) -> Result<()> {
+        sqlx::query(
+            "UPDATE user_passkeys SET counter = $2, last_used_at = NOW() WHERE credential_id = $1",
+        )
+        .bind(credential_id.trim())
+        .bind(i64::from(new_counter))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn rename_user_passkey(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+        new_name: &str,
+    ) -> Result<Option<UserPasskeyDto>> {
+        let clean_name: String = new_name.trim().chars().take(80).collect();
+        if clean_name.is_empty() {
+            return Err(domain_err(
+                ErrorCode::BadRequest,
+                "Passkey name cannot be empty.",
+            ));
+        }
+        let row_opt = sqlx::query(
+            r#"
+            UPDATE user_passkeys
+            SET name = $3
+            WHERE user_id = $1 AND credential_id = $2
+            RETURNING credential_id, user_id, public_key_b64, alg, counter, aaguid, name,
+                      transports, device_type, backed_up, created_at, last_used_at
+            "#,
+        )
+        .bind(user_id)
+        .bind(credential_id.trim())
+        .bind(&clean_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row_opt {
+            Some(r) => Ok(Some(Self::row_to_stored_passkey(&r)?.to_dto())),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_user_passkey(&self, user_id: Uuid, credential_id: &str) -> Result<bool> {
+        let clean_id = credential_id.trim();
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM user_passkeys WHERE user_id = $1 AND credential_id = $2",
+        )
+        .bind(user_id)
+        .bind(clean_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+
+        let has_pw: bool = sqlx::query_scalar(
+            "SELECT COALESCE(password_hash IS NOT NULL AND password_hash <> '', FALSE) FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(false);
+        let oauth_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_oauth_bindings WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let remaining_passkeys: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_passkeys WHERE user_id = $1 AND credential_id <> $2",
+        )
+        .bind(user_id)
+        .bind(clean_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        if !has_pw && oauth_count == 0 && remaining_passkeys == 0 {
+            return Err(domain_err(
+                ErrorCode::CannotUnbindLastAuth,
+                "Cannot remove your only sign-in method. Set a password or link an OAuth account first.",
+            ));
+        }
+
+        let res = sqlx::query(
+            "DELETE FROM user_passkeys WHERE user_id = $1 AND credential_id = $2",
+        )
+        .bind(user_id)
+        .bind(clean_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     async fn register_local_account(
@@ -2040,7 +2422,9 @@ impl TutorialRepository for PostgresRepository {
             r#"
             SELECT u.id, u.wp_user_id, u.username, u.display_name, u.email, u.avatar_url,
                    u.avatar_source, u.oauth_avatar_url, u.uploaded_avatar_url, u.oauth_provider,
-                   u.bio, u.role, u.auth_source, u.is_banned, u.ban_reason, u.last_login_at
+                   u.bio, u.role, u.auth_source, u.is_banned, u.ban_reason, u.last_login_at,
+                   (u.password_hash IS NOT NULL AND u.password_hash <> '') AS has_password,
+                   ARRAY(SELECT provider FROM user_oauth_bindings uob WHERE uob.user_id = u.id ORDER BY uob.bound_at ASC) AS oauth_bindings
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = $1 AND s.expires_at > NOW() AND NOT u.is_banned

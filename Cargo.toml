@@ -29,6 +29,7 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1", "to
 pulldown-cmark = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ring = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

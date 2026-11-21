@@ -4,6 +4,7 @@ pub mod error;
 pub mod mail_templates;
 pub mod reading_time;
 pub mod settings;
+pub mod webauthn;
 
 use ammonia::Builder as HtmlSanitizer;
 use chrono::{DateTime, Utc};
