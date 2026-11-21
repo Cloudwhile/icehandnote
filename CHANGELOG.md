@@ -4,6 +4,32 @@ All notable changes to **IceHandnote** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-rc.3] - 2026-11-21
+
+### Added
+- **RFC 9457 Problem Details & Frontend Toast Localization**:
+  - Standardized all backend API error responses to RFC 9457 (`Content-Type: application/problem+json` with `type`, `title`, `status`, `detail`, machine-readable `code`, and optional `meta`), English default diagnostics, RFC 9110 status codes, and RFC 6750 `WWW-Authenticate: Bearer realm="icehandnote"` headers on `401 Unauthorized`.
+  - Added a centralized frontend `ToastProvider` (`useToast()`) and 4-locale (`zh-CN`, `en`, `zh-TW`, `ja`) error catalog (`apiError.ts`) so all backend error codes and action confirmations are intercepted and rendered in the active UI language.
+- **Image Blocks & Secure Media Upload Pipeline**:
+  - Added native `image` blocks in Markdown parsing (`![alt](url)` with optional caption & margin notes), `NotebookBlockRenderer`, `VisualBlockEditor`, and Studio Markdown toolbar upload.
+  - Added authenticated media upload endpoints (`/api/v1/uploads`, `/api/v1/studio/uploads`) with magic-byte validation and `/uploads/{ym}/{filename}` delivery featuring SHA-256 ETag, `304 Not Modified`, `X-Content-Type-Options: nosniff`, and CSP sandboxing.
+- **Standalone Auth Flow Pages, Single-Input 6-Slot OTP Forms, Session/Device Governance & Hand-Drawn Stationery Emails**:
+  - Migrated Sign In, 2-step Registration, strict 3-step Gated Forgot/Reset Password (`Email -> OTP Verification -> New Password + Confirm Password`), and OAuth Onboarding to dedicated distraction-free standalone flow pages (`/:locale/auth/login`, `/:locale/auth/register`, `/:locale/auth/forgot-password`, `/:locale/auth/reset-password`, `/:locale/auth/onboarding` + `/login`, `/register`) built to `modern-web-guidance` standards: single native `<input autocomplete="one-time-code" inputmode="numeric">` layered over 6 tactile digit slots (`OtpInput`), debounced live username uniqueness check (`GET /api/v1/auth/check-username`), `sessionStorage`-persisted + server-enforced 60-second OTP resend cooldowns (`POST /api/v1/auth/forgot-password` / `register/send-code` / `login/resend-otp`), gated reset OTP verification (`POST /api/v1/auth/verify-reset-otp`), advisory-only native `<progress>` visual password strength meter (`PasswordStrengthMeter`) across every password creation/modification surface (Register, Reset Password, Personal Center, Admin Create/Reset User), post-interaction `:user-invalid` + `aria-invalid` / `aria-describedby` synchronization (`useAccessibleFormValidation`), `:autofill` harmonization, single-circle `sr-only` native `<input type="radio">` role cards, inline `aria-pressed` password reveal buttons, and `<nav aria-current="step">` multi-step progress headers.
+  - Added per-session IP address, User-Agent device parsing (`Chrome · Windows`, `Safari · macOS`, mobile/desktop kind), device fingerprinting (`X-Device-Id`), `last_seen_at` tracking, and self-service **Devices & Sessions** management (`GET/DELETE /api/v1/auth/sessions`, `POST /api/v1/auth/sessions/revoke-others`) in the Personal Center modal (with WCAG 1.4.1 shape-underlined `focusgroup` tabs).
+  - Added anomalous sign-in detection (`new_ip`, `new_device`, `new_ip_and_device`) triggering a 6-digit email OTP challenge (`POST /api/v1/auth/login/verify-otp`, `POST /api/v1/auth/login/resend-otp`) detailing detected IP, device, time, and reason.
+  - Redesigned all 6 HTML email templates (`register_code`, `login_anomaly`, `reset`, `invite`, `takedown`, `test`) across all 4 site locales (`zh-CN`, `en`, `zh-TW`, `ja`) in an authentic **Hand-Drawn Loose-Leaf Stationery** aesthetic (dot-grid drafting-paper desk canvas, sepia-ink outlined archival sheet with asymmetric corners & stacked paper-edge shadow, tilted dashed rubber stamp pill, pastel highlighter title stroke, double-framed perforated OTP coupon ticket, tactile ink-outlined CTA button, zero top horizontal color bar, live site logo embedding, WCAG AA/AAA verified) with **customizable email footer** (`email_footer_text`, supporting `{{site_name}}`) and live 4-locale preview in Studio Settings.
+  - Added configurable self-registration (`allow_registration`, `allow_author_registration`) requiring 6-digit email verification codes (`POST /api/v1/auth/register/send-code` with SHA-256 email-bound hashing, 10-minute expiry, 60-second resend cooldown returning RFC 9457 `429` + `Retry-After`, and 5-attempt lockout), Reader/Author role selection, Gravatar mirror support, and custom uploaded/OAuth/monogram avatar sources (`UserProfileModal` + `UserAvatar`).
+  - Added full OAuth 2.0 / OIDC sign-in, first-time onboarding (create new account or link existing local account), and existing-account OAuth binding from Profile & Security.
+  - Added SMTP mail delivery (`lettre`) with admin configuration, live test email, sandboxed Desktop/Mobile live template preview (`POST /api/v1/admin/smtp/preview`), and self-service Forgot/Reset/Change Password flows.
+- **3-Zone WordPress / Canva-Style Article Editor & Refactoring UI Polish**:
+  - Redesigned the Studio article editor into three separated zones: top Workbench Action Bar & Contextual Tool Strip (`VisualBlockToolStrip` / Markdown snippets), center Writing & Design Canvas (supporting both Visual View and Source Code View plus toggleable side-by-side Live Preview), and collapsible right Article Inspector (`StudioEditorInspector`).
+  - Completed full Refactoring UI visual audit & fixes: Top-Layer `popover="manual"` Toasts above modal dialogs, mint-green success toasts, unified `.ink-field-input`/`.ink-field-label` form primitives, desktop sidebar-integrated TOC with zero footer overlap, mobile 375px Studio topbar & non-scrolling stacked tables, softened dark-mode borders & stacked sheet tabs, and HTTP `200 OK` SPA route fallback.
+- **Co-Author Collaboration, Admin Governance & Live Storage Switching**:
+  - Added multi-author article attribution, email-based co-author invitation links (with auto-accept after login), invite revocation, and collaborator removal.
+  - Added Admin moderation & governance: article takedown (with reason banner and author email notification) & restore, track/chapter deletion, user creation, suspension/banning with session revocation, admin password reset, and user deletion.
+  - Added live storage backend inspection, PostgreSQL connection test, and runtime hot-switch between built-in local storage and PostgreSQL in Studio Settings.
+  - Added automatic reading-time estimation, automatic version incrementing, sanitized inline HTML support for brand/track/article titles, and a clean starter `content/getting-started/` welcome track.
+
 ## [0.1.0-rc.2] - 2026-11-20
 
 ### Added
@@ -39,5 +65,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Argon2id local user authentication, CLI admin bootstrap (`icehandnote-cli`), and optional WordPress HMAC-SHA256 cross-site SSO bridge (`deploy/wordpress-sso-bridge.php`).
   - Automated CI/CD workflows for workspace tests, standalone Windows & Linux executable bundles, and verified GHCR OCI container images.
 
+[0.1.0-rc.3]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/Cloudwhile/icehandnote/releases/tag/v0.1.0-rc.1
