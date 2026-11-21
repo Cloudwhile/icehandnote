@@ -910,6 +910,7 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
  * Studio Top / Left / Right Admin Dashboard Shell (上左右分區)
  * ============================================================================ */
 .studio-shell {
+  position: relative;
   display: grid;
   min-block-size: 100dvh;
   inline-size: 100%;
@@ -946,6 +947,7 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
 }
 
 .studio-main {
+  position: relative;
   grid-area: main;
   min-inline-size: 0;
   min-block-size: 0;
@@ -974,8 +976,20 @@ input[type="checkbox"][switch]:focus-visible {
 }
 
 @media (min-width: 1024px) {
-  .studio-shell {
+  /* Lock outer document scroll when desktop Studio shell is active so only ONE
+     independent scrollbar renders inside .studio-main and the shell can never pull loose. */
+  html:has(.studio-shell),
+  html:has(.studio-shell) body {
     block-size: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .studio-shell {
+    position: fixed;
+    inset: 0;
+    block-size: 100dvh;
+    inline-size: 100%;
     overflow: clip;
     grid-template-columns: 17.5rem minmax(0, 1fr);
     grid-template-areas:

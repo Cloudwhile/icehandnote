@@ -468,7 +468,13 @@ function LocaleShellInner({
   };
 
   return (
-    <div className="min-h-svh w-full overflow-x-clip flex flex-col">
+    <div
+      className={
+        useStudioDashboardShell
+          ? 'min-h-svh w-full overflow-x-clip flex flex-col lg:h-dvh lg:overflow-hidden'
+          : 'min-h-svh w-full overflow-x-clip flex flex-col'
+      }
+    >
       {!hideChrome && (
         <TopNavbar
           locale={locale}

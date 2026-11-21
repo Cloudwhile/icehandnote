@@ -144,7 +144,7 @@ export function ModalDialog({
       ref={dialogRef}
       aria-labelledby={ariaLabelledBy}
       aria-label={ariaLabelledBy ? undefined : ariaLabel}
-      className={`search-dialog ink-surface-modal w-[calc(100%-2rem)] ${maxWidthClass} m-auto rounded-2xl p-0 bg-surface-sheet text-ink-primary`}
+      className={`search-dialog studio-scroll-pane ink-surface-modal w-[calc(100%-2rem)] ${maxWidthClass} m-auto rounded-2xl p-0 bg-surface-sheet text-ink-primary`}
       {...({ closedby: 'any' } as Record<string, unknown>)}
     >
       {children}
