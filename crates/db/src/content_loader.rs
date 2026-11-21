@@ -199,7 +199,7 @@ pub fn load_content_directory(content_root: &Path) -> Result<ContentBundle> {
                     "step:{}:{}:{}",
                     manifest.slug, ch_meta.slug, step_slug
                 ));
-                let initial_likes = (12 + (step_num as i64 * 7)) % 65 + 8;
+                let initial_likes = 0;
 
                 loaded_steps.push(LoadedStep {
                     id: step_id,

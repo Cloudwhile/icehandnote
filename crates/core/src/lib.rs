@@ -1,4 +1,9 @@
 pub mod auth;
+pub mod crypto;
+pub mod error;
+pub mod mail_templates;
+pub mod reading_time;
+pub mod settings;
 
 use ammonia::Builder as HtmlSanitizer;
 use chrono::{DateTime, Utc};
@@ -159,6 +164,15 @@ pub enum NotebookBlock {
         block_id: String,
         html: String,
     },
+    Image {
+        block_id: String,
+        src: String,
+        alt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        margin_note: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +201,8 @@ pub struct StepFrontmatter {
     pub status: String,
     #[serde(default)]
     pub license: String,
+    #[serde(default)]
+    pub author: String,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -304,6 +320,8 @@ pub struct StepDetailDto {
     pub available_locales: Vec<String>,
     pub canonical_revision: i32,
     pub synced_revision: i32,
+    #[serde(default = "default_rev")]
+    pub version: i32,
     pub has_revision_drift: bool,
     pub estimated_minutes: i32,
     pub title: String,
@@ -312,6 +330,8 @@ pub struct StepDetailDto {
     pub license: String,
     #[serde(default)]
     pub author_name: String,
+    #[serde(default)]
+    pub authors: Vec<auth::ArticleAuthorDto>,
     pub tags: Vec<String>,
     pub blocks: Vec<NotebookBlock>,
     pub toc: Vec<TocItem>,
@@ -396,20 +416,68 @@ pub fn sanitize_user_note(raw: &str) -> String {
         .to_string()
 }
 
-/// Sanitize compiled Markdown inline HTML fragments.
-pub fn sanitize_rich_fragment(fragment: &str) -> String {
+pub fn is_safe_image_src(src: &str) -> bool {
+    let trimmed = src.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || (trimmed.starts_with('/') && !trimmed.starts_with("//"))
+}
+
+/// Sanitize customizable inline text fields (site name, hero title/tagline, footer, badges,
+/// track/chapter/article titles & summaries) so safe inline HTML tags render cleanly while
+/// stripping scripts, event handlers, and unsafe URLs.
+pub fn sanitize_custom_html(raw: &str, max_chars: usize) -> String {
+    let clipped: String = raw.trim().chars().take(max_chars).collect();
+    if clipped.is_empty() {
+        return String::new();
+    }
+    if !clipped.contains('<') && !clipped.contains('&') {
+        return clipped;
+    }
     let mut tags = HashSet::new();
     for t in [
-        "p", "strong", "em", "code", "a", "br", "del", "span", "ul", "ol", "li", "kbd", "mark",
+        "b", "strong", "i", "em", "u", "s", "del", "ins", "mark", "code", "kbd", "sub", "sup",
+        "small", "span", "br", "a", "ruby", "rt", "rp", "abbr",
     ] {
         tags.insert(t);
     }
     let mut generic_attrs = HashSet::new();
     generic_attrs.insert("class");
+    generic_attrs.insert("title");
+
+    let mut builder = HtmlSanitizer::new();
+    builder
+        .tags(tags)
+        .generic_attributes(generic_attrs)
+        .add_tag_attributes("a", &["href", "target"])
+        .url_relative(ammonia::UrlRelative::PassThrough);
+    builder.clean(&clipped).to_string()
+}
+
+/// Sanitize compiled Markdown inline HTML fragments.
+pub fn sanitize_rich_fragment(fragment: &str) -> String {
+    let mut tags = HashSet::new();
+    for t in [
+        "p", "b", "strong", "i", "em", "u", "s", "del", "ins", "code", "a", "br", "span", "ul",
+        "ol", "li", "kbd", "mark", "sub", "sup", "small", "ruby", "rt", "rp", "abbr", "img",
+    ] {
+        tags.insert(t);
+    }
+    let mut generic_attrs = HashSet::new();
+    generic_attrs.insert("class");
+    generic_attrs.insert("title");
     generic_attrs.insert("data-term");
 
     let mut builder = HtmlSanitizer::new();
-    builder.tags(tags).generic_attributes(generic_attrs);
+    builder
+        .tags(tags)
+        .generic_attributes(generic_attrs)
+        .add_tag_attributes("a", &["href", "target"])
+        .add_tag_attributes("img", &["src", "alt", "title", "loading"])
+        .url_relative(ammonia::UrlRelative::PassThrough);
     builder.clean(fragment).to_string()
 }
 
@@ -675,7 +743,10 @@ fn parse_heading_task_prefix(raw: &str) -> (bool, bool, String) {
 /// Compile a Markdown article file (with TOML frontmatter + custom stationery directives)
 /// into structured `NotebookBlock`s, numbered `TocItem`s, plain text for FTS, and fallback HTML.
 pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
-    let (frontmatter, body_md) = strip_frontmatter(raw_source);
+    let (mut frontmatter, body_md) = strip_frontmatter(raw_source);
+    frontmatter.title = sanitize_custom_html(&frontmatter.title, 320);
+    frontmatter.summary = sanitize_custom_html(&frontmatter.summary, 640);
+    frontmatter.estimated_minutes = reading_time::estimate_reading_minutes(body_md);
     let preprocessed = preprocess_notebook_directives(body_md);
 
     let mut opts = Options::empty();
@@ -713,11 +784,20 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 for ev in events_iter.by_ref() {
                     match ev {
                         Event::End(TagEnd::Heading(_)) => break,
-                        Event::Text(t) | Event::Code(t) => raw_text.push_str(&t),
+                        Event::Text(t) | Event::InlineHtml(t) | Event::Html(t) => {
+                            raw_text.push_str(&t)
+                        }
+                        Event::Code(t) => {
+                            raw_text.push_str("<code>");
+                            raw_text.push_str(&t);
+                            raw_text.push_str("</code>");
+                        }
                         _ => {}
                     }
                 }
-                let (is_task, default_checked, text) = parse_heading_task_prefix(&raw_text);
+                let (is_task, default_checked, parsed_head) = parse_heading_task_prefix(&raw_text);
+                let text = sanitize_custom_html(&parsed_head, 320);
+                let plain_heading = reading_time::strip_html_tags(&text);
                 let idx = (lvl as usize).saturating_sub(1).min(3);
                 h_counts[idx] += 1;
                 for deeper in (idx + 1)..4 {
@@ -741,13 +821,13 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 };
 
                 ordinal += 1;
-                let block_id = stable_block_id("sec", ordinal, &text);
-                plain_chunks.push(text.clone());
+                let block_id = stable_block_id("sec", ordinal, &plain_heading);
+                plain_chunks.push(plain_heading.clone());
                 toc.push(TocItem {
                     id: block_id.clone(),
                     level: lvl,
                     number: number.clone(),
-                    text: text.clone(),
+                    text: plain_heading,
                     is_task,
                 });
                 blocks.push(NotebookBlock::Heading {
@@ -773,6 +853,59 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         other => inner_events.push(other),
                     }
                 }
+
+                // Detect standalone Markdown image paragraph: `![alt](src "caption")`
+                let non_ws_events: Vec<&Event> = inner_events
+                    .iter()
+                    .filter(|ev| match ev {
+                        Event::SoftBreak | Event::HardBreak => false,
+                        Event::Text(t) => !t.trim().is_empty(),
+                        _ => true,
+                    })
+                    .collect();
+                if let (
+                    Some(Event::Start(Tag::Image {
+                        dest_url, title, ..
+                    })),
+                    Some(Event::End(TagEnd::Image)),
+                ) = (non_ws_events.first().copied(), non_ws_events.last().copied())
+                {
+                    let nested_starts = non_ws_events[1..non_ws_events.len().saturating_sub(1)]
+                        .iter()
+                        .any(|ev| matches!(ev, Event::Start(Tag::Image { .. })));
+                    if !nested_starts && is_safe_image_src(dest_url) {
+                        let mut alt_buf = String::new();
+                        for ev in &non_ws_events[1..non_ws_events.len().saturating_sub(1)] {
+                            if let Event::Text(t) | Event::Code(t) = ev {
+                                alt_buf.push_str(t);
+                            }
+                        }
+                        let src_str = dest_url.trim().to_string();
+                        let alt_str = alt_buf.trim().to_string();
+                        let cap_opt = if title.trim().is_empty() {
+                            None
+                        } else {
+                            Some(title.trim().to_string())
+                        };
+                        ordinal += 1;
+                        let block_id = stable_block_id("img", ordinal, &format!("{src_str}:{alt_str}"));
+                        if !alt_str.is_empty() {
+                            plain_chunks.push(alt_str.clone());
+                        }
+                        if let Some(ref c) = cap_opt {
+                            plain_chunks.push(c.clone());
+                        }
+                        blocks.push(NotebookBlock::Image {
+                            block_id,
+                            src: src_str,
+                            alt: alt_str,
+                            caption: cap_opt,
+                            margin_note: pending_margin_note.take(),
+                        });
+                        continue;
+                    }
+                }
+
                 let mut html_buf = String::new();
                 html::push_html(&mut html_buf, inner_events.into_iter());
                 let clean = sanitize_rich_fragment(&html_buf);
@@ -812,6 +945,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                             match last {
                                 NotebookBlock::Paragraph { margin_note, .. }
                                 | NotebookBlock::CodeCard { margin_note, .. }
+                                | NotebookBlock::Image { margin_note, .. }
                                     if margin_note.is_none() =>
                                 {
                                     *margin_note = Some(note.clone());
@@ -1574,6 +1708,42 @@ pub fn cache_key(id: u64) -> String {
                 );
             }
             other => panic!("expected CodeCard block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compiles_notebook_image_blocks_and_blocks_unsafe_schemes() {
+        let md = r#"
+![架构总览](/uploads/202611/arch.png "双存储热切换示意")
+:::margin[mint:washi | 点击查看大图]
+
+![危险链接](javascript:alert(1))
+"#;
+        let doc = compile_notebook_markdown(md);
+        assert_eq!(doc.blocks.len(), 2);
+
+        match &doc.blocks[0] {
+            NotebookBlock::Image {
+                src,
+                alt,
+                caption,
+                margin_note,
+                ..
+            } => {
+                assert_eq!(src, "/uploads/202611/arch.png");
+                assert_eq!(alt, "架构总览");
+                assert_eq!(caption.as_deref(), Some("双存储热切换示意"));
+                assert_eq!(margin_note.as_deref(), Some("mint:washi | 点击查看大图"));
+            }
+            other => panic!("expected Image block, got {other:?}"),
+        }
+
+        // Unsafe javascript: scheme is not turned into an Image block and is sanitized in HTML
+        match &doc.blocks[1] {
+            NotebookBlock::Paragraph { html, .. } => {
+                assert!(!html.contains("javascript:"));
+            }
+            other => panic!("expected sanitized Paragraph fallback, got {other:?}"),
         }
     }
 }
