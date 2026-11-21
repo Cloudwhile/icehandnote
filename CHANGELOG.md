@@ -4,6 +4,21 @@ All notable changes to **IceHandnote** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-rc.5] - 2026-11-22
+
+### Added
+- **W3C WebAuthn Passkeys Authentication & Governance**: Added passwordless Passkey sign-in and per-account Passkey management (register, rename, remove, `enable_passkeys` toggle) powered by server-side `ring` verification (ES256, EdDSA, RS256), `webauthn-polyfills`, Base64URL/rpId validation, and migration `0011_multi_oauth_and_passkeys.sql`.
+- **Multi-OAuth Unbind & Lockout Guard**: Added `DELETE /api/v1/auth/me/oauth/{provider}` with `CannotUnbindLastAuth` enforcement (ensuring users never remove their sole sign-in method when lacking a password or secondary provider) plus OAuth sign-in anomaly OTP challenges.
+- **Structured PostgreSQL Parameter Mode & Ban Notice Emails**: Added structured Host/Port/Database/Username/SSL connection editing with masked secret retention (`clear_password` support), and localized 4-locale `account_ban` suspension emails dispatched when admins suspend accounts.
+- **Zero-Flash SSR Bootstrap & URL Tab Persistence**: Injected initial `siteSettings`, rendered `<title>`, custom favicon, and `color-scheme` metadata server-side into `index.html`, paired with client cache hydration and URL query persistence (`?tab=` / `?section=`) across reloads.
+
+### Changed
+- **Reusable Component Architecture & Clean Naming**: Decoupled monolithic Auth, Studio Settings, Studio Panel, Navigation, and Notebook views into shared reusable primitives (`ui/`, `auth/`, `navigation/`, `notebook/`, `studio/blocks/`, `studio/settings/`), split localization dictionaries into per-locale files under `apps/web/src/lib/locales/`, and removed all version-based identifiers (`i18nRc3.ts`, `0008_rc3_platform_features.sql` -> `0008_collaboration_and_moderation.sql`).
+- **Unified Switch Sliders & Pure Segmented Capsule Tabs**: Upgraded `<SwitchRow>` binary toggles onto a cross-browser accessible CSS pill slider track + sliding thumb (`role="switch"` + `switch`) and streamlined `.mwg-tab` into pure segmented capsules with forced-colors support.
+
+### Fixed
+- **Refactoring UI Visual Audit & Accessibility Fixes**: Resolved `m-0` spacing collapse inside `space-y-*` containers, strengthened light-mode paper/input contrast (`--border-control` ≥ 3:1 WCAG 1.4.11), enforced WCAG 2.2 AA `≥ 24×24px` touch targets, softened secondary button hierarchy, persisted manual light/dark toggles over site defaults, eliminated 375px `StepProgressNav` truncation and trailing footer separator dots, compacted Studio Editor toolbars onto single rows at `1280×800`, aligned Command Search cards flush with a themed clear control, removed double borders & disabled self-actions in Studio Users, moved modal scrollbars inside `overflow-hidden` rounded bounds, auto-expanded Split Live Preview textareas via `field-sizing: content`, and restored clean single native dropdown arrows on `.ink-select`.
+
 ## [0.1.0-rc.4] - 2026-11-21
 
 ### Added
@@ -80,6 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Argon2id local user authentication, CLI admin bootstrap (`icehandnote-cli`), and optional WordPress HMAC-SHA256 cross-site SSO bridge (`deploy/wordpress-sso-bridge.php`).
   - Automated CI/CD workflows for workspace tests, standalone Windows & Linux executable bundles, and verified GHCR OCI container images.
 
+[0.1.0-rc.5]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.4...v0.1.0-rc.5
 [0.1.0-rc.4]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.1...v0.1.0-rc.2
