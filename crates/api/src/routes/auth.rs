@@ -6,9 +6,10 @@ use crate::{
     },
     state::{
         detect_external_origin, extract_bearer_token, extract_client_context,
-        finalize_login_session, internal_err, repo_err, repo_err_or, require_authenticated_user,
-        resolve_request_locale, AppState, AuthSessionResponse, ClientContext, OneTimeOAuthTicket,
-        PendingEmailChangeOtp, PendingOAuthAuthorization, PendingOAuthOnboarding,
+        finalize_login_session, internal_err, percent_decode_component, repo_err, repo_err_or,
+        require_authenticated_user, resolve_request_locale, resolve_webauthn_rp_and_origins,
+        AppState, ClientContext, OneTimeOAuthTicket, PendingEmailChangeOtp,
+        PendingOAuthAuthorization, PendingOAuthOnboarding, PendingPasskeyCeremony,
     },
 };
 use axum::{
@@ -17,16 +18,22 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use icehandnote_core::{
     auth::{
         build_gravatar_url, constant_time_str_eq, encode_basic_client_credentials, form_urlencode,
         generate_email_verification_code, generate_oauth_flow_tokens, hash_email_verification_code,
         mask_email_address, percent_encode_component, sanitize_internal_return_path,
-        sign_blog_sso_token, verify_blog_sso_token, BlogSsoClaims, UpdateUserProfileInput,
-        UserProfileDto, UserRole,
+        sign_blog_sso_token, verify_blog_sso_token, BlogSsoClaims, SiteSettingsDto,
+        UpdateUserProfileInput, UserProfileDto, UserRole,
     },
     error::ErrorCode,
+    webauthn::{
+        encode_passkey_user_id, generate_webauthn_challenge, verify_passkey_assertion,
+        verify_passkey_registration, AssertionCredentialJson, RegistrationCredentialJson,
+        ALG_EDDSA, ALG_ES256, ALG_RS256,
+    },
 };
 use icehandnote_db::TutorialRepository;
 use serde::{Deserialize, Serialize};
@@ -187,6 +194,37 @@ pub struct OAuthExchangeRequest {
     pub ticket: String,
     #[serde(default)]
     pub anonymous_learner_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct PasskeyRegisterOptionsRequest {
+    #[serde(default)]
+    pub promotion: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PasskeyRegisterVerifyRequest {
+    pub ceremony_id: Uuid,
+    pub credential: RegistrationCredentialJson,
+    #[serde(default)]
+    pub nickname: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PasskeyRenameRequest {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct PasskeyLoginVerifyRequest {
+    pub ceremony_id: Uuid,
+    pub credential: AssertionCredentialJson,
+    #[serde(default)]
+    pub anonymous_learner_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1381,50 +1419,20 @@ pub async fn oauth_callback_handler(
         .await
         .resolve_oauth_client_secret(&flow.provider_id);
 
-    let mut form_pairs: Vec<(&str, &str)> = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", &flow.redirect_uri),
-        ("client_id", flow.client_id.trim()),
-        ("code_verifier", &flow.code_verifier),
-    ];
-    if !client_secret.is_empty() {
-        form_pairs.push(("client_secret", &client_secret));
-    }
-    let form_body = form_urlencode(&form_pairs);
-
-    let mut token_req = state
-        .http_client
-        .post(flow.token_url.trim())
-        .header(
-            header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
-        .header(header::ACCEPT, "application/json")
-        .header(header::USER_AGENT, "IceHandnote")
-        .timeout(std::time::Duration::from_secs(12))
-        .body(form_body);
-
-    if !client_secret.is_empty() {
-        let basic = encode_basic_client_credentials(flow.client_id.trim(), &client_secret);
-        token_req = token_req.header(header::AUTHORIZATION, format!("Basic {basic}"));
-    }
-
-    let token_val: serde_json::Value = match token_req.send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json().await {
-            Ok(v) => v,
-            Err(_) => {
-                return redirect_with_param(&flow.return_to, "oauth_error", "invalid_token_response")
-            }
-        },
-        _ => return redirect_with_param(&flow.return_to, "oauth_error", "token_exchange_failed"),
+    let token_val = match exchange_oauth_code(
+        &state.http_client,
+        flow.token_url.trim(),
+        code,
+        &flow.redirect_uri,
+        flow.client_id.trim(),
+        &client_secret,
+        &flow.code_verifier,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err_slug) => return redirect_with_param(&flow.return_to, "oauth_error", err_slug),
     };
-
-    if let Some(tok_err) = token_val.get("error").and_then(|v| v.as_str()) {
-        if !tok_err.is_empty() {
-            return redirect_with_param(&flow.return_to, "oauth_error", "token_rejected");
-        }
-    }
 
     if let Some(tok_type) = token_val.get("token_type").and_then(|v| v.as_str()) {
         if !tok_type.is_empty() && !tok_type.eq_ignore_ascii_case("bearer") {
@@ -1441,23 +1449,15 @@ pub async fn oauth_callback_handler(
         return redirect_with_param(&flow.return_to, "oauth_error", "missing_access_token");
     };
 
-    let profile_val: serde_json::Value = match state
-        .http_client
-        .get(flow.userinfo_url.trim())
-        .bearer_auth(access_token)
-        .header(header::ACCEPT, "application/json")
-        .header(header::USER_AGENT, "IceHandnote")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
+    let profile_val = match fetch_oauth_userinfo(
+        &state.http_client,
+        flow.userinfo_url.trim(),
+        access_token,
+    )
+    .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.json().await {
-            Ok(v) => v,
-            Err(_) => {
-                return redirect_with_param(&flow.return_to, "oauth_error", "invalid_userinfo")
-            }
-        },
-        _ => return redirect_with_param(&flow.return_to, "oauth_error", "userinfo_failed"),
+        Ok(v) => v,
+        Err(err_slug) => return redirect_with_param(&flow.return_to, "oauth_error", err_slug),
     };
 
     let subject = profile_val
@@ -1800,15 +1800,15 @@ pub async fn oauth_exchange_handler(
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
-    let session: AuthSessionResponse = finalize_login_session(
+    let mut resp = complete_password_login_or_challenge(
         &state,
+        &headers,
         valid.user,
         body.anonymous_learner_id.as_deref(),
+        body.locale.as_deref(),
         &ctx,
     )
     .await?;
-
-    let mut resp = Json(session).into_response();
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(resp)
@@ -1900,4 +1900,640 @@ pub async fn auth_logout_handler(
         state.repo.delete_session(&token).await.map_err(repo_err)?;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ============================================================================
+// OAuth 2.0 / OIDC Token Exchange & UserInfo Helpers + Multi-OAuth Unbinding
+// ============================================================================
+
+pub fn parse_oauth_token_body(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if json_val.is_object() {
+            return Some(json_val);
+        }
+    }
+    if trimmed.contains('=') && !trimmed.starts_with('<') {
+        let mut map = serde_json::Map::new();
+        for pair in trimmed.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let dk = percent_decode_component(&k.replace('+', " "));
+                let dv = percent_decode_component(&v.replace('+', " "));
+                if !dk.trim().is_empty() {
+                    map.insert(dk, serde_json::Value::String(dv));
+                }
+            }
+        }
+        if map.contains_key("access_token")
+            || map.contains_key("error")
+            || map.contains_key("token_type")
+            || map.contains_key("id_token")
+        {
+            return Some(serde_json::Value::Object(map));
+        }
+    }
+    None
+}
+
+async fn send_oauth_token_attempt(
+    http_client: &reqwest::Client,
+    token_url: &str,
+    form_pairs: &[(&str, &str)],
+    basic_auth: Option<&str>,
+) -> Result<(reqwest::StatusCode, String), reqwest::Error> {
+    let mut req = http_client
+        .post(token_url)
+        .header(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .header(header::ACCEPT, "application/json")
+        .header(header::USER_AGENT, "IceHandnote")
+        .timeout(std::time::Duration::from_secs(12))
+        .body(form_urlencode(form_pairs));
+    if let Some(basic) = basic_auth {
+        req = req.header(header::AUTHORIZATION, format!("Basic {basic}"));
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Ok((status, text))
+}
+
+pub async fn exchange_oauth_code(
+    http_client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    redirect_uri: &str,
+    client_id: &str,
+    client_secret: &str,
+    code_verifier: &str,
+) -> Result<serde_json::Value, &'static str> {
+    let base_pairs: [(&str, &str); 5] = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+
+    // Attempt 1: RFC 6749 §2.3.1 `client_secret_post` (WITHOUT `Authorization: Basic` header so strict OIDC
+    // providers like Authentik, Authelia, Ory Fosite/Hydra, and Keycloak never reject dual auth mechanisms).
+    let mut post_pairs = base_pairs.to_vec();
+    if !client_secret.is_empty() {
+        post_pairs.push(("client_secret", client_secret));
+    }
+
+    let mut last_status: reqwest::StatusCode;
+    let mut last_parsed: Option<serde_json::Value>;
+    let mut saw_2xx_unparsed = false;
+
+    let check_token_attempt = |status: reqwest::StatusCode,
+                               raw_body: &str|
+     -> (Option<serde_json::Value>, bool, Option<serde_json::Value>) {
+        let parsed = parse_oauth_token_body(raw_body);
+        if status.is_success() {
+            if let Some(ref val) = parsed {
+                let err_str = val.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                let tok_str = val
+                    .get("access_token")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("");
+                if err_str.is_empty() && !tok_str.is_empty() {
+                    return (Some(val.clone()), false, parsed);
+                }
+            } else {
+                return (None, true, None);
+            }
+        }
+        let is_definitive_grant_failure = status == reqwest::StatusCode::BAD_REQUEST
+            && parsed
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|v| v.as_str())
+                .map(|e| e.eq_ignore_ascii_case("invalid_grant"))
+                .unwrap_or(false);
+        (None, is_definitive_grant_failure, parsed)
+    };
+
+    let should_try_basic = match send_oauth_token_attempt(http_client, token_url, &post_pairs, None).await {
+        Ok((status, body)) => {
+            last_status = status;
+            let (ok_val, stop_or_2xx_bad, parsed) = check_token_attempt(status, &body);
+            if let Some(v) = ok_val {
+                return Ok(v);
+            }
+            if status.is_success() && parsed.is_none() {
+                saw_2xx_unparsed = true;
+            }
+            last_parsed = parsed;
+            !client_secret.is_empty() && !stop_or_2xx_bad && !status.is_server_error()
+        }
+        Err(net_err) => {
+            tracing::warn!("OAuth token request network error ({token_url}): {net_err}");
+            return Err("token_exchange_failed");
+        }
+    };
+
+    // Attempt 2: `client_secret_basic` (RFC 6749 percent-encoded Basic header, NO `client_secret` in body)
+    if should_try_basic {
+        let rfc_basic = encode_basic_client_credentials(client_id, client_secret);
+        let mut try_raw_basic = false;
+        if let Ok((status, body)) =
+            send_oauth_token_attempt(http_client, token_url, &base_pairs, Some(&rfc_basic)).await
+        {
+            last_status = status;
+            let (ok_val, stop_or_2xx_bad, parsed) = check_token_attempt(status, &body);
+            if let Some(v) = ok_val {
+                return Ok(v);
+            }
+            if status.is_success() && parsed.is_none() {
+                saw_2xx_unparsed = true;
+            }
+            last_parsed = parsed;
+            try_raw_basic = !stop_or_2xx_bad && !status.is_server_error();
+        }
+
+        // Attempt 3: Raw unencoded `base64(client_id:client_secret)` for providers that do not URL-decode Basic headers
+        if try_raw_basic {
+            let raw_basic = BASE64_STANDARD.encode(format!("{client_id}:{client_secret}").as_bytes());
+            if raw_basic != rfc_basic {
+                if let Ok((status, body)) =
+                    send_oauth_token_attempt(http_client, token_url, &base_pairs, Some(&raw_basic))
+                        .await
+                {
+                    last_status = status;
+                    let (ok_val, _, parsed) = check_token_attempt(status, &body);
+                    if let Some(v) = ok_val {
+                        return Ok(v);
+                    }
+                    if status.is_success() && parsed.is_none() {
+                        saw_2xx_unparsed = true;
+                    }
+                    last_parsed = parsed;
+                }
+            }
+        }
+    }
+
+    let err_code = last_parsed
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let err_desc = last_parsed
+        .as_ref()
+        .and_then(|v| v.get("error_description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    tracing::warn!(
+        status = %last_status,
+        token_url = %token_url,
+        redirect_uri = %redirect_uri,
+        has_secret = !client_secret.is_empty(),
+        upstream_error = %err_code,
+        upstream_description = %err_desc,
+        "OAuth token exchange failed"
+    );
+
+    if !err_code.is_empty() && last_status.is_success() {
+        Err("token_rejected")
+    } else if saw_2xx_unparsed {
+        Err("invalid_token_response")
+    } else {
+        Err("token_exchange_failed")
+    }
+}
+
+async fn fetch_oauth_userinfo(
+    http_client: &reqwest::Client,
+    userinfo_url: &str,
+    access_token: &str,
+) -> Result<serde_json::Value, &'static str> {
+    let get_res = http_client
+        .get(userinfo_url)
+        .bearer_auth(access_token)
+        .header(header::ACCEPT, "application/json")
+        .header(header::USER_AGENT, "IceHandnote")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match get_res {
+        Ok(resp) if resp.status().is_success() => {
+            return resp.json().await.map_err(|_| "invalid_userinfo");
+        }
+        Ok(resp)
+            if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
+        {
+            if let Ok(post_resp) = http_client
+                .post(userinfo_url)
+                .bearer_auth(access_token)
+                .header(header::ACCEPT, "application/json")
+                .header(header::USER_AGENT, "IceHandnote")
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                if post_resp.status().is_success() {
+                    return post_resp.json().await.map_err(|_| "invalid_userinfo");
+                }
+            }
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                status = %resp.status(),
+                userinfo_url = %userinfo_url,
+                "OAuth userinfo endpoint returned non-success status"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(userinfo_url = %userinfo_url, "OAuth userinfo network error: {err}");
+        }
+    }
+    Err("userinfo_failed")
+}
+
+pub async fn auth_unbind_oauth_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(provider): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let updated = state
+        .repo
+        .unbind_oauth_from_user(user.id, &provider)
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(updated))
+}
+
+// ============================================================================
+// W3C WebAuthn / FIDO2 Passkey Registration, Management & Authentication
+// ============================================================================
+
+async fn ensure_passkeys_enabled(state: &AppState) -> Result<SiteSettingsDto, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_passkeys {
+        return Err(ApiError::new(
+            ErrorCode::PasskeysDisabled,
+            "Passkey sign-in and binding are currently disabled on this site.",
+        ));
+    }
+    Ok(settings)
+}
+
+pub async fn passkey_list_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .unwrap_or_else(|_| state.default_settings.clone());
+    let (rp_id, _) = resolve_webauthn_rp_and_origins(&headers);
+    let passkeys = state
+        .repo
+        .list_user_passkeys(user.id)
+        .await
+        .map_err(repo_err)?;
+
+    Ok(Json(serde_json::json!({
+        "enabled": settings.enable_passkeys,
+        "rp_id": rp_id,
+        "user_id": encode_passkey_user_id(user.id),
+        "passkeys": passkeys,
+    })))
+}
+
+pub async fn passkey_register_options_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<PasskeyRegisterOptionsRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let settings = ensure_passkeys_enabled(&state).await?;
+    let user = require_authenticated_user(&state, &headers).await?;
+    let is_promotion = body.map(|b| b.0.promotion).unwrap_or(false);
+
+    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&headers);
+    let existing = state
+        .repo
+        .list_user_passkeys(user.id)
+        .await
+        .map_err(repo_err)?;
+    let challenge = generate_webauthn_challenge();
+    let ceremony_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    {
+        let mut ceremonies = state.passkey_ceremonies.lock().await;
+        ceremonies.retain(|_, c| c.expires_at > now);
+        ceremonies.insert(
+            ceremony_id,
+            PendingPasskeyCeremony {
+                kind: "register",
+                user_id: Some(user.id),
+                challenge: challenge.clone(),
+                rp_id: rp_id.clone(),
+                allowed_origins,
+                expires_at: now + chrono::Duration::minutes(5),
+            },
+        );
+    }
+
+    let exclude_credentials: Vec<serde_json::Value> = existing
+        .iter()
+        .map(|cred| {
+            if cred.transports.is_empty() {
+                serde_json::json!({
+                    "type": "public-key",
+                    "id": cred.id,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "public-key",
+                    "id": cred.id,
+                    "transports": cred.transports,
+                })
+            }
+        })
+        .collect();
+
+    let mut authenticator_selection = serde_json::json!({
+        "residentKey": "required",
+        "requireResidentKey": true,
+        "userVerification": "preferred",
+    });
+    if is_promotion {
+        if let Some(obj) = authenticator_selection.as_object_mut() {
+            obj.insert(
+                "authenticatorAttachment".to_string(),
+                serde_json::Value::String("platform".to_string()),
+            );
+        }
+    }
+
+    let rp_name = if settings.site_name.trim().is_empty() {
+        "IceHandnote"
+    } else {
+        settings.site_name.trim()
+    };
+    let display_name = if user.display_name.trim().is_empty() {
+        user.username.trim()
+    } else {
+        user.display_name.trim()
+    };
+
+    Ok(Json(serde_json::json!({
+        "ceremony_id": ceremony_id,
+        "options": {
+            "challenge": challenge,
+            "rp": {
+                "id": rp_id,
+                "name": rp_name,
+            },
+            "user": {
+                "id": encode_passkey_user_id(user.id),
+                "name": user.username,
+                "displayName": display_name,
+            },
+            "pubKeyCredParams": [
+                { "type": "public-key", "alg": ALG_ES256 },
+                { "type": "public-key", "alg": ALG_EDDSA },
+                { "type": "public-key", "alg": ALG_RS256 },
+            ],
+            "timeout": 120000,
+            "attestation": "none",
+            "excludeCredentials": exclude_credentials,
+            "authenticatorSelection": authenticator_selection,
+        }
+    })))
+}
+
+pub async fn passkey_register_verify_handler(
+    State(state): State<AppState>,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Json(body): Json<PasskeyRegisterVerifyRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let _settings = ensure_passkeys_enabled(&state).await?;
+    let user = require_authenticated_user(&state, &headers).await?;
+    let now = Utc::now();
+
+    let ceremony = {
+        let mut ceremonies = state.passkey_ceremonies.lock().await;
+        ceremonies.retain(|_, c| c.expires_at > now);
+        ceremonies.remove(&body.ceremony_id)
+    };
+    let Some(ceremony) = ceremony else {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyInvalid,
+            "Passkey registration challenge has expired. Please try again.",
+        ));
+    };
+    if ceremony.kind != "register" || ceremony.user_id != Some(user.id) {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyInvalid,
+            "Passkey registration session does not match the current user.",
+        ));
+    }
+
+    let ctx = extract_client_context(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    let stored = verify_passkey_registration(
+        user.id,
+        &ceremony.challenge,
+        &ceremony.rp_id,
+        &ceremony.allowed_origins,
+        &ctx.device_label,
+        body.nickname.as_deref(),
+        &body.credential,
+    )
+    .map_err(repo_err)?;
+
+    let saved = state
+        .repo
+        .save_user_passkey(stored)
+        .await
+        .map_err(repo_err)?;
+    let _ = state
+        .repo
+        .record_trusted_device(
+            user.id,
+            &ctx.ip_address,
+            &ctx.device_fingerprint,
+            &ctx.device_label,
+        )
+        .await;
+
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+pub async fn passkey_rename_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(cred_id): AxumPath<String>,
+    Json(body): Json<PasskeyRenameRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let updated = state
+        .repo
+        .rename_user_passkey(user.id, &cred_id, &body.name)
+        .await
+        .map_err(repo_err)?;
+    match updated {
+        Some(pk) => Ok(Json(pk)),
+        None => Err(ApiError::new(
+            ErrorCode::PasskeyNotFound,
+            "Passkey not found.",
+        )),
+    }
+}
+
+pub async fn passkey_delete_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(cred_id): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let deleted = state
+        .repo
+        .delete_user_passkey(user.id, &cred_id)
+        .await
+        .map_err(repo_err)?;
+    if !deleted {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyNotFound,
+            "Passkey not found.",
+        ));
+    }
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+pub async fn passkey_login_options_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let _settings = ensure_passkeys_enabled(&state).await?;
+    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&headers);
+    let challenge = generate_webauthn_challenge();
+    let ceremony_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    {
+        let mut ceremonies = state.passkey_ceremonies.lock().await;
+        ceremonies.retain(|_, c| c.expires_at > now);
+        ceremonies.insert(
+            ceremony_id,
+            PendingPasskeyCeremony {
+                kind: "login",
+                user_id: None,
+                challenge: challenge.clone(),
+                rp_id: rp_id.clone(),
+                allowed_origins,
+                expires_at: now + chrono::Duration::minutes(5),
+            },
+        );
+    }
+
+    Ok(Json(serde_json::json!({
+        "ceremony_id": ceremony_id,
+        "options": {
+            "challenge": challenge,
+            "rpId": rp_id,
+            "allowCredentials": [],
+            "userVerification": "preferred",
+            "timeout": 120000,
+        }
+    })))
+}
+
+pub async fn passkey_login_verify_handler(
+    State(state): State<AppState>,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Json(body): Json<PasskeyLoginVerifyRequest>,
+) -> Result<Response, ApiError> {
+    let _settings = ensure_passkeys_enabled(&state).await?;
+    let now = Utc::now();
+
+    let ceremony = {
+        let mut ceremonies = state.passkey_ceremonies.lock().await;
+        ceremonies.retain(|_, c| c.expires_at > now);
+        ceremonies.remove(&body.ceremony_id)
+    };
+    let Some(ceremony) = ceremony else {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyInvalid,
+            "Passkey authentication challenge has expired. Please try again.",
+        ));
+    };
+    if ceremony.kind != "login" {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyInvalid,
+            "Unexpected passkey ceremony type.",
+        ));
+    }
+
+    // Per `modern-web-guidance` passkey-authentication: return explicit HTTP 404 (`PasskeyNotFound`)
+    // when the credential ID is unknown so the browser client can invoke `signalUnknownCredential`.
+    let found = state
+        .repo
+        .find_passkey_by_credential_id(&body.credential.id)
+        .await
+        .map_err(repo_err)?;
+    let Some((stored, user)) = found else {
+        return Err(ApiError::new(
+            ErrorCode::PasskeyNotFound,
+            "Passkey credential is no longer registered on this site.",
+        ));
+    };
+
+    if user.is_banned {
+        return Err(ApiError::new(
+            ErrorCode::AccountBanned,
+            "This account has been suspended by an administrator.",
+        ));
+    }
+
+    let new_counter = verify_passkey_assertion(
+        &stored,
+        &ceremony.challenge,
+        &ceremony.rp_id,
+        &ceremony.allowed_origins,
+        &body.credential,
+    )
+    .map_err(repo_err)?;
+
+    let _ = state
+        .repo
+        .touch_passkey_usage(&stored.credential_id, new_counter)
+        .await;
+
+    let ctx = extract_client_context(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    complete_password_login_or_challenge(
+        &state,
+        &headers,
+        user,
+        body.anonymous_learner_id.as_deref(),
+        body.locale.as_deref(),
+        &ctx,
+    )
+    .await
 }

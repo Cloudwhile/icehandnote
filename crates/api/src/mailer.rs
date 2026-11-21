@@ -489,6 +489,53 @@ pub async fn send_takedown_notice_email(
     send_html_email(smtp, password, to_email, &subject, &html).await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn send_user_ban_notice_email(
+    smtp: &SmtpSettingsDto,
+    password: &str,
+    brand: MailBrandContext<'_>,
+    recipient_name: &str,
+    username: &str,
+    reason: &str,
+    to_email: &str,
+) -> Result<()> {
+    let clean_site = strip_html_tags(brand.site_name);
+    let logo_html = build_email_logo_html(brand.logo_url, &clean_site, brand.origin);
+    let footer_tpl = resolve_email_footer_template(Some(&smtp.email_footer_text), brand.locale);
+    let (subj_tpl, html_tpl) = resolve_template_pair(
+        "account_ban",
+        brand.locale,
+        &smtp.ban_subject,
+        &smtp.ban_html,
+    );
+    let effective_reason = if reason.trim().is_empty() {
+        match brand.locale {
+            "en" => "Violation of community content and usage guidelines",
+            "zh-TW" => "違反社群內容與使用規範",
+            "ja" => "コミュニティのコンテンツおよび利用規約違反",
+            _ => "违反社区内容与使用规范",
+        }
+    } else {
+        reason.trim()
+    };
+    let occurred_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+    let display = if recipient_name.trim().is_empty() {
+        username.trim()
+    } else {
+        recipient_name.trim()
+    };
+    let vars = [
+        ("site_name", clean_site.as_str()),
+        ("recipient_name", display),
+        ("username", username.trim()),
+        ("reason", effective_reason),
+        ("occurred_at", occurred_at.as_str()),
+    ];
+    let subject = render_mail_subject(&subj_tpl, &vars);
+    let html = render_mail_html(&html_tpl, &vars, &logo_html, &footer_tpl);
+    send_html_email(smtp, password, to_email, &subject, &html).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,9 +1,13 @@
 use crate::{
     error::ApiError,
-    mailer::{is_smtp_ready, send_takedown_notice_email, send_test_email, MailBrandContext},
+    mailer::{
+        is_smtp_ready, send_takedown_notice_email, send_test_email, send_user_ban_notice_email,
+        MailBrandContext,
+    },
     state::{
-        detect_external_origin, internal_err, mask_database_url, repo_err, repo_err_or,
-        require_admin, resolve_request_locale, AppState,
+        build_postgres_url, detect_external_origin, internal_err, mask_database_url,
+        parse_postgres_url, repo_err, repo_err_or, require_admin, resolve_request_locale,
+        AppState, PostgresConnectionFields,
     },
 };
 use axum::{
@@ -13,7 +17,7 @@ use axum::{
     Json,
 };
 use icehandnote_core::{
-    auth::{SiteSettingsDto, UserRole},
+    auth::{slugify_oauth_provider_id, SiteSettingsDto, UserRole},
     error::ErrorCode,
     mail_templates::{render_mail_preview, SmtpSettingsDto},
 };
@@ -66,12 +70,18 @@ pub struct StorageStatusResponse {
     pub configured_mode: String,
     pub database_url_masked: String,
     pub has_saved_url: bool,
+    pub has_saved_password: bool,
+    pub postgres: PostgresConnectionFields,
 }
 
 #[derive(Deserialize)]
 pub struct TestStorageBody {
     #[serde(default)]
     pub database_url: String,
+    #[serde(default)]
+    pub postgres: Option<PostgresConnectionFields>,
+    #[serde(default)]
+    pub clear_password: bool,
 }
 
 #[derive(Serialize)]
@@ -85,6 +95,10 @@ pub struct SwitchStorageBody {
     pub mode: String, // "local" | "postgres"
     #[serde(default)]
     pub database_url: String,
+    #[serde(default)]
+    pub postgres: Option<PostgresConnectionFields>,
+    #[serde(default)]
+    pub clear_password: bool,
     #[serde(default = "default_true")]
     pub sync_content: bool,
 }
@@ -99,22 +113,59 @@ pub struct SwitchStorageResponse {
     pub configured_mode: String,
     pub database_url_masked: String,
     pub has_saved_url: bool,
+    pub has_saved_password: bool,
+    pub postgres: PostgresConnectionFields,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_session_token: Option<String>,
 }
 
-fn resolve_effective_db_url(input: &str, saved: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if !trimmed.is_empty() && !trimmed.contains(":***@") {
-        return Some(trimmed.to_string());
-    }
+fn resolve_saved_or_env_db_url(saved: &str) -> String {
     if !saved.trim().is_empty() {
-        return Some(saved.trim().to_string());
+        return saved.trim().to_string();
     }
     std::env::var("DATABASE_URL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+fn extract_saved_pg_status(saved_or_env_url: &str) -> (PostgresConnectionFields, bool) {
+    match parse_postgres_url(saved_or_env_url) {
+        Some((fields, pw_opt)) => (fields, pw_opt.is_some()),
+        None => (PostgresConnectionFields::default(), false),
+    }
+}
+
+fn resolve_target_db_url(
+    database_url: &str,
+    postgres: Option<&PostgresConnectionFields>,
+    clear_password: bool,
+    saved_url: &str,
+) -> Result<Option<String>, ApiError> {
+    let fallback_saved = resolve_saved_or_env_db_url(saved_url);
+    if let Some(pg) = postgres {
+        let effective_pw = if !pg.password.is_empty() {
+            pg.password.clone()
+        } else if clear_password {
+            String::new()
+        } else {
+            parse_postgres_url(&fallback_saved)
+                .and_then(|(_, pw)| pw)
+                .unwrap_or_default()
+        };
+        let built = build_postgres_url(pg, &effective_pw)?;
+        return Ok(Some(built));
+    }
+
+    let trimmed = database_url.trim();
+    if !trimmed.is_empty() && !trimmed.contains(":***@") {
+        return Ok(Some(trimmed.to_string()));
+    }
+    if !fallback_saved.is_empty() {
+        return Ok(Some(fallback_saved));
+    }
+    Ok(None)
 }
 
 pub async fn admin_get_storage_handler(
@@ -128,25 +179,21 @@ pub async fn admin_get_storage_handler(
         "local"
     };
     let secrets = state.runtime_secrets.read().await;
-    let effective_saved = if !secrets.database_url.is_empty() {
-        secrets.database_url.clone()
-    } else {
-        std::env::var("DATABASE_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_default()
-    };
+    let effective_saved = resolve_saved_or_env_db_url(&secrets.database_url);
     let configured_mode = if secrets.storage_mode.is_empty() {
         active_kind.to_string()
     } else {
         secrets.storage_mode.clone()
     };
+    let (postgres, has_saved_password) = extract_saved_pg_status(&effective_saved);
 
     Ok(Json(StorageStatusResponse {
         active_backend: active_kind,
         configured_mode,
         database_url_masked: mask_database_url(&effective_saved),
         has_saved_url: !effective_saved.is_empty(),
+        has_saved_password,
+        postgres,
     }))
 }
 
@@ -157,10 +204,16 @@ pub async fn admin_test_storage_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
     let saved_url = state.runtime_secrets.read().await.database_url.clone();
-    let Some(db_url) = resolve_effective_db_url(&body.database_url, &saved_url) else {
+    let Some(db_url) = resolve_target_db_url(
+        &body.database_url,
+        body.postgres.as_ref(),
+        body.clear_password,
+        &saved_url,
+    )?
+    else {
         return Err(ApiError::new(
             ErrorCode::StorageUrlRequired,
-            "PostgreSQL connection URL is required.",
+            "PostgreSQL connection configuration is required.",
         ));
     };
 
@@ -210,11 +263,16 @@ pub async fn admin_update_storage_handler(
 
     let (next_repo, persisted_url): (Arc<dyn TutorialRepository>, String) =
         if target_mode == "postgres" {
-            let Some(db_url) = resolve_effective_db_url(&body.database_url, &saved_url_snapshot)
+            let Some(db_url) = resolve_target_db_url(
+                &body.database_url,
+                body.postgres.as_ref(),
+                body.clear_password,
+                &saved_url_snapshot,
+            )?
             else {
                 return Err(ApiError::new(
                     ErrorCode::StorageUrlRequired,
-                    "PostgreSQL connection URL is required.",
+                    "PostgreSQL connection configuration is required.",
                 ));
             };
             let pg = PostgresRepository::connect_and_migrate(&db_url, false)
@@ -288,12 +346,16 @@ pub async fn admin_update_storage_handler(
     } else {
         "local"
     };
+    let effective_after = resolve_saved_or_env_db_url(&persisted_url);
+    let (postgres, has_saved_password) = extract_saved_pg_status(&effective_after);
 
     Ok(Json(SwitchStorageResponse {
         active_backend: active_kind,
         configured_mode: target_mode,
-        database_url_masked: mask_database_url(&persisted_url),
-        has_saved_url: !persisted_url.is_empty(),
+        database_url_masked: mask_database_url(&effective_after),
+        has_saved_url: !effective_after.is_empty(),
+        has_saved_password,
+        postgres,
         new_session_token,
     }))
 }
@@ -342,7 +404,14 @@ pub async fn admin_update_oauth_secret_handler(
     let target_pid = body
         .provider_id
         .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase())
+        .map(|s| {
+            let slug = slugify_oauth_provider_id(s);
+            if slug.is_empty() {
+                s.trim().to_ascii_lowercase()
+            } else {
+                slug
+            }
+        })
         .filter(|s| !s.is_empty());
 
     if let Some(pid) = target_pid {
@@ -669,7 +738,58 @@ pub async fn admin_set_user_ban_handler(
         .await
         .map_err(repo_err)?;
     match updated {
-        Some(u) => Ok(Json(u)),
+        Some(u) => {
+            if body.banned {
+                let email = u.email.trim().to_string();
+                let deliverable = !email.is_empty()
+                    && email.contains('@')
+                    && !email.to_ascii_lowercase().ends_with("@localhost");
+                if deliverable {
+                    let (smtp_cfg, smtp_pw) = {
+                        let secrets = state.runtime_secrets.read().await;
+                        (secrets.smtp.clone(), secrets.smtp_password.clone())
+                    };
+                    if is_smtp_ready(&smtp_cfg) {
+                        let settings = state
+                            .repo
+                            .get_site_settings(&state.default_settings)
+                            .await
+                            .unwrap_or_else(|_| state.default_settings.clone());
+                        let origin = detect_external_origin(&headers);
+                        let target_locale =
+                            resolve_request_locale(None, &headers, &settings.default_locale)
+                                .to_string();
+                        let display_name = u.display_name.clone();
+                        let username = u.username.clone();
+                        let reason = body.reason.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = send_user_ban_notice_email(
+                                &smtp_cfg,
+                                &smtp_pw,
+                                MailBrandContext {
+                                    site_name: &settings.site_name,
+                                    logo_url: &settings.logo_url,
+                                    origin: &origin,
+                                    locale: &target_locale,
+                                },
+                                &display_name,
+                                &username,
+                                &reason,
+                                &email,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "Failed to send account suspension email to {}: {err}",
+                                    email
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+            Ok(Json(u))
+        }
         None => Err(ApiError::new(ErrorCode::UserNotFound, "User not found.")),
     }
 }

@@ -3,12 +3,14 @@ use axum::http::{header, HeaderMap};
 use icehandnote_core::{
     auth::{
         compute_device_fingerprint, normalize_supported_locale, parse_user_agent_device,
-        BlogSsoClaims, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        SaveStudioStepInput, SiteSettingsDto, StudioStepEditorDto, StudioTrackDto,
-        UpdateUserProfileInput, UserProfileDto, UserRole, UserSessionDto,
+        percent_encode_component, slugify_oauth_provider_id, BlogSsoClaims, CollaboratorInviteDto,
+        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, SiteSettingsDto,
+        StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserProfileDto, UserRole,
+        UserSessionDto,
     },
     error::ErrorCode,
     mail_templates::SmtpSettingsDto,
+    webauthn::{StoredPasskeyCredential, UserPasskeyDto},
     ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto,
     TrackSummaryDto, UserMarginNoteDto,
 };
@@ -27,6 +29,17 @@ pub type TicketMap = HashMap<String, OneTimeOAuthTicket>;
 pub type OnboardingMap = HashMap<String, PendingOAuthOnboarding>;
 pub type CooldownMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 pub type EmailChangeOtpMap = HashMap<Uuid, PendingEmailChangeOtp>;
+pub type PasskeyCeremonyMap = HashMap<Uuid, PendingPasskeyCeremony>;
+
+#[derive(Clone)]
+pub struct PendingPasskeyCeremony {
+    pub kind: &'static str, // "register" | "login"
+    pub user_id: Option<Uuid>,
+    pub challenge: String,
+    pub rp_id: String,
+    pub allowed_origins: Vec<String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Clone)]
 pub struct PendingEmailChangeOtp {
@@ -50,6 +63,7 @@ pub struct AppState {
     pub oauth_onboardings: Arc<tokio::sync::Mutex<OnboardingMap>>,
     pub forgot_password_cooldowns: Arc<tokio::sync::Mutex<CooldownMap>>,
     pub email_change_otps: Arc<tokio::sync::Mutex<EmailChangeOtpMap>>,
+    pub passkey_ceremonies: Arc<tokio::sync::Mutex<PasskeyCeremonyMap>>,
     pub blog_sso_secret: String,
     pub blog_origin_url: String,
     pub blog_wp_api_url: Option<String>,
@@ -128,8 +142,33 @@ impl RuntimeSecretsConfig {
             {
                 return sec.to_string();
             }
+            let slug_key = slugify_oauth_provider_id(&key);
+            if !slug_key.is_empty() && slug_key != key {
+                if let Some(sec) = self
+                    .oauth_client_secrets
+                    .get(&slug_key)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    return sec.to_string();
+                }
+            }
         }
-        self.oauth_client_secret.trim().to_string()
+        let legacy = self.oauth_client_secret.trim();
+        if !legacy.is_empty() {
+            return legacy.to_string();
+        }
+        // If only a single OAuth secret exists in the map (e.g. saved before provider ID normalization), use it safely
+        let non_empty: Vec<&str> = self
+            .oauth_client_secrets
+            .values()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .collect();
+        if non_empty.len() == 1 {
+            return non_empty[0].to_string();
+        }
+        String::new()
     }
 
     pub fn provider_secret_status_map(&self) -> HashMap<String, bool> {
@@ -198,6 +237,51 @@ impl RuntimeSecretsConfig {
         if let Ok(fn_env) = std::env::var("SMTP_FROM_NAME") {
             if !fn_env.trim().is_empty() && cfg.smtp.from_name == "IceHandnote" {
                 cfg.smtp.from_name = fn_env.trim().to_string();
+            }
+        }
+        let has_env_db_url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some();
+        if cfg.database_url.is_empty() && !has_env_db_url {
+            if let Ok(pg_host) = std::env::var("POSTGRES_HOST") {
+                if !pg_host.trim().is_empty() {
+                    let pg_port = std::env::var("POSTGRES_PORT")
+                        .ok()
+                        .and_then(|p| p.trim().parse::<u16>().ok())
+                        .filter(|&p| p > 0)
+                        .unwrap_or(5432);
+                    let pg_db = std::env::var("POSTGRES_DB")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(default_pg_database);
+                    let pg_user = std::env::var("POSTGRES_USER")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(default_pg_username);
+                    let pg_pw = std::env::var("POSTGRES_PASSWORD").unwrap_or_default();
+                    let pg_ssl = std::env::var("POSTGRES_SSLMODE")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(default_pg_ssl_mode);
+                    let fields = PostgresConnectionFields {
+                        host: pg_host,
+                        port: pg_port,
+                        database: pg_db,
+                        username: pg_user,
+                        password: String::new(),
+                        ssl_mode: pg_ssl,
+                    };
+                    if let Ok(built) = build_postgres_url(&fields, &pg_pw) {
+                        cfg.database_url = built;
+                        if cfg.storage_mode.is_empty() {
+                            cfg.storage_mode = "postgres".to_string();
+                        }
+                    }
+                }
             }
         }
         cfg
@@ -377,6 +461,67 @@ impl TutorialRepository for DynamicRepository {
     ) -> anyhow::Result<UserProfileDto> {
         self.current()
             .bind_oauth_to_user(user_id, provider, subject, oauth_avatar_url)
+            .await
+    }
+
+    async fn unbind_oauth_from_user(
+        &self,
+        user_id: Uuid,
+        provider: &str,
+    ) -> anyhow::Result<UserProfileDto> {
+        self.current()
+            .unbind_oauth_from_user(user_id, provider)
+            .await
+    }
+
+    async fn list_user_passkeys(&self, user_id: Uuid) -> anyhow::Result<Vec<UserPasskeyDto>> {
+        self.current().list_user_passkeys(user_id).await
+    }
+
+    async fn save_user_passkey(
+        &self,
+        cred: StoredPasskeyCredential,
+    ) -> anyhow::Result<UserPasskeyDto> {
+        self.current().save_user_passkey(cred).await
+    }
+
+    async fn find_passkey_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<Option<(StoredPasskeyCredential, UserProfileDto)>> {
+        self.current()
+            .find_passkey_by_credential_id(credential_id)
+            .await
+    }
+
+    async fn touch_passkey_usage(
+        &self,
+        credential_id: &str,
+        new_counter: u32,
+    ) -> anyhow::Result<()> {
+        self.current()
+            .touch_passkey_usage(credential_id, new_counter)
+            .await
+    }
+
+    async fn rename_user_passkey(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+        new_name: &str,
+    ) -> anyhow::Result<Option<UserPasskeyDto>> {
+        self.current()
+            .rename_user_passkey(user_id, credential_id, new_name)
+            .await
+    }
+
+    async fn delete_user_passkey(
+        &self,
+        user_id: Uuid,
+        credential_id: &str,
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .delete_user_passkey(user_id, credential_id)
             .await
     }
 
@@ -1073,13 +1218,6 @@ pub async fn finalize_login_session(
 }
 
 pub fn detect_external_origin(headers: &HeaderMap) -> String {
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|p| *p == "https" || *p == "http")
-        .unwrap_or("http");
     let host = headers
         .get("x-forwarded-host")
         .or_else(|| headers.get(header::HOST))
@@ -1088,7 +1226,137 @@ pub fn detect_external_origin(headers: &HeaderMap) -> String {
         .map(str::trim)
         .filter(|h| !h.is_empty())
         .unwrap_or("127.0.0.1:3001");
+
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .or_else(|| headers.get("x-forwarded-scheme"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|p| p == "https" || p == "http");
+
+    let cf_https = headers
+        .get("cf-visitor")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase().contains("\"https\""))
+        .unwrap_or(false);
+
+    let rfc_forwarded_https = headers
+        .get(header::FORWARDED)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.contains("proto=https") || lower.contains("proto=\"https\"")
+        })
+        .unwrap_or(false);
+
+    let same_host_https_ref = [header::ORIGIN, header::REFERER]
+        .into_iter()
+        .filter_map(|h| headers.get(h).and_then(|v| v.to_str().ok()))
+        .any(|val| {
+            if let Some(after) = val.trim().strip_prefix("https://") {
+                let ref_host = after.split('/').next().unwrap_or("").trim();
+                !ref_host.is_empty() && ref_host.eq_ignore_ascii_case(host)
+            } else {
+                false
+            }
+        });
+
+    let proto = if let Some(ref p) = forwarded_proto {
+        p.as_str()
+    } else if cf_https || rfc_forwarded_https || same_host_https_ref {
+        "https"
+    } else {
+        "http"
+    };
+
     format!("{proto}://{host}")
+}
+
+fn strip_host_port(authority: &str) -> String {
+    let trimmed = authority.trim();
+    if let Some(after_open) = trimmed.strip_prefix('[') {
+        if let Some((ipv6, _)) = after_open.split_once(']') {
+            return ipv6.to_ascii_lowercase();
+        }
+    }
+    trimmed
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+pub fn resolve_webauthn_rp_and_origins(headers: &HeaderMap) -> (String, Vec<String>) {
+    let detected_origin = detect_external_origin(headers);
+    let authority = detected_origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost");
+    let detected_host = strip_host_port(authority);
+
+    let rp_id = std::env::var("PASSKEY_RP_ID")
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if detected_host == "127.0.0.1" || detected_host == "::1" || detected_host.is_empty() {
+                "localhost".to_string()
+            } else {
+                detected_host.clone()
+            }
+        });
+
+    let mut origins: Vec<String> = Vec::new();
+    let mut push_unique = |orig: String| {
+        let clean = orig.trim().trim_end_matches('/').to_string();
+        if !clean.is_empty() && !origins.iter().any(|o| o.eq_ignore_ascii_case(&clean)) {
+            origins.push(clean);
+        }
+    };
+
+    push_unique(detected_origin.clone());
+    if rp_id != "localhost" {
+        push_unique(format!("https://{authority}"));
+        push_unique(format!("https://{rp_id}"));
+    } else {
+        let port_suffix = authority
+            .rsplit_once(':')
+            .map(|(_, p)| format!(":{p}"))
+            .unwrap_or_default();
+        push_unique(format!("http://localhost{port_suffix}"));
+        push_unique("http://localhost".to_string());
+    }
+
+    if let Some(req_origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        let clean_orig = req_origin.trim().trim_end_matches('/');
+        if clean_orig.starts_with("https://") || clean_orig.starts_with("http://localhost") {
+            let orig_auth = clean_orig
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or("");
+            let orig_host = strip_host_port(orig_auth);
+            if orig_host == rp_id || orig_host.ends_with(&format!(".{rp_id}")) {
+                push_unique(clean_orig.to_string());
+            }
+        }
+    }
+
+    if let Ok(extra) = std::env::var("PASSKEY_ALLOWED_ORIGINS") {
+        for part in extra.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                push_unique(trimmed.to_string());
+            }
+        }
+    }
+
+    (rp_id, origins)
 }
 
 pub fn mask_database_url(raw: &str) -> String {
@@ -1107,5 +1375,332 @@ pub fn mask_database_url(raw: &str) -> String {
         format!("{}://{user_name}:***@{host_part}", &trimmed[..scheme_sep])
     } else {
         trimmed.to_string()
+    }
+}
+
+fn default_pg_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_pg_port() -> u16 {
+    5432
+}
+
+fn default_pg_database() -> String {
+    "icehandnote".to_string()
+}
+
+fn default_pg_username() -> String {
+    "postgres".to_string()
+}
+
+fn default_pg_ssl_mode() -> String {
+    "prefer".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostgresConnectionFields {
+    #[serde(default = "default_pg_host")]
+    pub host: String,
+    #[serde(default = "default_pg_port")]
+    pub port: u16,
+    #[serde(default = "default_pg_database")]
+    pub database: String,
+    #[serde(default = "default_pg_username")]
+    pub username: String,
+    #[serde(default, skip_serializing)]
+    pub password: String,
+    #[serde(default = "default_pg_ssl_mode")]
+    pub ssl_mode: String,
+}
+
+impl Default for PostgresConnectionFields {
+    fn default() -> Self {
+        Self {
+            host: default_pg_host(),
+            port: default_pg_port(),
+            database: default_pg_database(),
+            username: default_pg_username(),
+            password: String::new(),
+            ssl_mode: default_pg_ssl_mode(),
+        }
+    }
+}
+
+pub fn normalize_pg_ssl_mode(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "disable" => "disable",
+        "allow" | "prefer" => "prefer",
+        "require" => "require",
+        "verify-ca" => "verify-ca",
+        "verify-full" => "verify-full",
+        _ => "prefer",
+    }
+}
+
+pub fn percent_decode_component(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push(((h << 4) | l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub fn parse_postgres_url(raw: &str) -> Option<(PostgresConnectionFields, Option<String>)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let after_scheme = if lower.starts_with("postgresql://") {
+        &trimmed["postgresql://".len()..]
+    } else if lower.starts_with("postgres://") {
+        &trimmed["postgres://".len()..]
+    } else {
+        return None;
+    };
+
+    let (without_query, query_opt) = match after_scheme.split_once('?') {
+        Some((head, q)) => (head, Some(q.split('#').next().unwrap_or(q))),
+        None => (after_scheme.split('#').next().unwrap_or(after_scheme), None),
+    };
+
+    let mut ssl_mode = default_pg_ssl_mode();
+    if let Some(query) = query_opt {
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("sslmode") {
+                    ssl_mode = normalize_pg_ssl_mode(&percent_decode_component(v)).to_string();
+                }
+            }
+        }
+    }
+
+    let (username, password_opt, authority_and_path) = match without_query.rfind('@') {
+        Some(at_idx) => {
+            let userinfo = &without_query[..at_idx];
+            let rest = &without_query[at_idx + 1..];
+            match userinfo.split_once(':') {
+                Some((u, p)) => {
+                    let decoded_u = percent_decode_component(u);
+                    let decoded_p = percent_decode_component(p);
+                    (
+                        if decoded_u.trim().is_empty() {
+                            default_pg_username()
+                        } else {
+                            decoded_u
+                        },
+                        if decoded_p.is_empty() {
+                            None
+                        } else {
+                            Some(decoded_p)
+                        },
+                        rest,
+                    )
+                }
+                None => {
+                    let decoded_u = percent_decode_component(userinfo);
+                    (
+                        if decoded_u.trim().is_empty() {
+                            default_pg_username()
+                        } else {
+                            decoded_u
+                        },
+                        None,
+                        rest,
+                    )
+                }
+            }
+        }
+        None => (default_pg_username(), None, without_query),
+    };
+
+    let (host_port, db_raw) = match authority_and_path.split_once('/') {
+        Some((hp, db)) => (hp, db.trim_end_matches('/')),
+        None => (authority_and_path, ""),
+    };
+
+    let database = {
+        let decoded_db = percent_decode_component(db_raw);
+        if decoded_db.trim().is_empty() {
+            default_pg_database()
+        } else {
+            decoded_db
+        }
+    };
+
+    let (host, port) = if let Some(after_open) = host_port.strip_prefix('[') {
+        if let Some((ipv6_host, after_close)) = after_open.split_once(']') {
+            let parsed_port = after_close
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p > 0)
+                .unwrap_or_else(default_pg_port);
+            (ipv6_host.to_string(), parsed_port)
+        } else {
+            return None;
+        }
+    } else if host_port.matches(':').count() == 1 {
+        let (h, p_str) = host_port.split_once(':')?;
+        let parsed_port = p_str
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0)
+            .unwrap_or_else(default_pg_port);
+        (h.to_string(), parsed_port)
+    } else {
+        (host_port.to_string(), default_pg_port())
+    };
+
+    if host.trim().is_empty() {
+        return None;
+    }
+
+    Some((
+        PostgresConnectionFields {
+            host: host.trim().to_string(),
+            port,
+            database,
+            username,
+            password: String::new(),
+            ssl_mode,
+        },
+        password_opt,
+    ))
+}
+
+pub fn build_postgres_url(
+    fields: &PostgresConnectionFields,
+    effective_password: &str,
+) -> Result<String, ApiError> {
+    let raw_host = fields
+        .host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    if raw_host.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::StorageUrlRequired,
+            "PostgreSQL host is required.",
+        ));
+    }
+    if raw_host
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'))
+    {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "PostgreSQL host contains invalid characters.",
+        ));
+    }
+
+    let port = if fields.port == 0 {
+        default_pg_port()
+    } else {
+        fields.port
+    };
+    let db_trimmed = fields.database.trim();
+    if db_trimmed.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "PostgreSQL database name is required.",
+        ));
+    }
+    let user_trimmed = fields.username.trim();
+    if user_trimmed.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "PostgreSQL username is required.",
+        ));
+    }
+
+    let host_fmt = if raw_host.contains(':') {
+        format!("[{raw_host}]")
+    } else {
+        raw_host.to_string()
+    };
+    let enc_user = percent_encode_component(user_trimmed);
+    let enc_db = percent_encode_component(db_trimmed);
+    let ssl_mode = normalize_pg_ssl_mode(&fields.ssl_mode);
+    let auth = if effective_password.is_empty() {
+        enc_user
+    } else {
+        format!("{enc_user}:{}", percent_encode_component(effective_password))
+    };
+
+    Ok(format!(
+        "postgres://{auth}@{host_fmt}:{port}/{enc_db}?sslmode={ssl_mode}"
+    ))
+}
+
+#[cfg(test)]
+mod pg_url_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrips_special_characters_and_ssl_mode() {
+        let input = PostgresConnectionFields {
+            host: "db.internal.example".to_string(),
+            port: 5433,
+            database: "icehand/notes?v1".to_string(),
+            username: "app@admin:1".to_string(),
+            password: String::new(),
+            ssl_mode: "require".to_string(),
+        };
+        let raw_pw = "p@ss:w/rd#1?%!";
+        let url = build_postgres_url(&input, raw_pw).expect("build url");
+        assert!(url.contains("sslmode=require"));
+        assert!(!url.contains("p@ss:w/rd#1?%!"));
+
+        let (parsed, parsed_pw) = parse_postgres_url(&url).expect("parse url");
+        assert_eq!(parsed, input);
+        assert_eq!(parsed_pw.as_deref(), Some(raw_pw));
+    }
+
+    #[test]
+    fn handles_ipv6_and_empty_password() {
+        let input = PostgresConnectionFields {
+            host: "::1".to_string(),
+            port: 5432,
+            database: "icehandnote".to_string(),
+            username: "postgres".to_string(),
+            password: String::new(),
+            ssl_mode: "disable".to_string(),
+        };
+        let url = build_postgres_url(&input, "").expect("build ipv6 url");
+        assert_eq!(
+            url,
+            "postgres://postgres@[::1]:5432/icehandnote?sslmode=disable"
+        );
+        let (parsed, parsed_pw) = parse_postgres_url(&url).expect("parse ipv6 url");
+        assert_eq!(parsed, input);
+        assert_eq!(parsed_pw, None);
+    }
+
+    #[test]
+    fn never_serializes_raw_password_in_dto() {
+        let parsed: PostgresConnectionFields = serde_json::from_str(
+            r#"{"host":"10.0.0.8","port":5432,"database":"notes","username":"pguser","password":"super-secret-password","ssl_mode":"verify-full"}"#,
+        )
+        .expect("deserialize with password");
+        assert_eq!(parsed.password, "super-secret-password");
+        assert_eq!(parsed.ssl_mode, "verify-full");
+
+        let json = serde_json::to_string(&parsed).expect("serialize");
+        assert!(!json.contains("super-secret-password"));
+        assert!(!json.contains("\"password\""));
     }
 }

@@ -30,7 +30,7 @@ use std::{
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
-    services::{ServeDir, ServeFile},
+    services::ServeDir,
     trace::TraceLayer,
 };
 use tracing::info;
@@ -303,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
         oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         blog_sso_secret,
         blog_origin_url,
         blog_wp_api_url,
@@ -451,6 +452,35 @@ fn build_router(
         .route(
             "/api/v1/auth/me/email/verify",
             post(routes::auth::verify_email_change_handler),
+        )
+        .route(
+            "/api/v1/auth/me/oauth/{provider}",
+            delete(routes::auth::auth_unbind_oauth_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys",
+            get(routes::auth::passkey_list_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys/register/options",
+            post(routes::auth::passkey_register_options_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys/register/verify",
+            post(routes::auth::passkey_register_verify_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys/{cred_id}",
+            patch(routes::auth::passkey_rename_handler)
+                .delete(routes::auth::passkey_delete_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys/login/options",
+            post(routes::auth::passkey_login_options_handler),
+        )
+        .route(
+            "/api/v1/auth/passkeys/login/verify",
+            post(routes::auth::passkey_login_verify_handler),
         )
         .route(
             "/api/v1/auth/oauth/authorize",
@@ -620,10 +650,36 @@ fn build_router(
         );
 
     if let Some(web_dir) = web_dist_dir {
-        let index_file = web_dir.join("index.html");
-        router = router.fallback_service(
-            ServeDir::new(web_dir).fallback(ServeFile::new(index_file)),
-        );
+        let index_file = Arc::new(web_dir.join("index.html"));
+        let index_for_root = Arc::clone(&index_file);
+        let index_for_html = Arc::clone(&index_file);
+        let index_for_fallback = Arc::clone(&index_file);
+        let fallback_state = state.clone();
+
+        router = router
+            .route(
+                "/",
+                get(move |axum::extract::State(st): axum::extract::State<AppState>| {
+                    let path = Arc::clone(&index_for_root);
+                    async move { serve_bootstrapped_index(st, &path).await }
+                }),
+            )
+            .route(
+                "/index.html",
+                get(move |axum::extract::State(st): axum::extract::State<AppState>| {
+                    let path = Arc::clone(&index_for_html);
+                    async move { serve_bootstrapped_index(st, &path).await }
+                }),
+            )
+            .fallback_service(
+                ServeDir::new(web_dir)
+                    .append_index_html_on_directories(false)
+                    .fallback(any(move || {
+                        let st = fallback_state.clone();
+                        let path = Arc::clone(&index_for_fallback);
+                        async move { serve_bootstrapped_index(st, &path).await }
+                    })),
+            );
     }
 
     router
@@ -631,6 +687,99 @@ fn build_router(
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+fn escape_html_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn render_bootstrapped_index_html(raw_html: &str, settings: &SiteSettingsDto) -> String {
+    let plain_title = icehandnote_core::reading_time::strip_html_tags(&settings.site_name)
+        .trim()
+        .to_string();
+    let escaped_title = escape_html_text(&plain_title);
+    let title_tag = format!("<title>{escaped_title}</title>");
+
+    let mut html = if raw_html.contains("<title></title>") {
+        raw_html.replacen("<title></title>", &title_tag, 1)
+    } else if raw_html.contains("<title>IceHandnote</title>") {
+        raw_html.replacen("<title>IceHandnote</title>", &title_tag, 1)
+    } else {
+        raw_html.to_string()
+    };
+
+    let custom_logo = settings.logo_url.trim();
+    if !custom_logo.is_empty() {
+        let escaped_logo = escape_html_text(custom_logo);
+        html = html.replacen(
+            "rel=\"icon\"",
+            &format!("rel=\"icon\" href=\"{escaped_logo}\""),
+            1,
+        );
+    }
+
+    if let Ok(json) = serde_json::to_string(settings) {
+        let safe_json = json
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e")
+            .replace('&', "\\u0026")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029");
+        let script_tag = format!(
+            "<script id=\"ihn-site-settings\">window.__ICEHANDNOTE_SITE_SETTINGS__={safe_json};</script>"
+        );
+        if html.contains("<!-- ihn-bootstrap-slot -->") {
+            html = html.replacen("<!-- ihn-bootstrap-slot -->", &script_tag, 1);
+        } else if html.contains("</head>") {
+            html = html.replacen("</head>", &format!("{script_tag}\n</head>"), 1);
+        }
+    }
+
+    html
+}
+
+async fn serve_bootstrapped_index(
+    state: AppState,
+    index_path: &Path,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let raw_html = match tokio::fs::read_to_string(index_path).await {
+        Ok(content) => content,
+        Err(_) => {
+            return ApiError::new(ErrorCode::NotFound, "Frontend index.html not found.")
+                .into_response();
+        }
+    };
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .unwrap_or_else(|_| state.default_settings.clone());
+    let rendered = render_bootstrapped_index_html(&raw_html, &settings);
+
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/html; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        rendered,
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -657,6 +806,7 @@ mod tests {
             oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
             blog_wp_api_url: None,
@@ -665,6 +815,22 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let _router = build_router(state, CorsLayer::permissive(), None);
+    }
+
+    #[test]
+    fn bootstrapped_index_html_injects_title_logo_and_escaped_json() {
+        let mut settings = SiteSettingsDto::default_with_env("zh-CN", "");
+        settings.site_name = "<span>Custom</script> & Notes</span>".to_string();
+        settings.logo_url = "/uploads/2026-11/brand.png".to_string();
+
+        let template = "<!DOCTYPE html><html><head><title></title><link rel=\"icon\" type=\"image/svg+xml\" data-default-href=\"data:image/svg+xml,default\" /><!-- ihn-bootstrap-slot --></head><body></body></html>";
+        let out = render_bootstrapped_index_html(template, &settings);
+
+        assert!(out.contains("<title>Custom &amp; Notes</title>"));
+        assert!(out.contains("rel=\"icon\" href=\"/uploads/2026-11/brand.png\""));
+        assert!(out.contains("data-default-href=\"data:image/svg+xml,default\""));
+        assert!(out.contains("window.__ICEHANDNOTE_SITE_SETTINGS__="));
+        assert!(!out.contains("</script> & Notes"));
     }
 
     #[test]
@@ -911,6 +1077,264 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn oauth_token_exchange_handles_strict_post_basic_fallback_and_urlencoded() {
+        use axum::{
+            http::{header, HeaderMap, StatusCode},
+            response::IntoResponse,
+        };
+        use routes::auth::exchange_oauth_code;
+
+        let mock_app = Router::new()
+            // Endpoint 1: Strict RFC 6749 server that rejects dual auth (both Basic header + body secret)
+            .route(
+                "/strict-oidc/token",
+                post(|headers: HeaderMap, body: String| async move {
+                    let has_basic = headers.contains_key(header::AUTHORIZATION);
+                    let has_body_secret = body.contains("client_secret=");
+                    if has_basic && has_body_secret {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({
+                                "error": "invalid_client",
+                                "error_description": "Multiple client authentication mechanisms provided"
+                            })),
+                        )
+                            .into_response();
+                    }
+                    if has_body_secret {
+                        return (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "access_token": "tok_strict_post_ok",
+                                "token_type": "Bearer"
+                            })),
+                        )
+                            .into_response();
+                    }
+                    StatusCode::UNAUTHORIZED.into_response()
+                }),
+            )
+            // Endpoint 2: Strict `client_secret_basic`-only server (e.g. Ory Fosite / Authelia default)
+            .route(
+                "/basic-only/token",
+                post(|headers: HeaderMap, body: String| async move {
+                    let has_basic = headers.contains_key(header::AUTHORIZATION);
+                    let has_body_secret = body.contains("client_secret=");
+                    if !has_basic || has_body_secret {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "error": "invalid_client",
+                                "error_description": "Client authentication failed (client_secret_basic required)"
+                            })),
+                        )
+                            .into_response();
+                    }
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "access_token": "tok_basic_fallback_ok",
+                            "token_type": "Bearer"
+                        })),
+                    )
+                        .into_response()
+                }),
+            )
+            // Endpoint 3: Form-urlencoded token response
+            .route(
+                "/urlencoded/token",
+                post(|| async move {
+                    (
+                        StatusCode::OK,
+                        "access_token=gho_form_encoded_ok&scope=read%3Auser&token_type=bearer",
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_app).await;
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        let v1 = exchange_oauth_code(
+            &client,
+            &format!("{base}/strict-oidc/token"),
+            "code1",
+            "https://notes.example/api/v1/auth/oauth/callback",
+            "cid",
+            "sec!@#",
+            "verifier1",
+        )
+        .await
+        .expect("strict OIDC server must succeed without dual-auth failure");
+        assert_eq!(v1["access_token"], "tok_strict_post_ok");
+
+        let v2 = exchange_oauth_code(
+            &client,
+            &format!("{base}/basic-only/token"),
+            "code2",
+            "https://notes.example/api/v1/auth/oauth/callback",
+            "cid",
+            "sec!@#",
+            "verifier2",
+        )
+        .await
+        .expect("basic-only OIDC server must succeed via automatic client_secret_basic fallback");
+        assert_eq!(v2["access_token"], "tok_basic_fallback_ok");
+
+        let v3 = exchange_oauth_code(
+            &client,
+            &format!("{base}/urlencoded/token"),
+            "code3",
+            "https://notes.example/api/v1/auth/oauth/callback",
+            "cid",
+            "sec",
+            "verifier3",
+        )
+        .await
+        .expect("urlencoded token response must parse cleanly");
+        assert_eq!(v3["access_token"], "gho_form_encoded_ok");
+    }
+
+    #[tokio::test]
+    async fn multi_oauth_bindings_lockout_guard_and_user_ban_email_work() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let content_dir = resolve_content_dir(None);
+        let store_path =
+            env::temp_dir().join(format!("icehandnote-multioauth-test-{}.json", Uuid::new_v4()));
+        let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path.clone()).unwrap();
+
+        // OAuth-only user (no local password)
+        let oauth_user = repo
+            .complete_oauth_registration(
+                "github",
+                "gh-sub-1",
+                "octocat",
+                "Octocat",
+                "octocat@example.com",
+                UserRole::Reader,
+                "oauth",
+                "",
+                "",
+            )
+            .await
+            .unwrap();
+        assert!(!oauth_user.has_password);
+        assert_eq!(oauth_user.oauth_bindings, vec!["github".to_string()]);
+
+        // Cannot unbind the sole sign-in method
+        let unbind_last_err = repo
+            .unbind_oauth_from_user(oauth_user.id, "github")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            ApiError::from_anyhow(unbind_last_err).code,
+            ErrorCode::CannotUnbindLastAuth
+        );
+
+        // Bind a second OAuth provider -> both appear, and unbinding one succeeds
+        let multi = repo
+            .bind_oauth_to_user(oauth_user.id, "authentik", "ak-sub-99", "")
+            .await
+            .unwrap();
+        assert_eq!(multi.oauth_bindings.len(), 2);
+        assert!(multi.oauth_bindings.contains(&"github".to_string()));
+        assert!(multi.oauth_bindings.contains(&"authentik".to_string()));
+
+        // Both providers sign in to the exact same user
+        let found_ak = repo
+            .find_oauth_user("authentik", "ak-sub-99", "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_ak.id, oauth_user.id);
+
+        let after_unbind = repo
+            .unbind_oauth_from_user(oauth_user.id, "github")
+            .await
+            .unwrap();
+        assert_eq!(after_unbind.oauth_bindings, vec!["authentik".to_string()]);
+
+        // Verify user ban email delivery via local SMTP sink
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sink = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut reader = BufReader::new(r);
+            w.write_all(b"220 sink.local ESMTP Ready\r\n").await.unwrap();
+            let mut raw_data = String::new();
+            let mut in_data = false;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader.read_line(&mut line).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                if in_data {
+                    if line.trim_end_matches(['\r', '\n']) == "." {
+                        in_data = false;
+                        w.write_all(b"250 OK queued\r\n").await.unwrap();
+                    } else {
+                        raw_data.push_str(&line);
+                    }
+                    continue;
+                }
+                let upper = line.to_ascii_uppercase();
+                if upper.starts_with("EHLO ") || upper.starts_with("HELO ") {
+                    w.write_all(b"250-sink.local\r\n250 OK\r\n").await.unwrap();
+                } else if upper.starts_with("DATA") {
+                    in_data = true;
+                    w.write_all(b"354 End data\r\n").await.unwrap();
+                } else if upper.starts_with("QUIT") {
+                    w.write_all(b"221 Bye\r\n").await.unwrap();
+                    break;
+                } else {
+                    w.write_all(b"250 OK\r\n").await.unwrap();
+                }
+            }
+            raw_data
+        });
+
+        let smtp = icehandnote_core::mail_templates::SmtpSettingsDto {
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            port,
+            encryption: "none".to_string(),
+            from_name: "IceHandnote".to_string(),
+            from_email: "noreply@icehandnote.dev".to_string(),
+            ..Default::default()
+        };
+        mailer::send_user_ban_notice_email(
+            &smtp,
+            "",
+            mailer::MailBrandContext {
+                site_name: "IceHandnote",
+                logo_url: "",
+                origin: "https://notes.test",
+                locale: "zh-CN",
+            },
+            &oauth_user.display_name,
+            &oauth_user.username,
+            "恶意刷屏灌水",
+            &oauth_user.email,
+        )
+        .await
+        .expect("account ban notice email must deliver cleanly");
+        let captured = sink.await.unwrap();
+        assert!(!captured.is_empty());
 
         let _ = std::fs::remove_file(store_path);
     }
