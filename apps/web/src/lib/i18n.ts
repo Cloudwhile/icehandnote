@@ -98,18 +98,30 @@ export function resolvePreferredLocale(
 
 export interface AuthMessages {
   title: string;
+  registerTitle: string;
+  signInTab: string;
+  registerTab: string;
   close: string;
   identifierLabel: string;
   identifierPlaceholder: string;
+  usernameLabel: string;
+  emailLabel: string;
+  displayNameLabel: string;
   passwordLabel: string;
   passwordPlaceholder: string;
   showPassword: string;
   hidePassword: string;
   submitting: string;
   submitBtn: string;
+  registerSubmitting: string;
+  registerSubmitBtn: string;
   loginFailed: string;
+  registerFailed: string;
   ssoFailed: string;
+  oauthFailed: string;
   blogSsoLink: string;
+  oauthSignInBtn: (provider: string) => string;
+  orDivider: string;
 }
 
 export interface StudioSettingsMessages {
@@ -118,6 +130,11 @@ export interface StudioSettingsMessages {
   siteNameLabel: string;
   brandBadgeLabel: string;
   brandBadgePlaceholder: string;
+  siteLogoLabel: string;
+  uploadLogoBtn: string;
+  uploadingLogoBtn: string;
+  clearLogoBtn: string;
+  logoUrlPlaceholder: string;
   heroTitleLabel: string;
   heroTaglineLabel: string;
   heroTaglinePlaceholder: string;
@@ -134,12 +151,38 @@ export interface StudioSettingsMessages {
   themeDark: string;
   themeLight: string;
   featuresGroup: string;
+  allowRegistrationLabel: string;
   enableMarginNotesLabel: string;
   enableLikesLabel: string;
   enableProgressLabel: string;
   enableDraftAutosaveLabel: string;
   draftAutosaveIntervalLabel: string;
   autosaveIntervalOption: (secs: number) => string;
+  storageGroup: string;
+  storageActiveBadge: (mode: 'local' | 'postgres') => string;
+  storageModeLocal: string;
+  storageModePostgres: string;
+  postgresUrlLabel: string;
+  postgresUrlPlaceholder: string;
+  storageSyncContentLabel: string;
+  testConnectionBtn: string;
+  testingConnectionBtn: string;
+  testConnectionOk: (ms: number) => string;
+  applyStorageBtn: string;
+  applyingStorageBtn: string;
+  storageSwitchedMsg: string;
+  oauthGroup: string;
+  oauthEnabledLabel: string;
+  oauthProviderNameLabel: string;
+  oauthClientIdLabel: string;
+  oauthClientSecretLabel: string;
+  oauthSecretSavedBadge: string;
+  oauthClearSecretBtn: string;
+  oauthAuthorizeUrlLabel: string;
+  oauthTokenUrlLabel: string;
+  oauthUserinfoUrlLabel: string;
+  oauthScopesLabel: string;
+  oauthCallbackUrlLabel: string;
   integrationGroup: string;
   blogOriginUrlLabel: string;
   blogNavLabelLabel: string;
@@ -344,6 +387,8 @@ export interface StudioMessages {
   deleteConfirmBtn: string;
   snippets: {
     steps: string;
+    image: string;
+    uploading: string;
     tip: string;
     note: string;
     info: string;
@@ -370,6 +415,7 @@ export interface StudioMessages {
     types: {
       heading: string;
       paragraph: string;
+      image: string;
       steps: string;
       alert: string;
       code_card: string;
@@ -378,6 +424,13 @@ export interface StudioMessages {
       rough_diagram: string;
       raw_markdown: string;
     };
+    imageUploadBtn: string;
+    imageUploading: string;
+    imageUrlLabel: string;
+    imageUrlPlaceholder: string;
+    imageAltLabel: string;
+    imageCaptionLabel: string;
+    imageUploadFailed: (msg: string) => string;
     headingPlaceholder: string;
     paragraphPlaceholder: string;
     marginNoteLabel: string;
@@ -657,18 +710,30 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
     },
     auth: {
       title: '登录',
+      registerTitle: '注册账号',
+      signInTab: '登录',
+      registerTab: '注册',
       close: '关闭',
       identifierLabel: '用户名或邮箱',
       identifierPlaceholder: '',
+      usernameLabel: '用户名',
+      emailLabel: '邮箱',
+      displayNameLabel: '显示名称',
       passwordLabel: '密码',
       passwordPlaceholder: '',
       showPassword: '显示',
       hidePassword: '隐藏',
       submitting: '登录中…',
       submitBtn: '登录',
+      registerSubmitting: '注册中…',
+      registerSubmitBtn: '注册账号',
       loginFailed: '用户名或密码错误',
+      registerFailed: '注册失败',
       ssoFailed: 'SSO 验证失败',
+      oauthFailed: '第三方登录失败',
       blogSsoLink: '使用主站账号登录 ↗',
+      oauthSignInBtn: (provider) => `使用 ${provider || 'OAuth'} 登录`,
+      orDivider: '或',
     },
     studio: {
       brandSuffix: '后台',
@@ -847,6 +912,8 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
       deleteConfirmBtn: '永久删除',
       snippets: {
         steps: '+ 任务项',
+        image: '+ 图片',
+        uploading: '上传中…',
         tip: '+ Tip',
         note: '+ Note',
         info: '+ Info',
@@ -873,6 +940,7 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         types: {
           heading: '章节标题',
           paragraph: '正文段落',
+          image: '图片',
           steps: '任务项',
           alert: '贴纸卡片',
           code_card: '代码卡',
@@ -881,6 +949,13 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
           rough_diagram: '流程图',
           raw_markdown: '原始 Markdown',
         },
+        imageUploadBtn: '上传图片',
+        imageUploading: '上传中…',
+        imageUrlLabel: '图片地址',
+        imageUrlPlaceholder: 'https://... 或 /uploads/...',
+        imageAltLabel: '替代文本',
+        imageCaptionLabel: '图注',
+        imageUploadFailed: (msg) => `上传失败：${msg}`,
         headingPlaceholder: '小节标题…',
         paragraphPlaceholder: '输入正文…',
         marginNoteLabel: '作者批注',
@@ -929,6 +1004,11 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         siteNameLabel: '站点名称',
         brandBadgeLabel: '品牌徽章',
         brandBadgePlaceholder: '',
+        siteLogoLabel: '站点 LOGO',
+        uploadLogoBtn: '上传图片',
+        uploadingLogoBtn: '上传中…',
+        clearLogoBtn: '恢复默认',
+        logoUrlPlaceholder: 'https://... 或 /uploads/...',
         heroTitleLabel: '首页标题',
         heroTaglineLabel: '首页副标题',
         heroTaglinePlaceholder: '',
@@ -945,12 +1025,39 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         themeDark: '深色',
         themeLight: '浅色',
         featuresGroup: '功能设置',
+        allowRegistrationLabel: '允许开放注册',
         enableMarginNotesLabel: '启用页边笔记',
         enableLikesLabel: '启用文章点赞',
         enableProgressLabel: '启用任务进度追踪',
         enableDraftAutosaveLabel: '启用草稿自动保存',
         draftAutosaveIntervalLabel: '自动保存间隔',
         autosaveIntervalOption: (secs) => `每 ${secs} 秒`,
+        storageGroup: '数据存储',
+        storageActiveBadge: (mode) =>
+          `当前：${mode === 'postgres' ? 'PostgreSQL' : '本地存储'}`,
+        storageModeLocal: '内置本地存储',
+        storageModePostgres: 'PostgreSQL 数据库',
+        postgresUrlLabel: '连接地址',
+        postgresUrlPlaceholder: 'postgres://user:password@host:5432/dbname',
+        storageSyncContentLabel: '切换时同步本地文章目录',
+        testConnectionBtn: '测试连接',
+        testingConnectionBtn: '连接中…',
+        testConnectionOk: (ms) => `连接正常 (${ms} ms)`,
+        applyStorageBtn: '切换存储',
+        applyingStorageBtn: '切换中…',
+        storageSwitchedMsg: '存储后端已切换',
+        oauthGroup: 'OAuth 登录',
+        oauthEnabledLabel: '启用 OAuth 登录',
+        oauthProviderNameLabel: '服务商名称',
+        oauthClientIdLabel: 'Client ID',
+        oauthClientSecretLabel: 'Client Secret',
+        oauthSecretSavedBadge: '已配置',
+        oauthClearSecretBtn: '清除密钥',
+        oauthAuthorizeUrlLabel: '授权地址 (Authorize URL)',
+        oauthTokenUrlLabel: '令牌地址 (Token URL)',
+        oauthUserinfoUrlLabel: '用户信息地址 (UserInfo URL)',
+        oauthScopesLabel: '权限范围 (Scopes)',
+        oauthCallbackUrlLabel: '回调地址 (Callback URL)',
         integrationGroup: '外部主站与 SSO',
         blogOriginUrlLabel: '外部主站地址',
         blogNavLabelLabel: '导航链接名称',
@@ -1117,18 +1224,30 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
     },
     auth: {
       title: 'Sign in',
+      registerTitle: 'Create account',
+      signInTab: 'Sign in',
+      registerTab: 'Create account',
       close: 'Close',
       identifierLabel: 'Username or Email',
       identifierPlaceholder: '',
+      usernameLabel: 'Username',
+      emailLabel: 'Email',
+      displayNameLabel: 'Display name',
       passwordLabel: 'Password',
       passwordPlaceholder: '',
       showPassword: 'Show',
       hidePassword: 'Hide',
       submitting: 'Signing in…',
       submitBtn: 'Sign in',
+      registerSubmitting: 'Creating…',
+      registerSubmitBtn: 'Create account',
       loginFailed: 'Invalid username or password',
+      registerFailed: 'Registration failed',
       ssoFailed: 'SSO verification failed',
+      oauthFailed: 'Sign-in failed',
       blogSsoLink: 'Sign in with Blog SSO ↗',
+      oauthSignInBtn: (provider) => `Continue with ${provider || 'OAuth'}`,
+      orDivider: 'or',
     },
     studio: {
       brandSuffix: 'Studio',
@@ -1308,6 +1427,8 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
       deleteConfirmBtn: 'Delete',
       snippets: {
         steps: '+ Task',
+        image: '+ Image',
+        uploading: 'Uploading…',
         tip: '+ Tip',
         note: '+ Note',
         info: '+ Info',
@@ -1334,6 +1455,7 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         types: {
           heading: 'Heading',
           paragraph: 'Paragraph',
+          image: 'Image',
           steps: 'Task',
           alert: 'Sticker',
           code_card: 'Code Card',
@@ -1342,6 +1464,13 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
           rough_diagram: 'Diagram',
           raw_markdown: 'Raw Markdown',
         },
+        imageUploadBtn: 'Upload Image',
+        imageUploading: 'Uploading…',
+        imageUrlLabel: 'Image URL',
+        imageUrlPlaceholder: 'https://... or /uploads/...',
+        imageAltLabel: 'Alt text',
+        imageCaptionLabel: 'Caption',
+        imageUploadFailed: (msg) => `Upload failed: ${msg}`,
         headingPlaceholder: 'Heading…',
         paragraphPlaceholder: 'Write content…',
         marginNoteLabel: 'Author Note',
@@ -1390,6 +1519,11 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         siteNameLabel: 'Site Name',
         brandBadgeLabel: 'Brand Badge',
         brandBadgePlaceholder: '',
+        siteLogoLabel: 'Site Logo',
+        uploadLogoBtn: 'Upload',
+        uploadingLogoBtn: 'Uploading…',
+        clearLogoBtn: 'Restore Default',
+        logoUrlPlaceholder: 'https://... or /uploads/...',
         heroTitleLabel: 'Home Title',
         heroTaglineLabel: 'Home Tagline',
         heroTaglinePlaceholder: '',
@@ -1406,12 +1540,39 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         themeDark: 'Dark',
         themeLight: 'Light',
         featuresGroup: 'Features',
+        allowRegistrationLabel: 'Allow user registration',
         enableMarginNotesLabel: 'Enable margin notes',
         enableLikesLabel: 'Enable likes',
         enableProgressLabel: 'Enable task progress tracking',
         enableDraftAutosaveLabel: 'Auto-save drafts',
         draftAutosaveIntervalLabel: 'Auto-save interval',
         autosaveIntervalOption: (secs) => `Every ${secs}s`,
+        storageGroup: 'Data Storage',
+        storageActiveBadge: (mode) =>
+          `Active: ${mode === 'postgres' ? 'PostgreSQL' : 'Local File'}`,
+        storageModeLocal: 'Built-in Local Storage',
+        storageModePostgres: 'PostgreSQL Database',
+        postgresUrlLabel: 'Connection URL',
+        postgresUrlPlaceholder: 'postgres://user:password@host:5432/dbname',
+        storageSyncContentLabel: 'Sync local articles when switching',
+        testConnectionBtn: 'Test Connection',
+        testingConnectionBtn: 'Testing…',
+        testConnectionOk: (ms) => `Connected (${ms} ms)`,
+        applyStorageBtn: 'Apply Storage',
+        applyingStorageBtn: 'Switching…',
+        storageSwitchedMsg: 'Storage backend updated',
+        oauthGroup: 'OAuth Sign-In',
+        oauthEnabledLabel: 'Enable OAuth sign-in',
+        oauthProviderNameLabel: 'Provider Name',
+        oauthClientIdLabel: 'Client ID',
+        oauthClientSecretLabel: 'Client Secret',
+        oauthSecretSavedBadge: 'Configured',
+        oauthClearSecretBtn: 'Clear Secret',
+        oauthAuthorizeUrlLabel: 'Authorization URL',
+        oauthTokenUrlLabel: 'Token URL',
+        oauthUserinfoUrlLabel: 'User Info URL',
+        oauthScopesLabel: 'Scopes',
+        oauthCallbackUrlLabel: 'Callback URL',
         integrationGroup: 'External Site & SSO',
         blogOriginUrlLabel: 'External Site URL',
         blogNavLabelLabel: 'Navbar Link Label',
@@ -1577,18 +1738,30 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
     },
     auth: {
       title: '登入',
+      registerTitle: '註冊帳號',
+      signInTab: '登入',
+      registerTab: '註冊',
       close: '關閉',
       identifierLabel: '帳號或 Email',
       identifierPlaceholder: '',
+      usernameLabel: '使用者名稱',
+      emailLabel: 'Email',
+      displayNameLabel: '顯示名稱',
       passwordLabel: '密碼',
       passwordPlaceholder: '',
       showPassword: '顯示',
       hidePassword: '隱藏',
       submitting: '登入中…',
       submitBtn: '登入',
+      registerSubmitting: '註冊中…',
+      registerSubmitBtn: '註冊帳號',
       loginFailed: '帳號或密碼錯誤',
+      registerFailed: '註冊失敗',
       ssoFailed: 'SSO 驗證失敗',
+      oauthFailed: '第三方登入失敗',
       blogSsoLink: '使用主站帳號登入 ↗',
+      oauthSignInBtn: (provider) => `使用 ${provider || 'OAuth'} 登入`,
+      orDivider: '或',
     },
     studio: {
       brandSuffix: '後台',
@@ -1767,6 +1940,8 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
       deleteConfirmBtn: '永久刪除',
       snippets: {
         steps: '+ 任務項',
+        image: '+ 圖片',
+        uploading: '上傳中…',
         tip: '+ Tip',
         note: '+ Note',
         info: '+ Info',
@@ -1793,6 +1968,7 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         types: {
           heading: '章節標題',
           paragraph: '正文段落',
+          image: '圖片',
           steps: '任務項',
           alert: '貼紙卡片',
           code_card: '程式碼卡',
@@ -1801,6 +1977,13 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
           rough_diagram: '流程圖',
           raw_markdown: '原始 Markdown',
         },
+        imageUploadBtn: '上傳圖片',
+        imageUploading: '上傳中…',
+        imageUrlLabel: '圖片網址',
+        imageUrlPlaceholder: 'https://... 或 /uploads/...',
+        imageAltLabel: '替代文字',
+        imageCaptionLabel: '圖說',
+        imageUploadFailed: (msg) => `上傳失敗：${msg}`,
         headingPlaceholder: '小節標題…',
         paragraphPlaceholder: '輸入正文…',
         marginNoteLabel: '作者批註',
@@ -1849,6 +2032,11 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         siteNameLabel: '站點名稱',
         brandBadgeLabel: '品牌徽章',
         brandBadgePlaceholder: '',
+        siteLogoLabel: '站點 LOGO',
+        uploadLogoBtn: '上傳圖片',
+        uploadingLogoBtn: '上傳中…',
+        clearLogoBtn: '恢復預設',
+        logoUrlPlaceholder: 'https://... 或 /uploads/...',
         heroTitleLabel: '首頁標題',
         heroTaglineLabel: '首頁副標題',
         heroTaglinePlaceholder: '',
@@ -1865,12 +2053,39 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         themeDark: '深色',
         themeLight: '淺色',
         featuresGroup: '功能設定',
+        allowRegistrationLabel: '允許開放註冊',
         enableMarginNotesLabel: '啟用頁邊筆記',
         enableLikesLabel: '啟用文章點讚',
         enableProgressLabel: '啟用任務進度追蹤',
         enableDraftAutosaveLabel: '啟用草稿自動儲存',
         draftAutosaveIntervalLabel: '自動儲存間隔',
         autosaveIntervalOption: (secs) => `每 ${secs} 秒`,
+        storageGroup: '資料儲存',
+        storageActiveBadge: (mode) =>
+          `目前：${mode === 'postgres' ? 'PostgreSQL' : '本機儲存'}`,
+        storageModeLocal: '內建本機儲存',
+        storageModePostgres: 'PostgreSQL 資料庫',
+        postgresUrlLabel: '連線網址',
+        postgresUrlPlaceholder: 'postgres://user:password@host:5432/dbname',
+        storageSyncContentLabel: '切換時同步本機文章目錄',
+        testConnectionBtn: '測試連線',
+        testingConnectionBtn: '連線中…',
+        testConnectionOk: (ms) => `連線正常 (${ms} ms)`,
+        applyStorageBtn: '切換儲存',
+        applyingStorageBtn: '切換中…',
+        storageSwitchedMsg: '儲存後端已切換',
+        oauthGroup: 'OAuth 登入',
+        oauthEnabledLabel: '啟用 OAuth 登入',
+        oauthProviderNameLabel: '服務商名稱',
+        oauthClientIdLabel: 'Client ID',
+        oauthClientSecretLabel: 'Client Secret',
+        oauthSecretSavedBadge: '已設定',
+        oauthClearSecretBtn: '清除金鑰',
+        oauthAuthorizeUrlLabel: '授權網址 (Authorize URL)',
+        oauthTokenUrlLabel: '權杖網址 (Token URL)',
+        oauthUserinfoUrlLabel: '使用者資訊網址 (UserInfo URL)',
+        oauthScopesLabel: '權限範圍 (Scopes)',
+        oauthCallbackUrlLabel: '回呼網址 (Callback URL)',
         integrationGroup: '外部主站與 SSO',
         blogOriginUrlLabel: '外部主站網址',
         blogNavLabelLabel: '導覽連結名稱',
@@ -2036,18 +2251,30 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
     },
     auth: {
       title: 'ログイン',
+      registerTitle: 'アカウント作成',
+      signInTab: 'ログイン',
+      registerTab: '新規登録',
       close: '閉じる',
       identifierLabel: 'ユーザー名またはメール',
       identifierPlaceholder: '',
+      usernameLabel: 'ユーザー名',
+      emailLabel: 'メールアドレス',
+      displayNameLabel: '表示名',
       passwordLabel: 'パスワード',
       passwordPlaceholder: '',
       showPassword: '表示',
       hidePassword: '非表示',
       submitting: 'ログイン中…',
       submitBtn: 'ログイン',
+      registerSubmitting: '登録中…',
+      registerSubmitBtn: '登録する',
       loginFailed: 'ログインに失敗しました',
+      registerFailed: '登録に失敗しました',
       ssoFailed: 'SSO 検証に失敗しました',
+      oauthFailed: '外部ログインに失敗しました',
       blogSsoLink: 'ブログアカウントでログイン ↗',
+      oauthSignInBtn: (provider) => `${provider || 'OAuth'} でログイン`,
+      orDivider: 'または',
     },
     studio: {
       brandSuffix: '管理',
@@ -2226,6 +2453,8 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
       deleteConfirmBtn: '削除',
       snippets: {
         steps: '+ タスク',
+        image: '+ 画像',
+        uploading: 'アップロード中…',
         tip: '+ Tip',
         note: '+ Note',
         info: '+ Info',
@@ -2252,6 +2481,7 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         types: {
           heading: '見出し',
           paragraph: '段落',
+          image: '画像',
           steps: 'タスク',
           alert: 'ステッカー',
           code_card: 'コードカード',
@@ -2260,6 +2490,13 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
           rough_diagram: '図解',
           raw_markdown: '生 Markdown',
         },
+        imageUploadBtn: '画像をアップロード',
+        imageUploading: 'アップロード中…',
+        imageUrlLabel: '画像 URL',
+        imageUrlPlaceholder: 'https://... または /uploads/...',
+        imageAltLabel: '代替テキスト',
+        imageCaptionLabel: 'キャプション',
+        imageUploadFailed: (msg) => `アップロード失敗：${msg}`,
         headingPlaceholder: '見出し…',
         paragraphPlaceholder: '本文…',
         marginNoteLabel: '著者メモ',
@@ -2308,6 +2545,11 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         siteNameLabel: 'サイト名',
         brandBadgeLabel: 'バッジ',
         brandBadgePlaceholder: '',
+        siteLogoLabel: 'サイトロゴ',
+        uploadLogoBtn: 'アップロード',
+        uploadingLogoBtn: '送信中…',
+        clearLogoBtn: '既定に戻す',
+        logoUrlPlaceholder: 'https://... または /uploads/...',
         heroTitleLabel: 'トップ見出し',
         heroTaglineLabel: 'キャッチコピー',
         heroTaglinePlaceholder: '',
@@ -2324,12 +2566,39 @@ export const UI_COPY: Record<LocaleCode, UiMessages> = {
         themeDark: 'ダーク',
         themeLight: 'ライト',
         featuresGroup: '機能設定',
+        allowRegistrationLabel: '新規ユーザー登録を許可',
         enableMarginNotesLabel: '欄外メモを有効化',
         enableLikesLabel: 'いいねを有効化',
         enableProgressLabel: 'タスク進捗追跡を有効化',
         enableDraftAutosaveLabel: '下書きを自動保存',
         draftAutosaveIntervalLabel: '自動保存の間隔',
         autosaveIntervalOption: (secs) => `${secs} 秒ごと`,
+        storageGroup: 'データ保存先',
+        storageActiveBadge: (mode) =>
+          `現在：${mode === 'postgres' ? 'PostgreSQL' : 'ローカル保存'}`,
+        storageModeLocal: '内蔵ローカル保存',
+        storageModePostgres: 'PostgreSQL データベース',
+        postgresUrlLabel: '接続 URL',
+        postgresUrlPlaceholder: 'postgres://user:password@host:5432/dbname',
+        storageSyncContentLabel: '切替時にローカル記事を同期',
+        testConnectionBtn: '接続テスト',
+        testingConnectionBtn: '確認中…',
+        testConnectionOk: (ms) => `接続成功 (${ms} ms)`,
+        applyStorageBtn: '保存先を切替',
+        applyingStorageBtn: '切替中…',
+        storageSwitchedMsg: '保存先を切り替えました',
+        oauthGroup: 'OAuth ログイン',
+        oauthEnabledLabel: 'OAuth ログインを有効化',
+        oauthProviderNameLabel: 'プロバイダー名',
+        oauthClientIdLabel: 'Client ID',
+        oauthClientSecretLabel: 'Client Secret',
+        oauthSecretSavedBadge: '設定済み',
+        oauthClearSecretBtn: 'シークレットを削除',
+        oauthAuthorizeUrlLabel: '認可 URL',
+        oauthTokenUrlLabel: 'トークン URL',
+        oauthUserinfoUrlLabel: 'ユーザー情報 URL',
+        oauthScopesLabel: 'スコープ',
+        oauthCallbackUrlLabel: 'コールバック URL',
         integrationGroup: '外部サイト・SSO 連携',
         blogOriginUrlLabel: '外部サイト URL',
         blogNavLabelLabel: 'ナビリンク名',

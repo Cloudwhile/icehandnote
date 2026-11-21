@@ -45,6 +45,8 @@ export type LicenseId =
   | 'all-rights-reserved'
   | 'none';
 
+export type AvatarSource = 'default' | 'gravatar' | 'oauth' | 'upload';
+
 export interface SketchNode {
   id: string;
   label: string;
@@ -131,6 +133,14 @@ export type NotebookBlock =
       items: StepTaskItem[];
     }
   | {
+      type: 'image';
+      block_id: string;
+      src: string;
+      alt: string;
+      caption?: string | null;
+      margin_note?: string | null;
+    }
+  | {
       type: 'quote';
       block_id: string;
       html: string;
@@ -182,6 +192,21 @@ export interface StepNeighborDto {
   title: string;
 }
 
+export interface ArticleAuthorDto {
+  user_id?: string | null;
+  username: string;
+  display_name: string;
+  avatar_url: string;
+  is_owner: boolean;
+}
+
+export interface CollaboratorInviteDto {
+  id: string;
+  email: string;
+  created_at: string;
+  expires_at: string;
+}
+
 export interface StepDetailDto {
   step_id: string;
   track_slug: string;
@@ -197,12 +222,14 @@ export interface StepDetailDto {
   available_locales: string[];
   canonical_revision: number;
   synced_revision: number;
+  version?: number;
   has_revision_drift: boolean;
   estimated_minutes: number;
   title: string;
   summary: string;
   license?: string;
   author_name?: string;
+  authors?: ArticleAuthorDto[];
   tags: string[];
   blocks: NotebookBlock[];
   toc: TocItem[];
@@ -256,9 +283,15 @@ export interface UserProfileDto {
   display_name: string;
   email: string;
   avatar_url: string;
+  avatar_source?: AvatarSource;
+  oauth_avatar_url?: string;
+  uploaded_avatar_url?: string;
+  oauth_provider?: string | null;
   bio: string;
   role: UserRole;
   auth_source: string;
+  is_banned?: boolean;
+  ban_reason?: string;
   last_login_at: string;
 }
 
@@ -276,6 +309,50 @@ export interface AuthSessionResponse {
   learner_key: string;
 }
 
+export interface LoginOtpChallengeResponse {
+  requires_otp: true;
+  challenge_id: string;
+  masked_email: string;
+  anomaly_reason: 'new_ip' | 'new_device' | 'new_ip_and_device' | string;
+  ip_address: string;
+  device_label: string;
+  cooldown_seconds: number;
+  expires_in_seconds: number;
+}
+
+export interface CheckUsernameResponse {
+  available: boolean;
+  reason?: 'invalid_format' | 'taken';
+}
+
+export type LoginResultResponse =
+  | ({ requires_otp?: false } & AuthSessionResponse)
+  | LoginOtpChallengeResponse;
+
+export interface UserSessionDto {
+  id: string;
+  ip_address: string;
+  user_agent: string;
+  device_label: string;
+  device_kind: 'desktop' | 'mobile' | 'tablet' | 'unknown';
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
+export interface OAuthOnboardingInfoDto {
+  provider: string;
+  provider_name: string;
+  suggested_username: string;
+  display_name: string;
+  email: string;
+  oauth_avatar_url: string;
+  gravatar_preview_url: string;
+  allow_registration: boolean;
+  allow_author_registration: boolean;
+}
+
 export interface StudioLocaleBadgeDto {
   locale: string;
   status: string;
@@ -289,7 +366,12 @@ export interface StudioStepRowDto {
   step_number: number;
   title: string;
   canonical_revision: number;
+  version?: number;
   estimated_minutes: number;
+  authors?: ArticleAuthorDto[];
+  takedown_reason?: string | null;
+  takedown_at?: string | null;
+  takedown_by?: string | null;
   translations: StudioLocaleBadgeDto[];
 }
 
@@ -323,15 +405,47 @@ export interface StudioStepEditorDto {
   estimated_minutes: number;
   synced_revision: number;
   canonical_revision: number;
+  version?: number;
   status: string;
   license?: string;
   tags: string[];
   body_markdown: string;
+  owner_user_id?: string | null;
+  authors?: ArticleAuthorDto[];
+  pending_invites?: CollaboratorInviteDto[];
+  can_manage_collaborators?: boolean;
+  takedown_reason?: string | null;
+  takedown_at?: string | null;
+  takedown_by?: string | null;
 }
 
 export interface StudioPreviewResponse {
+  frontmatter?: {
+    estimated_minutes?: number;
+  };
   blocks: NotebookBlock[];
   toc: TocItem[];
+}
+
+export interface CreateInviteResponseDto {
+  invite: CollaboratorInviteDto;
+  invite_url: string;
+  email_sent: boolean;
+  email_error?: string | null;
+}
+
+export interface AcceptInviteResponseDto {
+  ok: boolean;
+  track_slug: string;
+  chapter_slug: string;
+  step_slug: string;
+  user?: UserProfileDto | null;
+}
+
+export interface TakedownStepResponseDto {
+  ok: boolean;
+  notified_count: number;
+  emails_sent: number;
 }
 
 export type DefaultThemeSetting = 'system' | 'dark' | 'light';
@@ -339,6 +453,7 @@ export type DefaultThemeSetting = 'system' | 'dark' | 'light';
 export interface SiteSettingsDto {
   site_name: string;
   brand_badge: string;
+  logo_url: string;
   hero_title: string;
   hero_tagline: string;
   footer_text: string;
@@ -351,6 +466,16 @@ export interface SiteSettingsDto {
   blog_nav_label: string;
   sso_query_param: string;
   sso_enabled: boolean;
+  allow_registration: boolean;
+  allow_author_registration: boolean;
+  gravatar_base_url: string;
+  oauth_enabled: boolean;
+  oauth_provider_name: string;
+  oauth_client_id: string;
+  oauth_authorize_url: string;
+  oauth_token_url: string;
+  oauth_userinfo_url: string;
+  oauth_scopes: string;
   enable_margin_notes: boolean;
   enable_likes: boolean;
   enable_progress_tracking: boolean;
@@ -361,6 +486,7 @@ export interface SiteSettingsDto {
 export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   site_name: 'IceHandnote',
   brand_badge: '',
+  logo_url: '',
   hero_title: 'IceHandnote',
   hero_tagline: '',
   footer_text: '© IceHandnote · CC BY-NC-SA 4.0',
@@ -373,6 +499,16 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   blog_nav_label: '',
   sso_query_param: 'sso_login',
   sso_enabled: true,
+  allow_registration: false,
+  allow_author_registration: true,
+  gravatar_base_url: 'https://www.gravatar.com/avatar',
+  oauth_enabled: false,
+  oauth_provider_name: '',
+  oauth_client_id: '',
+  oauth_authorize_url: '',
+  oauth_token_url: '',
+  oauth_userinfo_url: '',
+  oauth_scopes: 'openid profile email',
   enable_margin_notes: true,
   enable_likes: true,
   enable_progress_tracking: true,
@@ -380,7 +516,57 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   draft_autosave_interval_secs: 15,
 };
 
-export const APP_VERSION = 'v0.1.0-rc.2';
+export const APP_VERSION = 'v0.1.0-rc.3';
+
+export interface StorageStatusDto {
+  active_backend: 'local' | 'postgres';
+  configured_mode: string;
+  database_url_masked: string;
+  has_saved_url: boolean;
+}
+
+export interface SwitchStorageResponseDto extends StorageStatusDto {
+  new_session_token?: string;
+}
+
+export interface SmtpSettingsDto {
+  enabled: boolean;
+  host: string;
+  port: number;
+  encryption: 'tls' | 'starttls' | 'none';
+  username: string;
+  from_name: string;
+  from_email: string;
+  email_footer_text: string;
+  register_code_subject: string;
+  register_code_html: string;
+  login_anomaly_subject: string;
+  login_anomaly_html: string;
+  invite_subject: string;
+  invite_html: string;
+  reset_subject: string;
+  reset_html: string;
+  takedown_subject: string;
+  takedown_html: string;
+}
+
+export interface SmtpTemplatePreviewDto {
+  subject: string;
+  html: string;
+}
+
+export interface SmtpStatusResponseDto {
+  settings: SmtpSettingsDto;
+  has_password: boolean;
+}
+
+export interface UploadMediaResponseDto {
+  url: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256?: string;
+}
 
 export interface UpdateCheckResponse {
   current_version: string;
@@ -390,4 +576,3 @@ export interface UpdateCheckResponse {
   release_url: string;
   published_at: string | null;
 }
-

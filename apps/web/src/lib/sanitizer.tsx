@@ -4,17 +4,42 @@ const ALLOWED_ELEMENTS = [
   'p',
   'b',
   'i',
+  'u',
+  's',
   'strong',
   'em',
   'code',
   'a',
   'br',
   'del',
+  'ins',
+  'sub',
+  'sup',
+  'small',
   'span',
   'mark',
   'kbd',
+  'ruby',
+  'rt',
+  'rp',
+  'abbr',
+  'img',
 ];
-const ALLOWED_ATTRIBUTES = ['href', 'class'];
+const ALLOWED_ATTRIBUTES = [
+  'href',
+  'target',
+  'rel',
+  'class',
+  'src',
+  'alt',
+  'title',
+  'loading',
+];
+
+export function stripHtmlTags(raw: string): string {
+  if (!raw || !raw.includes('<')) return raw;
+  return raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
 let domPurifyPromise:
   | Promise<{ sanitize: (s: string, cfg: Record<string, unknown>) => string }>
@@ -29,8 +54,7 @@ function loadDOMPurify() {
 
 /**
  * Safely renders rich HTML fragments using the native Sanitizer API (`Element.prototype.setHTML`)
- * when available, dynamically loading `dompurify` only in browsers lacking native support
- * (`modern-web-guidance/sanitize-untrusted-html`).
+ * when available, dynamically loading `dompurify` only in browsers lacking native support.
  * Checks `isCancelled` before DOM mutation to prevent async race conditions on rapid updates.
  */
 export async function safeSetHtml(
