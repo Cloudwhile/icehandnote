@@ -302,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         blog_sso_secret,
         blog_origin_url,
         blog_wp_api_url,
@@ -442,6 +443,14 @@ fn build_router(
         .route(
             "/api/v1/auth/change-password",
             post(routes::auth::change_password_handler),
+        )
+        .route(
+            "/api/v1/auth/me/email/send-code",
+            post(routes::auth::send_email_change_code_handler),
+        )
+        .route(
+            "/api/v1/auth/me/email/verify",
+            post(routes::auth::verify_email_change_handler),
         )
         .route(
             "/api/v1/auth/oauth/authorize",
@@ -647,6 +656,7 @@ mod tests {
             oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
             blog_wp_api_url: None,

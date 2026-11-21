@@ -1,14 +1,14 @@
 use crate::{
     error::ApiError,
     mailer::{
-        is_smtp_ready, send_login_anomaly_otp_email, send_password_reset_email,
-        send_registration_code_email, MailBrandContext,
+        is_smtp_ready, send_email_change_code_email, send_login_anomaly_otp_email,
+        send_password_reset_email, send_registration_code_email, MailBrandContext,
     },
     state::{
         detect_external_origin, extract_bearer_token, extract_client_context,
         finalize_login_session, internal_err, repo_err, repo_err_or, require_authenticated_user,
         resolve_request_locale, AppState, AuthSessionResponse, ClientContext, OneTimeOAuthTicket,
-        PendingOAuthAuthorization, PendingOAuthOnboarding,
+        PendingEmailChangeOtp, PendingOAuthAuthorization, PendingOAuthOnboarding,
     },
 };
 use axum::{
@@ -21,9 +21,10 @@ use chrono::Utc;
 use icehandnote_core::{
     auth::{
         build_gravatar_url, constant_time_str_eq, encode_basic_client_credentials, form_urlencode,
-        generate_oauth_flow_tokens, mask_email_address, percent_encode_component,
-        sanitize_internal_return_path, sign_blog_sso_token, verify_blog_sso_token, BlogSsoClaims,
-        UpdateUserProfileInput, UserProfileDto, UserRole,
+        generate_email_verification_code, generate_oauth_flow_tokens, hash_email_verification_code,
+        mask_email_address, percent_encode_component, sanitize_internal_return_path,
+        sign_blog_sso_token, verify_blog_sso_token, BlogSsoClaims, UpdateUserProfileInput,
+        UserProfileDto, UserRole,
     },
     error::ErrorCode,
 };
@@ -137,6 +138,19 @@ pub struct ChangePasswordRequest {
 }
 
 #[derive(Deserialize)]
+pub struct SendEmailChangeCodeRequest {
+    pub new_email: String,
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyEmailChangeRequest {
+    pub new_email: String,
+    pub code: String,
+}
+
+#[derive(Deserialize)]
 pub struct SsoVerifyRequest {
     pub sso_token: String,
     #[serde(default)]
@@ -150,6 +164,8 @@ pub struct DevSsoTicketRequest {
 
 #[derive(Deserialize)]
 pub struct OAuthAuthorizeQuery {
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub return_to: Option<String>,
     #[serde(default)]
@@ -1004,6 +1020,175 @@ pub async fn change_password_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+pub async fn send_email_change_code_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SendEmailChangeCodeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let clean_email = validate_email(&body.new_email)?;
+    if clean_email.eq_ignore_ascii_case(user.email.trim()) {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "The new email address is identical to your current email.",
+        ));
+    }
+
+    if state
+        .repo
+        .is_email_taken_by_other(clean_email, user.id)
+        .await
+        .map_err(repo_err)?
+    {
+        return Err(ApiError::new(
+            ErrorCode::EmailTaken,
+            "This email address is already registered to another account.",
+        ));
+    }
+
+    let (smtp_cfg, smtp_pw) = {
+        let secrets = state.runtime_secrets.read().await;
+        (secrets.smtp.clone(), secrets.smtp_password.clone())
+    };
+    if !is_smtp_ready(&smtp_cfg) {
+        return Err(ApiError::new(
+            ErrorCode::SmtpNotConfigured,
+            "Email service is not configured on this site. Please contact an administrator.",
+        ));
+    }
+
+    let now = Utc::now();
+    {
+        let mut map = state.email_change_otps.lock().await;
+        map.retain(|_, v| v.expires_at > now);
+        if let Some(existing) = map.get(&user.id) {
+            let elapsed = (now - existing.created_at).num_seconds();
+            if elapsed < 60 {
+                let retry_after = (60 - elapsed).max(1);
+                return Err(ApiError::new(
+                    ErrorCode::VerificationCodeRateLimited,
+                    format!(
+                        "Please wait {retry_after} seconds before requesting another verification code."
+                    ),
+                )
+                .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
+            }
+        }
+    }
+
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .unwrap_or_else(|_| state.default_settings.clone());
+    let origin = detect_external_origin(&headers);
+    let target_locale =
+        resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
+
+    let (raw_code, code_hash) = generate_email_verification_code(clean_email);
+    send_email_change_code_email(
+        &smtp_cfg,
+        &smtp_pw,
+        MailBrandContext {
+            site_name: &settings.site_name,
+            logo_url: &settings.logo_url,
+            origin: &origin,
+            locale: target_locale,
+        },
+        &user.display_name,
+        clean_email,
+        &raw_code,
+        10,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            ErrorCode::SmtpSendFailed,
+            format!("Failed to send email change verification code: {e}"),
+        )
+    })?;
+
+    {
+        let mut map = state.email_change_otps.lock().await;
+        map.insert(
+            user.id,
+            PendingEmailChangeOtp {
+                new_email: clean_email.to_string(),
+                code_hash,
+                attempts: 0,
+                created_at: now,
+                expires_at: now + chrono::Duration::minutes(10),
+            },
+        );
+    }
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "cooldown_seconds": 60,
+        "expires_in_seconds": 600,
+    })))
+}
+
+pub async fn verify_email_change_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<VerifyEmailChangeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let clean_email = validate_email(&body.new_email)?;
+    let clean_code = body.code.trim();
+    if clean_code.len() < 6 {
+        return Err(ApiError::new(
+            ErrorCode::VerificationCodeRequired,
+            "Please enter the 6-digit verification code sent to your new email.",
+        ));
+    }
+
+    let now = Utc::now();
+    let submitted_hash = hash_email_verification_code(clean_email, clean_code);
+    {
+        let mut map = state.email_change_otps.lock().await;
+        let Some(entry) = map.get_mut(&user.id) else {
+            return Err(ApiError::new(
+                ErrorCode::VerificationCodeInvalid,
+                "Verification code is invalid or expired.",
+            ));
+        };
+        if entry.expires_at <= now {
+            map.remove(&user.id);
+            return Err(ApiError::new(
+                ErrorCode::VerificationCodeExpired,
+                "Verification code has expired. Please request a new code.",
+            ));
+        }
+        if !entry.new_email.eq_ignore_ascii_case(clean_email) {
+            return Err(ApiError::new(
+                ErrorCode::VerificationCodeInvalid,
+                "Email address does not match the verification code.",
+            ));
+        }
+        if !constant_time_str_eq(&entry.code_hash, &submitted_hash) {
+            entry.attempts = entry.attempts.saturating_add(1);
+            if entry.attempts >= 5 {
+                map.remove(&user.id);
+            }
+            return Err(ApiError::new(
+                ErrorCode::VerificationCodeInvalid,
+                "Incorrect verification code.",
+            ));
+        }
+        map.remove(&user.id);
+    }
+
+    let updated = state
+        .repo
+        .update_user_email(user.id, clean_email)
+        .await
+        .map_err(repo_err)?;
+
+    Ok(Json(updated))
+}
+
 fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw_cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in raw_cookies.split(';') {
@@ -1058,15 +1243,17 @@ pub async fn oauth_authorize_handler(
         .await
         .map_err(repo_err)?;
 
-    if !settings.oauth_enabled
-        || settings.oauth_client_id.trim().is_empty()
-        || settings.oauth_authorize_url.trim().is_empty()
-        || settings.oauth_token_url.trim().is_empty()
-        || settings.oauth_userinfo_url.trim().is_empty()
-    {
+    let Some(provider) = settings.find_oauth_provider(q.provider.as_deref()) else {
         return Err(ApiError::new(
             ErrorCode::OAuthNotConfigured,
             "OAuth sign-in is not configured on this site.",
+        ));
+    };
+
+    if !provider.enabled || !provider.is_complete() {
+        return Err(ApiError::new(
+            ErrorCode::OAuthNotConfigured,
+            "Selected OAuth provider is disabled or incomplete.",
         ));
     }
 
@@ -1091,6 +1278,11 @@ pub async fn oauth_authorize_handler(
         pending.insert(
             oauth_state.clone(),
             PendingOAuthAuthorization {
+                provider_id: provider.id.clone(),
+                provider_name: provider.display_name().to_string(),
+                client_id: provider.client_id.trim().to_string(),
+                token_url: provider.token_url.trim().to_string(),
+                userinfo_url: provider.userinfo_url.trim().to_string(),
                 code_verifier,
                 redirect_uri: redirect_uri.clone(),
                 return_to,
@@ -1102,19 +1294,19 @@ pub async fn oauth_authorize_handler(
 
     let query_str = form_urlencode(&[
         ("response_type", "code"),
-        ("client_id", settings.oauth_client_id.trim()),
+        ("client_id", provider.client_id.trim()),
         ("redirect_uri", &redirect_uri),
-        ("scope", settings.oauth_scopes.trim()),
+        ("scope", provider.scopes.trim()),
         ("state", &oauth_state),
         ("code_challenge", &code_challenge),
         ("code_challenge_method", "S256"),
     ]);
-    let sep = if settings.oauth_authorize_url.contains('?') {
+    let sep = if provider.authorize_url.contains('?') {
         '&'
     } else {
         '?'
     };
-    let target_url = format!("{}{sep}{query_str}", settings.oauth_authorize_url.trim());
+    let target_url = format!("{}{sep}{query_str}", provider.authorize_url.trim());
 
     let mut resp = Redirect::temporary(&target_url).into_response();
     if let Ok(cookie_hv) = HeaderValue::from_str(&build_state_cookie(&oauth_state, 600, is_https))
@@ -1187,14 +1379,13 @@ pub async fn oauth_callback_handler(
         .runtime_secrets
         .read()
         .await
-        .oauth_client_secret
-        .clone();
+        .resolve_oauth_client_secret(&flow.provider_id);
 
     let mut form_pairs: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", &flow.redirect_uri),
-        ("client_id", settings.oauth_client_id.trim()),
+        ("client_id", flow.client_id.trim()),
         ("code_verifier", &flow.code_verifier),
     ];
     if !client_secret.is_empty() {
@@ -1204,7 +1395,7 @@ pub async fn oauth_callback_handler(
 
     let mut token_req = state
         .http_client
-        .post(settings.oauth_token_url.trim())
+        .post(flow.token_url.trim())
         .header(
             header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -1215,8 +1406,7 @@ pub async fn oauth_callback_handler(
         .body(form_body);
 
     if !client_secret.is_empty() {
-        let basic =
-            encode_basic_client_credentials(settings.oauth_client_id.trim(), &client_secret);
+        let basic = encode_basic_client_credentials(flow.client_id.trim(), &client_secret);
         token_req = token_req.header(header::AUTHORIZATION, format!("Basic {basic}"));
     }
 
@@ -1253,7 +1443,7 @@ pub async fn oauth_callback_handler(
 
     let profile_val: serde_json::Value = match state
         .http_client
-        .get(settings.oauth_userinfo_url.trim())
+        .get(flow.userinfo_url.trim())
         .bearer_auth(access_token)
         .header(header::ACCEPT, "application/json")
         .header(header::USER_AGENT, "IceHandnote")
@@ -1309,7 +1499,7 @@ pub async fn oauth_callback_handler(
         .unwrap_or("")
         .to_string();
 
-    if email.is_empty() && settings.oauth_userinfo_url.contains("api.github.com/user") {
+    if email.is_empty() && flow.userinfo_url.contains("api.github.com/user") {
         if let Ok(em_resp) = state
             .http_client
             .get("https://api.github.com/user/emails")
@@ -1342,12 +1532,16 @@ pub async fn oauth_callback_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let provider_display_name = if settings.oauth_provider_name.trim().is_empty() {
+    let provider_display_name = if flow.provider_name.trim().is_empty() {
         "OAuth".to_string()
     } else {
-        settings.oauth_provider_name.trim().to_string()
+        flow.provider_name.trim().to_string()
     };
-    let provider_key = provider_display_name.to_ascii_lowercase();
+    let provider_key = if flow.provider_id.trim().is_empty() {
+        provider_display_name.to_ascii_lowercase()
+    } else {
+        flow.provider_id.trim().to_ascii_lowercase()
+    };
 
     // Case 1: Logged-in user initiated explicit account binding
     if let Some(target_uid) = flow.bind_user_id {

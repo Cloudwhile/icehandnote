@@ -22,7 +22,7 @@ use icehandnote_db::{
     TutorialRepository,
 };
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use uuid::Uuid;
 
 // ============================================================================
@@ -305,10 +305,13 @@ pub async fn admin_update_storage_handler(
 #[derive(Serialize)]
 pub struct OAuthSecretStatusResponse {
     pub has_client_secret: bool,
+    pub provider_secrets: HashMap<String, bool>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateOAuthSecretBody {
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub client_secret: String,
     #[serde(default)]
@@ -320,15 +323,12 @@ pub async fn admin_get_oauth_secret_handler(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
-    let has = !state
-        .runtime_secrets
-        .read()
-        .await
-        .oauth_client_secret
-        .trim()
-        .is_empty();
+    let secrets = state.runtime_secrets.read().await;
+    let has = !secrets.oauth_client_secret.trim().is_empty();
+    let provider_secrets = secrets.provider_secret_status_map();
     Ok(Json(OAuthSecretStatusResponse {
         has_client_secret: has,
+        provider_secrets,
     }))
 }
 
@@ -339,14 +339,32 @@ pub async fn admin_update_oauth_secret_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
     let mut secrets = state.runtime_secrets.write().await;
-    if body.clear {
+    let target_pid = body
+        .provider_id
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
+    if let Some(pid) = target_pid {
+        if body.clear {
+            secrets.oauth_client_secrets.remove(&pid);
+            if pid == "default" {
+                secrets.oauth_client_secret.clear();
+            }
+        } else if !body.client_secret.trim().is_empty() {
+            secrets
+                .oauth_client_secrets
+                .insert(pid, body.client_secret.trim().to_string());
+        }
+    } else if body.clear {
         secrets.oauth_client_secret.clear();
     } else if !body.client_secret.trim().is_empty() {
         secrets.oauth_client_secret = body.client_secret.trim().to_string();
     }
     secrets.save(&state.secrets_path).map_err(internal_err)?;
     Ok(Json(OAuthSecretStatusResponse {
-        has_client_secret: !secrets.oauth_client_secret.is_empty(),
+        has_client_secret: !secrets.oauth_client_secret.trim().is_empty(),
+        provider_secrets: secrets.provider_secret_status_map(),
     }))
 }
 
@@ -756,34 +774,54 @@ pub async fn admin_takedown_step_handler(
     };
     let mut emails_sent = 0usize;
     if is_smtp_ready(&smtp_cfg) {
+        // Dispatch takedown notifications concurrently so multiple collaborators never stall the HTTP request
+        let mut tasks = tokio::task::JoinSet::new();
         for recipient in &recipients {
-            let email = recipient.email.trim();
+            let email = recipient.email.trim().to_string();
             if email.is_empty()
                 || !email.contains('@')
                 || email.to_ascii_lowercase().ends_with("@localhost")
             {
                 continue;
             }
-            match send_takedown_notice_email(
-                &smtp_cfg,
-                &smtp_pw,
-                MailBrandContext {
-                    site_name: &settings.site_name,
-                    logo_url: &settings.logo_url,
-                    origin: &origin,
-                    locale: target_locale,
-                },
-                &recipient.display_name,
-                &article_title,
-                reason,
-                &action_url,
-                email,
-            )
-            .await
-            {
-                Ok(()) => emails_sent += 1,
-                Err(e) => {
+            let smtp_cfg_cl = smtp_cfg.clone();
+            let smtp_pw_cl = smtp_pw.clone();
+            let site_name_cl = settings.site_name.clone();
+            let logo_url_cl = settings.logo_url.clone();
+            let origin_cl = origin.clone();
+            let locale_cl = target_locale.to_string();
+            let display_name_cl = recipient.display_name.clone();
+            let article_title_cl = article_title.clone();
+            let reason_cl = reason.to_string();
+            let action_url_cl = action_url.clone();
+            tasks.spawn(async move {
+                let res = send_takedown_notice_email(
+                    &smtp_cfg_cl,
+                    &smtp_pw_cl,
+                    MailBrandContext {
+                        site_name: &site_name_cl,
+                        logo_url: &logo_url_cl,
+                        origin: &origin_cl,
+                        locale: &locale_cl,
+                    },
+                    &display_name_cl,
+                    &article_title_cl,
+                    &reason_cl,
+                    &action_url_cl,
+                    &email,
+                )
+                .await;
+                (email, res)
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((_email, Ok(()))) => emails_sent += 1,
+                Ok((email, Err(e))) => {
                     tracing::warn!("Failed to send takedown email to {}: {e}", email);
+                }
+                Err(e) => {
+                    tracing::warn!("Takedown email dispatch task error: {e}");
                 }
             }
         }

@@ -26,6 +26,16 @@ pub type PendingMap = HashMap<String, PendingOAuthAuthorization>;
 pub type TicketMap = HashMap<String, OneTimeOAuthTicket>;
 pub type OnboardingMap = HashMap<String, PendingOAuthOnboarding>;
 pub type CooldownMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
+pub type EmailChangeOtpMap = HashMap<Uuid, PendingEmailChangeOtp>;
+
+#[derive(Clone)]
+pub struct PendingEmailChangeOtp {
+    pub new_email: String,
+    pub code_hash: String,
+    pub attempts: u8,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +49,7 @@ pub struct AppState {
     pub oauth_tickets: Arc<tokio::sync::Mutex<TicketMap>>,
     pub oauth_onboardings: Arc<tokio::sync::Mutex<OnboardingMap>>,
     pub forgot_password_cooldowns: Arc<tokio::sync::Mutex<CooldownMap>>,
+    pub email_change_otps: Arc<tokio::sync::Mutex<EmailChangeOtpMap>>,
     pub blog_sso_secret: String,
     pub blog_origin_url: String,
     pub blog_wp_api_url: Option<String>,
@@ -56,6 +67,11 @@ pub struct AuthSessionResponse {
 
 #[derive(Clone)]
 pub struct PendingOAuthAuthorization {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub client_id: String,
+    pub token_url: String,
+    pub userinfo_url: String,
     pub code_verifier: String,
     pub redirect_uri: String,
     pub return_to: String,
@@ -88,8 +104,12 @@ pub struct RuntimeSecretsConfig {
     pub storage_mode: String,
     #[serde(default)]
     pub database_url: String,
+    /// Legacy single-provider secret (retained for backward compatibility & `OAUTH_CLIENT_SECRET` env)
     #[serde(default)]
     pub oauth_client_secret: String,
+    /// Per-provider OAuth client secrets keyed by normalized provider `id`
+    #[serde(default)]
+    pub oauth_client_secrets: HashMap<String, String>,
     #[serde(default)]
     pub smtp_password: String,
     #[serde(default)]
@@ -97,6 +117,35 @@ pub struct RuntimeSecretsConfig {
 }
 
 impl RuntimeSecretsConfig {
+    pub fn resolve_oauth_client_secret(&self, provider_id: &str) -> String {
+        let key = provider_id.trim().to_ascii_lowercase();
+        if !key.is_empty() {
+            if let Some(sec) = self
+                .oauth_client_secrets
+                .get(&key)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                return sec.to_string();
+            }
+        }
+        self.oauth_client_secret.trim().to_string()
+    }
+
+    pub fn provider_secret_status_map(&self) -> HashMap<String, bool> {
+        self.oauth_client_secrets
+            .iter()
+            .filter_map(|(k, v)| {
+                let clean_k = k.trim().to_ascii_lowercase();
+                if clean_k.is_empty() || v.trim().is_empty() {
+                    None
+                } else {
+                    Some((clean_k, true))
+                }
+            })
+            .collect()
+    }
+
     pub fn load_or_default(path: &Path) -> Self {
         let mut cfg: Self = fs::read_to_string(path)
             .ok()
@@ -364,6 +413,24 @@ impl TutorialRepository for DynamicRepository {
         input: UpdateUserProfileInput,
     ) -> anyhow::Result<UserProfileDto> {
         self.current().update_user_profile(user_id, input).await
+    }
+
+    async fn is_email_taken_by_other(
+        &self,
+        email: &str,
+        exclude_user_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .is_email_taken_by_other(email, exclude_user_id)
+            .await
+    }
+
+    async fn update_user_email(
+        &self,
+        user_id: Uuid,
+        new_email: &str,
+    ) -> anyhow::Result<UserProfileDto> {
+        self.current().update_user_email(user_id, new_email).await
     }
 
     async fn create_password_reset_token(
