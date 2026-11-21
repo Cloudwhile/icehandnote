@@ -569,7 +569,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   draft_autosave_interval_secs: 15,
 };
 
-export const APP_VERSION = 'v0.1.0-rc.3';
+export const APP_VERSION = 'v0.1.0-rc.4';
 
 export interface StorageStatusDto {
   active_backend: 'local' | 'postgres';

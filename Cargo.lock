@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "icehandnote-api"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "icehandnote-cli"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "icehandnote-core"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "icehandnote-db"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "anyhow",
  "async-trait",

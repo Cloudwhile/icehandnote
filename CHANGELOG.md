@@ -4,6 +4,21 @@ All notable changes to **IceHandnote** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-rc.4] - 2026-11-21
+
+### Added
+- **Dedicated Studio Settings Sub-Categories**: Split Studio Site Settings into five independent sub-categories (**General**, **OAuth Login**, **Data Storage**, **SMTP Mail**, and **Updates**), synchronized between the collapsible left sidebar sub-tree and a top accessible `focusgroup` sub-tab bar.
+- **Multi-Provider OAuth 2.0 / OIDC Support**: Added `oauth_providers` list management with quick-add presets (GitHub, Google, Authentik / OIDC, Custom), per-provider client secret storage (`GET/PUT /api/v1/admin/oauth-secret`), shared callback URI routing (`/api/v1/auth/oauth/authorize?provider=<id>`), multi-provider sign-in buttons on the Login page, multi-provider binding in Personal Center, and full backward compatibility with legacy single-provider settings and env vars.
+- **Self-Service Email Change with New-Email OTP Verification**: Added `POST /api/v1/auth/me/email/send-code` and `POST /api/v1/auth/me/email/verify` with email uniqueness checks, 60-second resend cooldown, 6-digit single-input `<OtpInput />` verification, Gravatar refresh, and a localized 4-locale hand-drawn `email_change` stationery email template with live Studio preview.
+- **Safe HTML Custom Email Footer**: Enabled sanitized inline HTML (`<a>`, `<strong>`, `<em>`, `<code>`, `<small>`, `<br>`, `<p>`, restricted to `https`/`http`/`mailto` with automatic `rel="noopener noreferrer"` and email-safe link styling) in `email_footer_text` via `ammonia` (`sanitize_email_footer_html`, up to 1200 chars, preserving `{{site_name}}`).
+- **Dirty-State Save Gating**: Disabled all save/apply controls across Studio Settings (General, OAuth, Storage, SMTP), the Studio Article Editor (including `Ctrl+S` on unchanged existing articles), and Personal Center (Profile & Password) until actual changes are made.
+
+### Fixed
+- **SMTP Reliability & Fast Delivery**: Hardened `lettre` SMTP delivery with IPv4-first DNS resolution (eliminating IPv6 AAAA blackhole hangs while preserving strict domain SNI/TLS verification), RFC 5321-compliant `EHLO` domain derivation, a strict 12-second total wall-clock timeout, automatic TLS/STARTTLS fallback on swapped 465/587 ports, and concurrent `JoinSet` dispatch for multi-collaborator takedown notifications.
+- **Studio Desktop Double Scrollbar & Shell Detachment**: Added `position: relative` containing blocks for `.studio-shell` and `.sr-only` form labels and locked desktop `html`/`body` overflow while Studio is mounted so only a single thin `.studio-main` scrollbar renders and the shell can never pull off-screen.
+- **Email Preview Auto-Height Fit**: Replaced fixed `720px`/`740px` iframe heights with scriptless `sandbox="allow-same-origin"` + `ResizeObserver` / `document.fonts.ready` dynamic height tracking so email previews tightly match real email content with zero trailing blank void.
+- **Studio React Hook Order**: Moved `useCallback`/`useMemo` hooks in `StudioPage` above early auth guards, resolving React #310 on direct `/studio` page loads and React #300 on direct logout from `/studio`.
+
 ## [0.1.0-rc.3] - 2026-11-21
 
 ### Added
@@ -65,6 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Argon2id local user authentication, CLI admin bootstrap (`icehandnote-cli`), and optional WordPress HMAC-SHA256 cross-site SSO bridge (`deploy/wordpress-sso-bridge.php`).
   - Automated CI/CD workflows for workspace tests, standalone Windows & Linux executable bundles, and verified GHCR OCI container images.
 
+[0.1.0-rc.4]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.2...v0.1.0-rc.3
 [0.1.0-rc.2]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/Cloudwhile/icehandnote/releases/tag/v0.1.0-rc.1
