@@ -116,6 +116,12 @@ pub trait TutorialRepository: Send + Sync {
         user_id: Uuid,
         input: UpdateUserProfileInput,
     ) -> Result<UserProfileDto>;
+    async fn is_email_taken_by_other(&self, email: &str, exclude_user_id: Uuid) -> Result<bool>;
+    async fn update_user_email(
+        &self,
+        user_id: Uuid,
+        new_email: &str,
+    ) -> Result<UserProfileDto>;
     async fn create_password_reset_token(
         &self,
         email: &str,

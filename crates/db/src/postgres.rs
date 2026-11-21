@@ -1462,6 +1462,62 @@ impl TutorialRepository for PostgresRepository {
         Ok(dto)
     }
 
+    async fn is_email_taken_by_other(&self, email: &str, exclude_user_id: Uuid) -> Result<bool> {
+        let clean = email.trim();
+        if clean.is_empty() {
+            return Ok(false);
+        }
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2)",
+        )
+        .bind(clean)
+        .bind(exclude_user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
+    async fn update_user_email(
+        &self,
+        user_id: Uuid,
+        new_email: &str,
+    ) -> Result<UserProfileDto> {
+        let clean = new_email.trim();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2)",
+        )
+        .bind(clean)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if exists {
+            return Err(domain_err(
+                ErrorCode::EmailTaken,
+                "This email address is already registered to another account.",
+            ));
+        }
+
+        let q = format!(
+            "UPDATE users SET email = $2 WHERE id = $1 RETURNING {USER_SELECT_COLS}"
+        );
+        let row_opt = sqlx::query(&q)
+            .bind(user_id)
+            .bind(clean)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row_opt else {
+            return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
+        };
+        let grav = self.fetch_gravatar_base().await;
+        let dto = Self::row_to_user(&row, &grav)?;
+        let _ = sqlx::query("UPDATE users SET avatar_url = $2 WHERE id = $1")
+            .bind(dto.id)
+            .bind(&dto.avatar_url)
+            .execute(&self.pool)
+            .await;
+        Ok(dto)
+    }
+
     async fn create_password_reset_token(
         &self,
         email: &str,

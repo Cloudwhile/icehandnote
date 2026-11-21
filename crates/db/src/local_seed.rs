@@ -914,6 +914,45 @@ impl TutorialRepository for LocalSeedRepository {
         Ok(out)
     }
 
+    async fn is_email_taken_by_other(&self, email: &str, exclude_user_id: Uuid) -> Result<bool> {
+        let clean = email.trim();
+        if clean.is_empty() {
+            return Ok(false);
+        }
+        let state = self.state.read().await;
+        Ok(state.users.iter().any(|u| {
+            u.profile.id != exclude_user_id && u.profile.email.eq_ignore_ascii_case(clean)
+        }))
+    }
+
+    async fn update_user_email(
+        &self,
+        user_id: Uuid,
+        new_email: &str,
+    ) -> Result<UserProfileDto> {
+        let clean = new_email.trim();
+        let mut state = self.state.write().await;
+        if state
+            .users
+            .iter()
+            .any(|u| u.profile.id != user_id && u.profile.email.eq_ignore_ascii_case(clean))
+        {
+            return Err(domain_err(
+                ErrorCode::EmailTaken,
+                "This email address is already registered to another account.",
+            ));
+        }
+        let grav = Self::gravatar_base(&state).to_string();
+        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+            return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
+        };
+        rec.profile.email = clean.to_string();
+        rec.profile = Self::resolve_user_dto(rec, &grav);
+        let out = rec.profile.clone();
+        self.persist_state(&state);
+        Ok(out)
+    }
+
     async fn create_password_reset_token(
         &self,
         email: &str,

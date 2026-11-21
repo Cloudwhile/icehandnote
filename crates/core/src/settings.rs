@@ -1,6 +1,74 @@
 use crate::error::{DomainError, ErrorCode};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthProviderDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub authorize_url: String,
+    #[serde(default)]
+    pub token_url: String,
+    #[serde(default)]
+    pub userinfo_url: String,
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: String,
+}
+
+impl OAuthProviderDto {
+    pub fn is_complete(&self) -> bool {
+        !self.client_id.trim().is_empty()
+            && !self.authorize_url.trim().is_empty()
+            && !self.token_url.trim().is_empty()
+            && !self.userinfo_url.trim().is_empty()
+    }
+
+    pub fn display_name(&self) -> &str {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() {
+            let id_trimmed = self.id.trim();
+            if id_trimmed.is_empty() {
+                "OAuth"
+            } else {
+                id_trimmed
+            }
+        } else {
+            trimmed
+        }
+    }
+}
+
+pub fn slugify_oauth_provider_id(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in raw.trim().to_ascii_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_sep = false;
+        } else if (ch == '-' || ch == '_' || ch.is_ascii_whitespace()) && !out.is_empty() && !prev_sep
+        {
+            out.push(if ch == '_' { '_' } else { '-' });
+            prev_sep = true;
+        }
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches(['-', '_']).to_string();
+    if trimmed.len() >= 2 {
+        trimmed
+    } else {
+        String::new()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteSettingsDto {
@@ -50,6 +118,9 @@ pub struct SiteSettingsDto {
     pub oauth_userinfo_url: String,
     #[serde(default = "default_oauth_scopes")]
     pub oauth_scopes: String,
+    /// Multi-provider OAuth 2.0 / OIDC configurations (preferred over legacy single-provider fields).
+    #[serde(default)]
+    pub oauth_providers: Vec<OAuthProviderDto>,
     #[serde(default = "default_true")]
     pub enable_margin_notes: bool,
     #[serde(default = "default_true")]
@@ -165,11 +236,86 @@ impl SiteSettingsDto {
             oauth_token_url: env_non_empty("OAUTH_TOKEN_URL").unwrap_or_default(),
             oauth_userinfo_url: env_non_empty("OAUTH_USERINFO_URL").unwrap_or_default(),
             oauth_scopes: env_non_empty("OAUTH_SCOPES").unwrap_or_else(default_oauth_scopes),
+            oauth_providers: {
+                let enabled = env_non_empty("OAUTH_ENABLED")
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false);
+                let name = env_non_empty("OAUTH_PROVIDER_NAME").unwrap_or_default();
+                let client_id = env_non_empty("OAUTH_CLIENT_ID").unwrap_or_default();
+                let authorize_url = env_non_empty("OAUTH_AUTHORIZE_URL").unwrap_or_default();
+                let token_url = env_non_empty("OAUTH_TOKEN_URL").unwrap_or_default();
+                let userinfo_url = env_non_empty("OAUTH_USERINFO_URL").unwrap_or_default();
+                let scopes = env_non_empty("OAUTH_SCOPES").unwrap_or_else(default_oauth_scopes);
+                if enabled || !client_id.is_empty() || !authorize_url.is_empty() {
+                    let mut id = slugify_oauth_provider_id(&name);
+                    if id.is_empty() {
+                        id = "default".to_string();
+                    }
+                    vec![OAuthProviderDto {
+                        id,
+                        enabled,
+                        name,
+                        client_id,
+                        authorize_url,
+                        token_url,
+                        userinfo_url,
+                        scopes,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            },
             enable_margin_notes: true,
             enable_likes: true,
             enable_progress_tracking: true,
             enable_draft_autosave: true,
             draft_autosave_interval_secs: default_autosave_interval_secs(),
+        }
+    }
+
+    /// Returns the effective list of configured OAuth providers (falling back to legacy
+    /// single-provider fields when `oauth_providers` is empty).
+    pub fn effective_oauth_providers(&self) -> Vec<OAuthProviderDto> {
+        if !self.oauth_providers.is_empty() {
+            return self.oauth_providers.clone();
+        }
+        if self.oauth_enabled
+            || !self.oauth_client_id.trim().is_empty()
+            || !self.oauth_authorize_url.trim().is_empty()
+        {
+            let mut id = slugify_oauth_provider_id(&self.oauth_provider_name);
+            if id.is_empty() {
+                id = "default".to_string();
+            }
+            return vec![OAuthProviderDto {
+                id,
+                enabled: self.oauth_enabled,
+                name: self.oauth_provider_name.clone(),
+                client_id: self.oauth_client_id.clone(),
+                authorize_url: self.oauth_authorize_url.clone(),
+                token_url: self.oauth_token_url.clone(),
+                userinfo_url: self.oauth_userinfo_url.clone(),
+                scopes: if self.oauth_scopes.trim().is_empty() {
+                    default_oauth_scopes()
+                } else {
+                    self.oauth_scopes.clone()
+                },
+            }];
+        }
+        Vec::new()
+    }
+
+    /// Resolves a specific OAuth provider by ID (case-insensitive) or returns the first enabled
+    /// provider when `provider_id` is omitted.
+    pub fn find_oauth_provider(&self, provider_id: Option<&str>) -> Option<OAuthProviderDto> {
+        let providers = self.effective_oauth_providers();
+        if let Some(raw_id) = provider_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let needle = raw_id.to_ascii_lowercase();
+            providers
+                .into_iter()
+                .find(|p| p.id.eq_ignore_ascii_case(&needle))
+        } else {
+            providers.into_iter().find(|p| p.enabled)
         }
     }
 
@@ -278,6 +424,104 @@ impl SiteSettingsDto {
             }
         }
 
+        // Backward compatibility: if a legacy payload populated flat OAuth fields without
+        // `oauth_providers`, lift it into `oauth_providers`.
+        if self.oauth_providers.is_empty()
+            && (self.oauth_enabled
+                || !self.oauth_client_id.is_empty()
+                || !self.oauth_authorize_url.is_empty())
+        {
+            let mut id = slugify_oauth_provider_id(&self.oauth_provider_name);
+            if id.is_empty() {
+                id = "default".to_string();
+            }
+            self.oauth_providers.push(OAuthProviderDto {
+                id,
+                enabled: self.oauth_enabled,
+                name: self.oauth_provider_name.clone(),
+                client_id: self.oauth_client_id.clone(),
+                authorize_url: self.oauth_authorize_url.clone(),
+                token_url: self.oauth_token_url.clone(),
+                userinfo_url: self.oauth_userinfo_url.clone(),
+                scopes: self.oauth_scopes.clone(),
+            });
+        }
+
+        // Sanitize & deduplicate multi-OAuth provider entries (max 20)
+        let mut seen_ids = HashSet::new();
+        let mut clean_providers = Vec::with_capacity(self.oauth_providers.len().min(20));
+        for (idx, mut p) in self.oauth_providers.into_iter().take(20).enumerate() {
+            p.name = p.name.trim().chars().take(48).collect();
+            p.client_id = p.client_id.trim().chars().take(256).collect();
+            p.authorize_url = p.authorize_url.trim().chars().take(512).collect();
+            p.token_url = p.token_url.trim().chars().take(512).collect();
+            p.userinfo_url = p.userinfo_url.trim().chars().take(512).collect();
+            p.scopes = p.scopes.trim().chars().take(256).collect();
+            if p.scopes.is_empty() {
+                p.scopes = default_oauth_scopes();
+            }
+            for url in [&p.authorize_url, &p.token_url, &p.userinfo_url] {
+                if !url.is_empty()
+                    && !url.starts_with("https://")
+                    && !url.starts_with("http://")
+                {
+                    return Err(DomainError::new(
+                        ErrorCode::InvalidUrl,
+                        "OAuth endpoint URL must start with https:// or http://.",
+                    )
+                    .into());
+                }
+            }
+            let base_id = {
+                let from_id = slugify_oauth_provider_id(&p.id);
+                if !from_id.is_empty() {
+                    from_id
+                } else {
+                    let from_name = slugify_oauth_provider_id(&p.name);
+                    if !from_name.is_empty() {
+                        from_name
+                    } else {
+                        format!("provider-{}", idx + 1)
+                    }
+                }
+            };
+            let mut final_id = base_id.clone();
+            let mut suffix = 2usize;
+            while seen_ids.contains(&final_id) {
+                let candidate = format!("{base_id}-{suffix}");
+                final_id = candidate.chars().take(32).collect();
+                suffix += 1;
+            }
+            seen_ids.insert(final_id.clone());
+            p.id = final_id;
+            clean_providers.push(p);
+        }
+        self.oauth_providers = clean_providers;
+
+        // Keep legacy summary fields synced with `oauth_providers` for older clients
+        if let Some(primary) = self
+            .oauth_providers
+            .iter()
+            .find(|p| p.enabled)
+            .or_else(|| self.oauth_providers.first())
+        {
+            self.oauth_enabled = self.oauth_providers.iter().any(|p| p.enabled);
+            self.oauth_provider_name = primary.name.clone();
+            self.oauth_client_id = primary.client_id.clone();
+            self.oauth_authorize_url = primary.authorize_url.clone();
+            self.oauth_token_url = primary.token_url.clone();
+            self.oauth_userinfo_url = primary.userinfo_url.clone();
+            self.oauth_scopes = primary.scopes.clone();
+        } else {
+            self.oauth_enabled = false;
+            self.oauth_provider_name.clear();
+            self.oauth_client_id.clear();
+            self.oauth_authorize_url.clear();
+            self.oauth_token_url.clear();
+            self.oauth_userinfo_url.clear();
+            self.oauth_scopes = default_oauth_scopes();
+        }
+
         let mut deduped = Vec::new();
         for loc in self.enabled_locales {
             if crate::SUPPORTED_LOCALES.iter().any(|(code, _)| *code == loc)
@@ -308,5 +552,64 @@ impl SiteSettingsDto {
         self.draft_autosave_interval_secs = self.draft_autosave_interval_secs.clamp(5, 300);
 
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_multiple_oauth_providers_and_preserves_legacy_fallback() {
+        let mut settings = SiteSettingsDto::default_with_env("zh-CN", "");
+        settings.oauth_providers = vec![
+            OAuthProviderDto {
+                id: "GitHub Main".to_string(),
+                enabled: true,
+                name: "GitHub".to_string(),
+                client_id: "gh_client_1".to_string(),
+                authorize_url: "https://github.com/login/oauth/authorize".to_string(),
+                token_url: "https://github.com/login/oauth/access_token".to_string(),
+                userinfo_url: "https://api.github.com/user".to_string(),
+                scopes: "read:user user:email".to_string(),
+            },
+            OAuthProviderDto {
+                id: "github-main".to_string(),
+                enabled: false,
+                name: "Google Workspace".to_string(),
+                client_id: "goog_client_2".to_string(),
+                authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                token_url: "https://oauth2.googleapis.com/token".to_string(),
+                userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo".to_string(),
+                scopes: "".to_string(),
+            },
+        ];
+
+        let clean = settings.sanitize().expect("settings sanitize");
+        assert_eq!(clean.oauth_providers.len(), 2);
+        assert_eq!(clean.oauth_providers[0].id, "github-main");
+        assert_eq!(clean.oauth_providers[1].id, "github-main-2");
+        assert_eq!(clean.oauth_providers[1].scopes, "openid profile email");
+        assert!(clean.oauth_enabled);
+        assert_eq!(clean.oauth_provider_name, "GitHub");
+        assert_eq!(
+            clean
+                .find_oauth_provider(Some("github-main-2"))
+                .map(|p| p.name),
+            Some("Google Workspace".to_string())
+        );
+
+        // Legacy payload lifts seamlessly into oauth_providers
+        let mut legacy = SiteSettingsDto::default_with_env("en", "");
+        legacy.oauth_enabled = true;
+        legacy.oauth_provider_name = "Authentik".to_string();
+        legacy.oauth_client_id = "ak_123".to_string();
+        legacy.oauth_authorize_url = "https://auth.example.com/authorize".to_string();
+        legacy.oauth_token_url = "https://auth.example.com/token".to_string();
+        legacy.oauth_userinfo_url = "https://auth.example.com/userinfo".to_string();
+        let lifted = legacy.sanitize().expect("legacy lift");
+        assert_eq!(lifted.oauth_providers.len(), 1);
+        assert_eq!(lifted.oauth_providers[0].id, "authentik");
+        assert!(lifted.oauth_providers[0].enabled);
     }
 }

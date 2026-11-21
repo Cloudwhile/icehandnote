@@ -457,6 +457,43 @@ pub fn sanitize_custom_html(raw: &str, max_chars: usize) -> String {
     builder.clean(&clipped).to_string()
 }
 
+/// Sanitize customizable HTML email footer content (allowing safe inline markup & links while
+/// strictly stripping scripts, event handlers, and non-HTTP/mailto URL schemes).
+/// Preserves `{{site_name}}` placeholders for subsequent interpolation.
+pub fn sanitize_email_footer_html(raw: &str, max_chars: usize) -> String {
+    let clipped: String = raw.trim().chars().take(max_chars).collect();
+    if clipped.is_empty() {
+        return String::new();
+    }
+    if !clipped.contains('<') && !clipped.contains('&') {
+        return clipped;
+    }
+    let mut tags = HashSet::new();
+    for t in [
+        "a", "b", "strong", "i", "em", "u", "s", "del", "small", "span", "code", "br", "p",
+        "sub", "sup",
+    ] {
+        tags.insert(t);
+    }
+    let mut generic_attrs = HashSet::new();
+    generic_attrs.insert("title");
+
+    let mut schemes = HashSet::new();
+    schemes.insert("https");
+    schemes.insert("http");
+    schemes.insert("mailto");
+
+    let mut builder = HtmlSanitizer::new();
+    builder
+        .tags(tags)
+        .generic_attributes(generic_attrs)
+        .add_tag_attributes("a", &["href", "target"])
+        .url_schemes(schemes)
+        .link_rel(Some("noopener noreferrer"))
+        .url_relative(ammonia::UrlRelative::Deny);
+    builder.clean(&clipped).to_string()
+}
+
 /// Sanitize compiled Markdown inline HTML fragments.
 pub fn sanitize_rich_fragment(fragment: &str) -> String {
     let mut tags = HashSet::new();

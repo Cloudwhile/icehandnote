@@ -91,7 +91,7 @@ impl SmtpSettingsDto {
         self.username = self.username.trim().chars().take(255).collect();
         self.from_name = self.from_name.trim().chars().take(80).collect();
         self.from_email = self.from_email.trim().chars().take(160).collect();
-        self.email_footer_text = self.email_footer_text.trim().chars().take(240).collect();
+        self.email_footer_text = crate::sanitize_email_footer_html(&self.email_footer_text, 1200);
         self.register_code_subject = self.register_code_subject.trim().to_string();
         self.register_code_html = self.register_code_html.trim().to_string();
         self.login_anomaly_subject = self.login_anomaly_subject.trim().to_string();
@@ -157,10 +157,21 @@ pub fn default_email_footer(locale: &str) -> &'static str {
     }
 }
 
-/// Returns HTML-safe footer template text (preserving `{{site_name}}` for subsequent interpolation).
+/// Returns HTML-safe footer template text (allowing safe HTML tags like `<a>`, `<strong>`, `<br>`
+/// while preserving `{{site_name}}` for subsequent interpolation and injecting email-safe link styles).
 pub fn resolve_email_footer_template(custom_footer: Option<&str>, locale: &str) -> String {
     match custom_footer.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(custom) => escape_html_value(custom),
+        Some(custom) => {
+            let cleaned = crate::sanitize_email_footer_html(custom, 1200);
+            if cleaned.trim().is_empty() {
+                default_email_footer(locale).to_string()
+            } else {
+                cleaned.replace(
+                    "<a ",
+                    r#"<a style="color:#4c1d95;text-decoration:underline;font-weight:600;" "#,
+                )
+            }
+        }
         None => default_email_footer(locale).to_string(),
     }
 }
@@ -655,6 +666,70 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
             )
         }
 
+        "email_change" => {
+            let (subj, stamp_label, heading, intro, code_label, expiry, ignore) = match loc {
+                "zh-CN" => (
+                    "[{{site_name}}] 更换绑定邮箱验证码：{{code}}",
+                    "邮箱变更",
+                    "验证你的新邮箱地址",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，你正在将账号绑定邮箱更换为 <strong style="color:#1f1411;">{{email}}</strong>。请输入下方 6 位验证码完成验证："#,
+                    "新邮箱验证码",
+                    r#"有效期 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong> · 仅限单次使用"#,
+                    "如果这不是你本人发起的操作，请直接忽略此邮件，你的原邮箱绑定不会发生改变。",
+                ),
+                "zh-TW" => (
+                    "[{{site_name}}] 更換綁定信箱驗證碼：{{code}}",
+                    "信箱變更",
+                    "驗證您的新信箱地址",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，您正在將帳號綁定信箱更換為 <strong style="color:#1f1411;">{{email}}</strong>。請輸入下方 6 位驗證碼完成驗證："#,
+                    "新信箱驗證碼",
+                    r#"有效期限 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong> · 僅限單次使用"#,
+                    "若這不是您本人發起的操作，請直接忽略此信件，您原本的信箱綁定不會改變。",
+                ),
+                "ja" => (
+                    "[{{site_name}}] メールアドレス変更確認コード：{{code}}",
+                    "メール変更",
+                    "新しいメールアドレスを確認してください",
+                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> さん、アカウントのメールアドレスを <strong style="color:#1f1411;">{{email}}</strong> に変更するリクエストを受け付けました。以下の 6 桁コードを入力してください："#,
+                    "変更確認コード",
+                    r#"有効期限 <strong style="color:#1f1411;">{{expires_minutes}} 分</strong> · 1 回限り有効"#,
+                    "この変更に心当たりがない場合は、このメールを破棄してください。現在のメールアドレスは変更されません。",
+                ),
+                _ => (
+                    "[{{site_name}}] Verify your new email address: {{code}}",
+                    "EMAIL CHANGE",
+                    "Confirm your new email address",
+                    r#"Hi <strong style="color:#1f1411;">{{recipient_name}}</strong>, enter the 6-digit code below to verify <strong style="color:#1f1411;">{{email}}</strong> as your new account email:"#,
+                    "VERIFICATION CODE",
+                    r#"Valid for <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> &middot; Single use"#,
+                    "If you did not request this email change, you can safely ignore this message — your current email will remain unchanged.",
+                ),
+            };
+            let title_block = hand_heading_html(heading, "#bae6fd");
+            let body = format!(
+                r#"{title_block}
+              <p style="margin:0 0 22px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
+              <div style="margin:0 0 22px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
+                <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
+                <div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
+                <div style="margin:0;font-size:12px;line-height:1.5;color:#5c5046;">{expiry}</div>
+              </div>
+              <p style="margin:0;font-size:13px;line-height:1.68;color:#5c5046;">{ignore}</p>"#
+            );
+            (
+                subj.to_string(),
+                wrap_stationery_email(
+                    StampBadge {
+                        label: stamp_label,
+                        bg_color: "#f0f9ff",
+                        border_color: "#38bdf8",
+                        text_color: "#0369a1",
+                    },
+                    &body,
+                ),
+            )
+        }
+
         _ => {
             let (subj, stamp_label, heading, intro, channels) = match loc {
                 "zh-CN" => (
@@ -868,6 +943,19 @@ pub fn render_mail_preview(
                 render_mail_html(&html, &vars, &logo_html, &footer_tpl),
             )
         }
+        "email_change" => {
+            let vars = [
+                ("site_name", site_label),
+                ("recipient_name", "Alice"),
+                ("email", "alice.new@example.com"),
+                ("code", "591842"),
+                ("expires_minutes", "10"),
+            ];
+            (
+                render_mail_subject(&subj, &vars),
+                render_mail_html(&html, &vars, &logo_html, &footer_tpl),
+            )
+        }
         _ => {
             let vars = [("site_name", site_label)];
             (
@@ -889,6 +977,7 @@ mod tests {
                 "register_code",
                 "login_anomaly",
                 "reset",
+                "email_change",
                 "invite",
                 "takedown",
                 "test",
@@ -923,29 +1012,36 @@ mod tests {
             }
         }
 
-        // Custom footer supports {{site_name}} and escapes raw HTML safely
+        // Custom footer supports {{site_name}} and safe HTML tags while stripping XSS payloads
         let (_subj, custom_html) = render_mail_preview(
             "reset",
             "zh-CN",
             None,
             None,
-            Some("© 2026 {{site_name}} · <b>联系</b> support@icehandnote.dev"),
+            Some(
+                r#"© 2026 <strong>{{site_name}}</strong> · <a href="https://icehandnote.dev" onclick="alert(1)">官网</a><script>alert(1)</script><br><a href="javascript:alert(2)">Bad</a>"#,
+            ),
             "IceHandnote",
             "",
             "https://notes.test",
         );
-        assert!(custom_html.contains("© 2026 IceHandnote · &lt;b&gt;联系&lt;/b&gt; support@icehandnote.dev"));
+        assert!(custom_html.contains("<strong>IceHandnote</strong>"));
+        assert!(custom_html.contains(r#"href="https://icehandnote.dev""#));
+        assert!(custom_html.contains("<br>"));
+        assert!(!custom_html.contains("<script>"));
+        assert!(!custom_html.contains("onclick"));
+        assert!(!custom_html.contains("javascript:"));
         assert!(custom_html.contains("&#10052;&#xFE0E;"));
 
         let escaped = render_mail_html(
             "<p>{{reason}}</p><footer>{{footer_text}}</footer>",
             &[("reason", "<script>alert(1)</script>"), ("site_name", "IceHandnote")],
             "",
-            &resolve_email_footer_template(Some("Custom {{site_name}}"), "en"),
+            &resolve_email_footer_template(Some("Custom <b>{{site_name}}</b>"), "en"),
         );
         assert_eq!(
             escaped,
-            "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p><footer>Custom IceHandnote</footer>"
+            "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p><footer>Custom <b>IceHandnote</b></footer>"
         );
     }
 }
