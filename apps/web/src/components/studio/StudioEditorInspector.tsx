@@ -4,8 +4,7 @@
  */
 
 import type { FormEvent } from 'react';
-import { UI_COPY } from '../../lib/i18n';
-import { RC3_COPY } from '../../lib/i18nRc3';
+import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import { ALL_LICENSE_OPTIONS, normalizeLicenseId } from '../../lib/licenses';
 import type {
   ArticleAuthorDto,
@@ -15,6 +14,7 @@ import type {
   SiteSettingsDto,
 } from '../../lib/types';
 import { IconClose, IconCopy } from '../ui/Icons';
+import { StatusBadge } from '../ui/StatusBadge';
 import { UserAvatar } from '../ui/UserAvatar';
 
 interface StudioEditorInspectorProps {
@@ -88,7 +88,7 @@ export function StudioEditorInspector({
 }: StudioEditorInspectorProps) {
   const copy = UI_COPY[locale];
   const s = copy.studio;
-  const rc3 = RC3_COPY[locale];
+  const extCopy = EXT_COPY[locale];
 
   const parsedTags = docTagsText
     .split(',')
@@ -97,19 +97,19 @@ export function StudioEditorInspector({
 
   return (
     <aside
-      aria-label={rc3.studio.editorInspectorTitle}
+      aria-label={extCopy.studio.editorInspectorTitle}
       className="studio-editor-inspector studio-panel studio-scroll-pane overflow-hidden"
     >
       {/* Inspector Header */}
       <div className="px-4 py-3 border-b border-border-subtle bg-surface-raised/50 flex items-center justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-secondary m-0">
-          {rc3.studio.editorInspectorTitle}
+          {extCopy.studio.editorInspectorTitle}
         </h2>
         <button
           type="button"
           onClick={onClose}
-          aria-label={rc3.studio.editorCloseInspectorAria}
-          title={rc3.studio.editorCloseInspectorAria}
+          aria-label={extCopy.studio.editorCloseInspectorAria}
+          title={extCopy.studio.editorCloseInspectorAria}
           className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors"
         >
           <IconClose className="w-3.5 h-3.5" />
@@ -119,39 +119,29 @@ export function StudioEditorInspector({
       <div className="divide-y divide-border-subtle">
         {/* Section 1: Publishing Status & Auto Metrics */}
         <section className="p-4 space-y-3">
-          <h3 className="text-xs font-semibold text-ink-secondary m-0">
-            {rc3.studio.editorStatusSection}
+          <h3 className="text-xs font-semibold text-ink-secondary">
+            {extCopy.studio.editorStatusSection}
           </h3>
 
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="p-2.5 rounded-xl bg-surface-raised border border-border-subtle space-y-1">
-              <div className="text-ink-muted">{rc3.users.colStatus}</div>
-              <span
-                className="inline-flex px-2 py-0.5 rounded font-semibold"
-                style={
-                  docStatus === 'published'
-                    ? {
-                        backgroundColor: 'var(--alert-mint-badge-bg)',
-                        color: 'var(--alert-mint-badge-fg)',
-                      }
-                    : {
-                        backgroundColor: 'var(--alert-note-badge-bg)',
-                        color: 'var(--alert-note-badge-fg)',
-                      }
-                }
-              >
+              <div className="text-ink-muted">{extCopy.users.colStatus}</div>
+              <StatusBadge tone={docStatus === 'published' ? 'success' : 'info'}>
                 {docStatus === 'published'
-                  ? rc3.studio.editorStatusPublished
-                  : rc3.studio.editorStatusDraft}
-              </span>
+                  ? extCopy.studio.editorStatusPublished
+                  : extCopy.studio.editorStatusDraft}
+              </StatusBadge>
             </div>
 
-            <div className="p-2.5 rounded-xl bg-surface-raised border border-border-subtle space-y-1">
+            <div
+              className="p-2.5 rounded-xl bg-surface-raised border border-border-subtle space-y-1"
+              title={s.editLocaleLabel(docCanonicalRev)}
+            >
               <div className="text-ink-muted">
-                {s.canonicalRevMeta(docCanonicalRev)}
+                {s.settings.currentVersionLabel}
               </div>
               <div className="font-mono font-semibold text-ink-primary tabular-nums">
-                {rc3.studio.autoVersionBadge(docVersion)}
+                {extCopy.studio.autoVersionBadge(docVersion)}
               </div>
             </div>
           </div>
@@ -161,15 +151,15 @@ export function StudioEditorInspector({
               {trackTitle ? `${trackTitle} / ${chapterTitle}` : stepSlug}
             </span>
             <span className="font-mono text-ink-secondary tabular-nums shrink-0">
-              {rc3.studio.autoReadMinutesBadge(docMinutes)}
+              {extCopy.studio.autoReadMinutesBadge(docMinutes)}
             </span>
           </div>
         </section>
 
         {/* Section 2: Article Metadata */}
         <section className="p-4 space-y-3.5">
-          <h3 className="text-xs font-semibold text-ink-secondary m-0">
-            {rc3.studio.editorMetaSection}
+          <h3 className="text-xs font-semibold text-ink-secondary">
+            {extCopy.studio.editorMetaSection}
           </h3>
 
           <div>
@@ -214,10 +204,12 @@ export function StudioEditorInspector({
               >
                 <option value="">
                   {s.licenseFollowSite(
-                    copy.licenseNames[
-                      normalizeLicenseId(siteSettings.default_license) ||
-                        'cc-by-nc-sa-4.0'
-                    ],
+                    (
+                      copy.licenseNames[
+                        normalizeLicenseId(siteSettings.default_license) ||
+                          'cc-by-nc-sa-4.0'
+                      ] || 'CC BY-NC-SA 4.0'
+                    ).split(' · ')[0],
                   )}
                 </option>
                 {ALL_LICENSE_OPTIONS.map((opt) => (
@@ -229,7 +221,7 @@ export function StudioEditorInspector({
             </div>
 
             <div className="flex items-center justify-between gap-3">
-              <label htmlFor="doc-stepnum-input" className="ink-field-label m-0">
+              <label htmlFor="doc-stepnum-input" className="ink-field-label mb-0">
                 {s.stepNumLabel}
               </label>
               <input
@@ -276,8 +268,8 @@ export function StudioEditorInspector({
         {docExists && (docAuthors.length > 0 || canManageCollaborators) && (
           <section className="p-4 space-y-3">
             <div className="flex items-baseline justify-between gap-2">
-              <h3 className="text-xs font-semibold text-ink-secondary m-0">
-                {rc3.studio.collabSectionTitle}
+              <h3 className="text-xs font-semibold text-ink-secondary">
+                {extCopy.studio.collabSectionTitle}
               </h3>
               <span className="text-xs font-mono text-ink-muted tabular-nums">
                 {docAuthors.length}
@@ -303,24 +295,15 @@ export function StudioEditorInspector({
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <span
-                        className="px-1.5 py-0.5 rounded text-xs font-mono"
-                        style={
-                          author.is_owner
-                            ? {
-                                backgroundColor: 'var(--alert-note-badge-bg)',
-                                color: 'var(--alert-note-badge-fg)',
-                              }
-                            : {
-                                backgroundColor: 'var(--surface-sheet)',
-                                color: 'var(--ink-muted)',
-                              }
-                        }
+                      <StatusBadge
+                        tone={author.is_owner ? 'info' : 'neutral'}
+                        mono
+                        className="px-1.5"
                       >
                         {author.is_owner
-                          ? rc3.studio.ownerBadge
-                          : rc3.studio.coAuthorBadge}
-                      </span>
+                          ? extCopy.studio.ownerBadge
+                          : extCopy.studio.coAuthorBadge}
+                      </StatusBadge>
                       {canManageCollaborators &&
                         !author.is_owner &&
                         author.user_id && (
@@ -329,7 +312,7 @@ export function StudioEditorInspector({
                             onClick={() => onRemoveCollaborator(author.user_id!)}
                             className="text-xs font-semibold text-accent-danger hover:underline cursor-pointer"
                           >
-                            {rc3.studio.removeCollaboratorBtn}
+                            {extCopy.studio.removeCollaboratorBtn}
                           </button>
                         )}
                     </div>
@@ -349,7 +332,7 @@ export function StudioEditorInspector({
                     required
                     value={inviteEmail}
                     onChange={(e) => onChangeInviteEmail(e.target.value)}
-                    placeholder={rc3.studio.inviteEmailPlaceholder}
+                    placeholder={extCopy.studio.inviteEmailPlaceholder}
                     className="ink-field-input flex-1 min-w-0 text-xs py-1.5"
                   />
                   <button
@@ -357,7 +340,7 @@ export function StudioEditorInspector({
                     disabled={inviting}
                     className="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-60 shrink-0"
                   >
-                    {inviting ? rc3.studio.invitingBtn : rc3.studio.inviteBtn}
+                    {inviting ? extCopy.studio.invitingBtn : extCopy.studio.inviteBtn}
                   </button>
                 </form>
 
@@ -375,7 +358,7 @@ export function StudioEditorInspector({
                       className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle inline-flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <IconCopy className="w-3.5 h-3.5 text-ink-muted" />
-                      <span>{rc3.studio.copyInviteLinkBtn}</span>
+                      <span>{extCopy.studio.copyInviteLinkBtn}</span>
                     </button>
                   </div>
                 )}
@@ -383,9 +366,9 @@ export function StudioEditorInspector({
                 {docPendingInvites.length > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-xs font-semibold text-ink-muted">
-                      {rc3.studio.pendingInvitesLabel}
+                      {extCopy.studio.pendingInvitesLabel}
                     </div>
-                    <ul className="m-0 p-0 list-none space-y-1">
+                    <ul className="p-0 list-none space-y-1">
                       {docPendingInvites.map((inv) => (
                         <li
                           key={inv.id}
@@ -399,7 +382,7 @@ export function StudioEditorInspector({
                             onClick={() => onRevokeInvite(inv.id)}
                             className="text-xs font-semibold text-accent-danger hover:underline cursor-pointer shrink-0"
                           >
-                            {rc3.studio.revokeInviteBtn}
+                            {extCopy.studio.revokeInviteBtn}
                           </button>
                         </li>
                       ))}

@@ -11,6 +11,8 @@ import type {
   LocaleCode,
   LoginResultResponse,
   OAuthOnboardingInfoDto,
+  PasskeyListResponseDto,
+  PostgresConnectionFieldsDto,
   SearchHitDto,
   SiteSettingsDto,
   SmtpSettingsDto,
@@ -26,6 +28,7 @@ import type {
   UpdateCheckResponse,
   UploadMediaResponseDto,
   UserMarginNoteDto,
+  UserPasskeyDto,
   UserProfileDto,
   UserRole,
   UserSessionDto,
@@ -37,6 +40,7 @@ const SESSION_TOKEN_KEY = 'icehandnote_session_token';
 const LEGACY_SESSION_TOKEN_KEY = 'stepnote_session_token';
 const USER_LEARNER_KEY = 'icehandnote_user_learner_key';
 const LEGACY_USER_LEARNER_KEY = 'stepnote_user_learner_key';
+const USER_PROFILE_CACHE_KEY = 'icehandnote_user_profile_cache';
 const DEVICE_ID_KEY = 'icehandnote_device_id';
 
 export function getClientDeviceId(): string {
@@ -90,10 +94,41 @@ export function getSessionToken(): string | null {
   }
 }
 
+export function saveCachedSessionUser(user: UserProfileDto | null): void {
+  try {
+    if (user && getSessionToken()) {
+      localStorage.setItem(USER_PROFILE_CACHE_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_PROFILE_CACHE_KEY);
+    }
+  } catch {
+    // ignore storage restriction
+  }
+}
+
+export function getCachedSessionUser(): UserProfileDto | null {
+  try {
+    if (!getSessionToken()) {
+      localStorage.removeItem(USER_PROFILE_CACHE_KEY);
+      return null;
+    }
+    const raw = localStorage.getItem(USER_PROFILE_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<UserProfileDto>;
+    if (!parsed || typeof parsed.id !== 'string' || typeof parsed.username !== 'string') {
+      return null;
+    }
+    return parsed as UserProfileDto;
+  } catch {
+    return null;
+  }
+}
+
 export function saveAuthSession(session: AuthSessionResponse): void {
   try {
     localStorage.setItem(SESSION_TOKEN_KEY, session.session_token);
     localStorage.setItem(USER_LEARNER_KEY, session.learner_key);
+    localStorage.setItem(USER_PROFILE_CACHE_KEY, JSON.stringify(session.user));
   } catch {
     // ignore storage restriction
   }
@@ -113,6 +148,7 @@ export function clearAuthSession(): void {
   try {
     localStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(USER_LEARNER_KEY);
+    localStorage.removeItem(USER_PROFILE_CACHE_KEY);
     localStorage.removeItem(LEGACY_SESSION_TOKEN_KEY);
     localStorage.removeItem(LEGACY_USER_LEARNER_KEY);
   } catch {
@@ -274,7 +310,11 @@ export const api = {
     uploadMediaFile(file, '/api/v1/studio/uploads'),
 
   // Auth, Profile, Password Reset & OAuth / SSO
-  authMe: () => fetchJson<AuthMeResponse>('/api/v1/auth/me'),
+  authMe: async () => {
+    const me = await fetchJson<AuthMeResponse>('/api/v1/auth/me');
+    saveCachedSessionUser(me.authenticated ? (me.user ?? null) : null);
+    return me;
+  },
 
   loginWithPassword: async (
     identifier: string,
@@ -477,15 +517,95 @@ export const api = {
     return res;
   },
 
-  exchangeOAuthTicket: async (ticket: string) => {
-    const res = await fetchJson<AuthSessionResponse>('/api/v1/auth/oauth/exchange', {
+  exchangeOAuthTicket: async (
+    ticket: string,
+    locale?: LocaleCode,
+  ): Promise<LoginResultResponse> => {
+    const res = await fetchJson<LoginResultResponse>('/api/v1/auth/oauth/exchange', {
       method: 'POST',
       body: JSON.stringify({
         ticket,
         anonymous_learner_id: getAnonymousLearnerId(),
+        locale,
       }),
     });
-    saveAuthSession(res);
+    if (!res.requires_otp) {
+      saveAuthSession(res);
+    }
+    return res;
+  },
+
+  unbindOAuthProvider: (provider: string) =>
+    fetchJson<UserProfileDto>(
+      `/api/v1/auth/me/oauth/${encodeURIComponent(provider)}`,
+      { method: 'DELETE' },
+    ),
+
+  listMyPasskeys: () => fetchJson<PasskeyListResponseDto>('/api/v1/auth/passkeys'),
+
+  getPasskeyRegisterOptions: (promotion = false) =>
+    fetchJson<{ ceremony_id: string; options: Record<string, unknown> }>(
+      '/api/v1/auth/passkeys/register/options',
+      {
+        method: 'POST',
+        body: JSON.stringify({ promotion }),
+      },
+    ),
+
+  verifyPasskeyRegister: (
+    ceremony_id: string,
+    credential: Record<string, unknown>,
+    nickname?: string,
+  ) =>
+    fetchJson<UserPasskeyDto>('/api/v1/auth/passkeys/register/verify', {
+      method: 'POST',
+      body: JSON.stringify({ ceremony_id, credential, nickname }),
+    }),
+
+  renamePasskey: (credentialId: string, name: string) =>
+    fetchJson<UserPasskeyDto>(
+      `/api/v1/auth/passkeys/${encodeURIComponent(credentialId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      },
+    ),
+
+  deletePasskey: (credentialId: string) =>
+    fetchJson<{ deleted: boolean }>(
+      `/api/v1/auth/passkeys/${encodeURIComponent(credentialId)}`,
+      { method: 'DELETE' },
+    ),
+
+  getPasskeyLoginOptions: () =>
+    fetchJson<{ ceremony_id: string; options: Record<string, unknown> }>(
+      '/api/v1/auth/passkeys/login/options',
+      {
+        method: 'POST',
+        body: '{}',
+      },
+    ),
+
+  verifyPasskeyLogin: async (
+    ceremony_id: string,
+    credential: Record<string, unknown>,
+    locale?: LocaleCode,
+  ): Promise<LoginResultResponse> => {
+    const res = await fetchJson<LoginResultResponse>(
+      '/api/v1/auth/passkeys/login/verify',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ceremony_id,
+          credential,
+          anonymous_learner_id: getAnonymousLearnerId(),
+          locale,
+        }),
+      },
+    );
+    if (!res.requires_otp) {
+      saveAuthSession(res);
+    }
     return res;
   },
 
@@ -663,15 +783,27 @@ export const api = {
 
   adminGetStorage: () => fetchJson<StorageStatusDto>('/api/v1/admin/storage'),
 
-  adminTestStorage: (database_url: string) =>
+  adminTestStorage: (
+    payload:
+      | string
+      | {
+          database_url?: string;
+          postgres?: PostgresConnectionFieldsDto;
+          clear_password?: boolean;
+        },
+  ) =>
     fetchJson<{ ok: boolean; latency_ms: number }>('/api/v1/admin/storage/test', {
       method: 'POST',
-      body: JSON.stringify({ database_url }),
+      body: JSON.stringify(
+        typeof payload === 'string' ? { database_url: payload } : payload,
+      ),
     }),
 
   adminUpdateStorage: async (payload: {
     mode: 'local' | 'postgres';
     database_url?: string;
+    postgres?: PostgresConnectionFieldsDto;
+    clear_password?: boolean;
     sync_content?: boolean;
   }): Promise<SwitchStorageResponseDto> => {
     const res = await fetchJson<SwitchStorageResponseDto>('/api/v1/admin/storage', {
@@ -734,6 +866,7 @@ export const api = {
       | 'invite'
       | 'reset'
       | 'takedown'
+      | 'account_ban'
       | 'test';
     locale?: LocaleCode;
     subject?: string;

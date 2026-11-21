@@ -17,10 +17,9 @@ import type {
   UserMarginNoteDto,
 } from '../../lib/types';
 import { parseAuthorMarginNote } from '../../lib/visualBlocks';
-import { IconCheck, IconClose, IconPen } from '../ui/Icons';
+import { IconClose, IconPen } from '../ui/Icons';
 import {
   ALL_MARGIN_TAGS,
-  ALL_STICKER_TONES,
   decodeReaderNoteSpec,
   encodeReaderNoteSpec,
   MARGIN_TAG_ICONS,
@@ -32,6 +31,7 @@ import {
   TornBottomEdge,
   WashiTapeOrnament,
 } from './StationeryStickers';
+import { ToneSwatchPicker } from './ToneSwatchPicker';
 
 const MARGIN_STICKER_STYLES: StickerStyle[] = [
   'tape',
@@ -368,34 +368,14 @@ export function BlockWithMargin({
 
             {/* 4. Color Swatches + Cancel / Save */}
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
-                {ALL_STICKER_TONES.map((t) => {
-                  const cfg = STICKER_TONE_TOKENS[t];
-                  const selected = tone === t;
-                  return (
-                    <button
-                      key={t}
-                      type="button"
-                      data-color-swatch=""
-                      aria-label={copy.stickyColorAria(copy.stickerTones[t])}
-                      aria-pressed={selected}
-                      onClick={() => setTone(t)}
-                      className={`w-7 h-7 rounded-full cursor-pointer border-2 inline-flex items-center justify-center transition-transform ${
-                        selected
-                          ? 'scale-110 ring-2 ring-ink-primary ring-offset-1 ring-offset-surface-raised'
-                          : ''
-                      }`}
-                      style={{
-                        backgroundColor: cfg.swatch,
-                        borderColor: 'var(--border-ink)',
-                        color: '#ffffff',
-                      }}
-                    >
-                      {selected && <IconCheck className="w-3.5 h-3.5" />}
-                    </button>
-                  );
-                })}
-              </div>
+              <ToneSwatchPicker
+                value={tone}
+                onChange={(next) => {
+                  if (next) setTone(next);
+                }}
+                copy={copy}
+                ringOffsetClass="ring-offset-surface-raised"
+              />
 
               <div className="flex items-center gap-2 ms-auto">
                 <button

@@ -7,19 +7,18 @@
  * - Action Pyramid (§2.8): ONE Primary CTA (`+ 新步骤`, `ink-btn-primary`).
  */
 
-import { useState } from 'react';
-import { api } from '../../lib/api';
-import { LOCALES, UI_COPY } from '../../lib/i18n';
+import { EXT_COPY, getEnabledLocaleMetas, UI_COPY } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
-import {
-  APP_VERSION,
-  type LocaleCode,
-  type SiteSettingsDto,
-  type StudioTrackDto,
-  type UpdateCheckResponse,
-  type UserProfileDto,
+import type {
+  LocaleCode,
+  SiteSettingsDto,
+  StudioTrackDto,
+  UserProfileDto,
 } from '../../lib/types';
+import { IconCheck } from '../ui/Icons';
+import { StatusBadge } from '../ui/StatusBadge';
 import type { StudioSectionId } from './StudioSidebarContent';
+import { UpdateCheckStatus, useSiteUpdateCheck } from './UpdateCheckStatus';
 
 interface PendingTranslationItem {
   trackSlug: string;
@@ -39,6 +38,7 @@ interface StudioOverviewPanelProps {
   tracks: StudioTrackDto[];
   usersList: UserProfileDto[];
   siteSettings: SiteSettingsDto;
+  settingsReady?: boolean;
   onOpenEditorTarget: (
     trackSlug: string,
     chapterSlug: string,
@@ -55,33 +55,16 @@ export function StudioOverviewPanel({
   tracks,
   usersList,
   siteSettings,
+  settingsReady = true,
   onOpenEditorTarget,
   onStartQuickNewStep,
   onSwitchSection,
 }: StudioOverviewPanelProps) {
   const s = UI_COPY[locale].studio;
+  const extCopy = EXT_COPY[locale];
   const st = s.settings;
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
-  const [updateErr, setUpdateErr] = useState(false);
-
-  const handleQuickUpdateCheck = async () => {
-    if (checkingUpdate) return;
-    setCheckingUpdate(true);
-    setUpdateErr(false);
-    try {
-      const res = await api.checkSiteUpdate();
-      setUpdateInfo(res);
-    } catch {
-      setUpdateErr(true);
-    } finally {
-      setCheckingUpdate(false);
-    }
-  };
-  const activeLocales = LOCALES.filter((l) =>
-    siteSettings.enabled_locales.includes(l.code),
-  );
-  const localesToTrack = activeLocales.length > 0 ? activeLocales : LOCALES;
+  const update = useSiteUpdateCheck();
+  const localesToTrack = getEnabledLocaleMetas(siteSettings.enabled_locales);
 
   let chapterCount = 0;
   let stepCount = 0;
@@ -93,47 +76,47 @@ export function StudioOverviewPanel({
     chapterCount += track.chapters.length;
     for (const ch of track.chapters) {
       stepCount += ch.steps.length;
-      for (const st of ch.steps) {
+      for (const stepItem of ch.steps) {
         for (const loc of localesToTrack) {
-          const found = st.translations.find((tr) => tr.locale === loc.code);
+          const found = stepItem.translations.find((tr) => tr.locale === loc.code);
           if (!found) {
             pendingQueue.push({
               trackSlug: track.slug,
               chapterSlug: ch.slug,
-              stepSlug: st.slug,
-              stepTitle: st.title,
-              stepNumber: st.step_number,
+              stepSlug: stepItem.slug,
+              stepTitle: stepItem.title,
+              stepNumber: stepItem.step_number,
               locale: loc.code,
               kind: 'missing',
               syncedRev: 0,
-              canonicalRev: st.canonical_revision,
+              canonicalRev: stepItem.canonical_revision,
             });
           } else if (found.status === 'draft') {
             draftDocs += 1;
             pendingQueue.push({
               trackSlug: track.slug,
               chapterSlug: ch.slug,
-              stepSlug: st.slug,
-              stepTitle: st.title,
-              stepNumber: st.step_number,
+              stepSlug: stepItem.slug,
+              stepTitle: stepItem.title,
+              stepNumber: stepItem.step_number,
               locale: loc.code,
               kind: 'draft',
               syncedRev: found.synced_revision,
-              canonicalRev: st.canonical_revision,
+              canonicalRev: stepItem.canonical_revision,
             });
           } else {
             publishedDocs += 1;
-            if (found.synced_revision < st.canonical_revision) {
+            if (found.synced_revision < stepItem.canonical_revision) {
               pendingQueue.push({
                 trackSlug: track.slug,
                 chapterSlug: ch.slug,
-                stepSlug: st.slug,
-                stepTitle: st.title,
-                stepNumber: st.step_number,
+                stepSlug: stepItem.slug,
+                stepTitle: stepItem.title,
+                stepNumber: stepItem.step_number,
                 locale: loc.code,
                 kind: 'drifted',
                 syncedRev: found.synced_revision,
-                canonicalRev: st.canonical_revision,
+                canonicalRev: stepItem.canonical_revision,
               });
             }
           }
@@ -158,7 +141,7 @@ export function StudioOverviewPanel({
     <div className="space-y-6">
       {/* Clean Header Row + ONE Primary Action */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-ink-primary m-0">
+        <h1 className="text-xl font-semibold text-ink-primary">
           {s.overviewTitle}
         </h1>
 
@@ -242,30 +225,35 @@ export function StudioOverviewPanel({
           </div>
 
           {pendingQueue.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm text-accent-success font-semibold">
-              {s.queueAllSyncedTitle}
+            <div className="px-5 py-10 text-center">
+              <span
+                aria-hidden="true"
+                className="w-9 h-9 rounded-full bg-steps-checked-bg text-accent-success inline-flex items-center justify-center mx-auto"
+              >
+                <IconCheck className="w-4 h-4" />
+              </span>
+              <p className="mt-2.5 text-sm text-ink-primary font-semibold">
+                {s.queueAllSyncedTitle}
+              </p>
+              <p className="mt-1 text-xs text-ink-muted max-w-sm mx-auto leading-relaxed">
+                {extCopy.studio.queueAllSyncedDesc}
+              </p>
             </div>
           ) : (
             <ul className="m-0 p-0 list-none divide-y divide-border-subtle">
               {pendingQueue.slice(0, 8).map((item) => {
-                const badgeStyle =
+                const badgeTone =
                   item.kind === 'draft'
-                    ? {
-                        backgroundColor: 'var(--alert-note-badge-bg)',
-                        color: 'var(--alert-note-badge-fg)',
-                        label: s.badgeDraft,
-                      }
+                    ? 'info'
                     : item.kind === 'drifted'
-                      ? {
-                          backgroundColor: 'var(--alert-warn-badge-bg)',
-                          color: 'var(--alert-warn-badge-fg)',
-                          label: s.badgeDrifted(item.syncedRev, item.canonicalRev),
-                        }
-                      : {
-                          backgroundColor: 'var(--surface-raised)',
-                          color: 'var(--ink-muted)',
-                          label: s.badgeMissing,
-                        };
+                      ? 'warn'
+                      : 'neutral';
+                const badgeLabel =
+                  item.kind === 'draft'
+                    ? s.badgeDraft
+                    : item.kind === 'drifted'
+                      ? s.badgeDrifted(item.syncedRev, item.canonicalRev)
+                      : s.badgeMissing;
 
                 return (
                   <li
@@ -276,15 +264,9 @@ export function StudioOverviewPanel({
                       <span className="w-12 text-center py-0.5 rounded text-xs font-mono bg-surface-raised text-ink-secondary shrink-0">
                         {item.locale}
                       </span>
-                      <span
-                        className="px-2 py-0.5 rounded text-xs font-mono font-semibold shrink-0"
-                        style={{
-                          backgroundColor: badgeStyle.backgroundColor,
-                          color: badgeStyle.color,
-                        }}
-                      >
-                        {badgeStyle.label}
-                      </span>
+                      <StatusBadge tone={badgeTone} mono>
+                        {badgeLabel}
+                      </StatusBadge>
                       <SafeHtml
                         as="span"
                         html={item.stepTitle}
@@ -350,9 +332,9 @@ export function StudioOverviewPanel({
                 const steps = t.chapters.flatMap((c) => c.steps);
                 const maxDocs = steps.length * localesToTrack.length;
                 const pubCount = steps.reduce(
-                  (acc, st) =>
+                  (acc, stepItem) =>
                     acc +
-                    st.translations.filter(
+                    stepItem.translations.filter(
                       (tr) =>
                         tr.status !== 'draft' &&
                         localesToTrack.some((l) => l.code === tr.locale),
@@ -412,11 +394,18 @@ export function StudioOverviewPanel({
               )}
             </div>
 
-            <dl className="m-0 divide-y divide-border-subtle text-xs">
+            <dl className="divide-y divide-border-subtle text-xs">
               <div className="py-2 flex items-baseline justify-between gap-3">
                 <dt className="text-ink-muted">{s.configSiteName}</dt>
                 <dd className="m-0 font-semibold text-ink-primary studio-ellipsis">
-                  <SafeHtml as="span" html={siteSettings.site_name} />
+                  {settingsReady ? (
+                    <SafeHtml as="span" html={siteSettings.site_name} />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="inline-block w-24 h-3.5 rounded bg-surface-raised animate-pulse"
+                    />
+                  )}
                 </dd>
               </div>
               <div className="py-2 flex items-baseline justify-between gap-3">
@@ -451,37 +440,22 @@ export function StudioOverviewPanel({
                 <dt className="text-ink-muted">{st.currentVersionLabel}</dt>
                 <dd className="m-0 flex items-center gap-2">
                   <span className="font-mono text-ink-primary">
-                    {updateInfo?.current_version ?? APP_VERSION}
+                    {update.currentVersion}
                   </span>
-                  <span role="status" aria-live="polite" className="inline-flex items-center">
-                    {!checkingUpdate && updateErr ? (
-                      <span className="text-accent-danger font-semibold">
-                        {st.updateCheckFailed}
-                      </span>
-                    ) : !checkingUpdate && updateInfo ? (
-                      updateInfo.has_update ? (
-                        <a
-                          href={updateInfo.release_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-mono font-semibold text-link-ink no-underline hover:underline"
-                        >
-                          {st.updateAvailableBadge(updateInfo.latest_version)} ↗
-                        </a>
-                      ) : (
-                        <span className="text-accent-success font-semibold">
-                          ✓ {st.upToDateBadge}
-                        </span>
-                      )
-                    ) : null}
-                  </span>
+                  <UpdateCheckStatus
+                    locale={locale}
+                    checking={update.checking}
+                    result={update.result}
+                    error={update.error}
+                    compact
+                  />
                   <button
                     type="button"
-                    disabled={checkingUpdate}
-                    onClick={() => void handleQuickUpdateCheck()}
+                    disabled={update.checking}
+                    onClick={() => void update.checkUpdate()}
                     className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle cursor-pointer disabled:opacity-60 transition-colors"
                   >
-                    {checkingUpdate ? st.checkingUpdateBtn : st.checkUpdateBtn}
+                    {update.checking ? st.checkingUpdateBtn : st.checkUpdateBtn}
                   </button>
                 </dd>
               </div>

@@ -4,23 +4,69 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light dark" />
+  <title></title>
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    data-default-href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8' fill='%23fffffa' stroke='%231f1411' stroke-width='2.5'/%3E%3Cg stroke='%23006bb4' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M16 7v18M7 16h18M9.6 9.6l12.8 12.8M22.4 9.6 9.6 22.4'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3' fill='%236018f0'/%3E%3C/svg%3E"
+  />
+  <!-- ihn-bootstrap-slot -->
   <script>
     try {
-      var savedScheme = localStorage.getItem("color-scheme");
+      var bootSettings = window.__ICEHANDNOTE_SITE_SETTINGS__;
+      if (!bootSettings) {
+        var rawCached = localStorage.getItem("icehandnote_site_settings_cache");
+        if (rawCached) bootSettings = JSON.parse(rawCached);
+      } else {
+        try {
+          localStorage.setItem("icehandnote_site_settings_cache", JSON.stringify(bootSettings));
+        } catch (_) {}
+      }
+
+      var savedScheme = null;
+      try {
+        savedScheme = localStorage.getItem("color-scheme");
+      } catch (_) {}
       var metaEl = document.querySelector('meta[name="color-scheme"]');
       if (metaEl) {
-        metaEl.content = (savedScheme === "light" || savedScheme === "dark") ? savedScheme : "light dark";
+        if (savedScheme === "light" || savedScheme === "dark") {
+          metaEl.content = savedScheme;
+        } else if (bootSettings && (bootSettings.default_theme === "light" || bootSettings.default_theme === "dark")) {
+          metaEl.content = bootSettings.default_theme;
+        } else {
+          metaEl.content = "light dark";
+        }
+      }
+
+      var routeTitle = null;
+      try {
+        routeTitle = sessionStorage.getItem("icehandnote_route_title:" + location.pathname);
+      } catch (_) {}
+      if (routeTitle) {
+        document.title = routeTitle;
+      } else if (bootSettings && typeof bootSettings.site_name === "string") {
+        var plainTitle = bootSettings.site_name.replace(/<[^>]*>/g, "").trim();
+        if (plainTitle) document.title = plainTitle;
+      }
+
+      var iconEl = document.querySelector('link[rel="icon"]');
+      if (iconEl && bootSettings) {
+        var customLogo = typeof bootSettings.logo_url === "string" ? bootSettings.logo_url.trim() : "";
+        var defaultHref = iconEl.getAttribute("data-default-href") || "";
+        var targetHref = customLogo || defaultHref;
+        if (targetHref && iconEl.getAttribute("href") !== targetHref) {
+          iconEl.href = targetHref;
+        }
       }
     } catch (_) {}
   </script>
-  <title>IceHandnote</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8' fill='%23fffffa' stroke='%231f1411' stroke-width='2.5'/%3E%3Cg stroke='%23006bb4' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M16 7v18M7 16h18M9.6 9.6l12.8 12.8M22.4 9.6 9.6 22.4'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3' fill='%236018f0'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/lxgwwenkaigbscreen.css" media="print" onload="this.media='all'" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Noto+Sans+JP:wght@400;600;700&family=Noto+Sans+SC:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" media="print" onload="this.media='all'" />
   <noscript>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8' fill='%23fffffa' stroke='%231f1411' stroke-width='2.5'/%3E%3Cg stroke='%23006bb4' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M16 7v18M7 16h18M9.6 9.6l12.8 12.8M22.4 9.6 9.6 22.4'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3' fill='%236018f0'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/lxgwwenkaigbscreen.css" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Noto+Sans+JP:wght@400;600;700&family=Noto+Sans+SC:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" />
   </noscript>

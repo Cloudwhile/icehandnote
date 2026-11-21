@@ -14,6 +14,8 @@
 
   --color-border-ink: var(--border-ink);
   --color-border-subtle: var(--border-subtle);
+  --color-border-control: var(--border-control);
+  --color-steps-checked-bg: var(--steps-checked-bg);
 
   --color-action-bg: var(--action-bg);
   --color-action-fg: var(--action-fg);

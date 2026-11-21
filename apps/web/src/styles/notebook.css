@@ -269,6 +269,33 @@ mark {
   box-shadow: var(--shadow-inset);
 }
 
+/* Hide browser-default blue cancel/decoration icon inside search inputs (#8) */
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Ensure interactive text/select controls meet WCAG 1.4.11 >= 3:1 boundary contrast at rest (`color`)
+ * Placed in `@layer utilities` so `(0, 1, 0)` beats `.border-border-subtle` while yielding to `hover:` / `focus:` modifiers. */
+@layer utilities {
+  :where(
+      input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]),
+      textarea,
+      select
+    ).border-border-subtle {
+    border-color: var(--border-control);
+  }
+  :where(
+      input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]),
+      textarea,
+      select
+    ).border-border-subtle:focus {
+    border-color: var(--border-ink);
+    outline: none;
+  }
+}
+
 /* Tactile Ink Buttons (Refactoring UI §6.2.2) */
 .ink-btn-primary {
   background-color: var(--action-bg);
@@ -807,15 +834,64 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   }
 }
 
-/* Animated Hero Waves */
-@keyframes drift-wave {
-  0% { transform: translate3d(-45px, 0, 0); }
-  50% { transform: translate3d(30px, 0, 0); }
-  100% { transform: translate3d(-45px, 0, 0); }
+/* Seamless Multi-Layer Swimming Hero Waves (`modern-web-guidance/motion`:
+ * compositor-only `transform: translate3d(...)`, opted-in under `prefers-reduced-motion: no-preference`) */
+.hero-wave-track {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 200%;
+  block-size: 100%;
+  display: block;
+  will-change: transform;
 }
+
+@keyframes hero-wave-swim-left {
+  0% {
+    transform: translate3d(0%, 0px, 0);
+  }
+  25% {
+    transform: translate3d(-12.5%, -2.5px, 0);
+  }
+  50% {
+    transform: translate3d(-25%, 1.5px, 0);
+  }
+  75% {
+    transform: translate3d(-37.5%, -1.5px, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0px, 0);
+  }
+}
+
+@keyframes hero-wave-swim-right {
+  0% {
+    transform: translate3d(-50%, 0px, 0);
+  }
+  25% {
+    transform: translate3d(-37.5%, 2px, 0);
+  }
+  50% {
+    transform: translate3d(-25%, -2px, 0);
+  }
+  75% {
+    transform: translate3d(-12.5%, 1.5px, 0);
+  }
+  100% {
+    transform: translate3d(0%, 0px, 0);
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
-  .hero-wave-slow { animation: drift-wave 14s ease-in-out infinite; }
-  .hero-wave-fast { animation: drift-wave 9s ease-in-out infinite reverse; }
+  .hero-wave-slow {
+    animation: hero-wave-swim-left 11s linear infinite;
+  }
+  .hero-wave-mid {
+    animation: hero-wave-swim-right 8s linear infinite;
+  }
+  .hero-wave-fast {
+    animation: hero-wave-swim-left 6.2s linear infinite;
+  }
 }
 
 /* Responsive Container-Queried Data Table (modern-web-guidance/responsive-table) */
@@ -868,9 +944,12 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
     display: none;
   }
   .responsive-table tbody tr {
-    margin-block-end: 0.75rem;
-    padding: 0.75rem;
+    margin-block-end: 0;
+    padding: 0.875rem 1rem;
     border-block-end: 1px dashed var(--border-subtle);
+  }
+  .responsive-table tbody tr:last-child {
+    border-block-end: 0;
   }
   .responsive-table tbody th {
     position: sticky;
@@ -962,17 +1041,81 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   border-radius: 12px;
 }
 
-/* Native HTML switch control with accessible focus ring (`modern-web-guidance/switch`) */
+/* Unified cross-browser Switch slider (`modern-web-guidance/switch`)
+ * Preserves native `<input type="checkbox" switch>` semantics while rendering a tactile pill slider
+ * track + thumb with >= 3:1 WCAG 1.4.11 contrast, reduced-motion guard, RTL & forced-colors support. */
 input[type="checkbox"][switch] {
-  accent-color: var(--action-bg);
-  inline-size: 1.125rem;
-  block-size: 1.125rem;
+  --switch-w: 2.25rem;
+  --switch-h: 1.25rem;
+  --switch-pad: 2px;
+  --switch-thumb: calc(var(--switch-h) - var(--switch-pad) * 2 - 3px);
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  inline-size: var(--switch-w);
+  block-size: var(--switch-h);
+  padding: var(--switch-pad);
   margin: 0;
+  border-radius: 9999px;
+  border: 1.5px solid var(--ink-muted);
+  background-color: var(--surface-sunken);
   cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out;
+}
+input[type="checkbox"][switch]::before {
+  content: "";
+  inline-size: var(--switch-thumb);
+  block-size: var(--switch-thumb);
+  border-radius: 9999px;
+  background-color: var(--ink-secondary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+  translate: 0 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  input[type="checkbox"][switch]::before {
+    transition: translate 160ms cubic-bezier(0.22, 1, 0.36, 1), background-color 150ms ease-out;
+  }
+}
+input[type="checkbox"][switch]:hover:not(:disabled) {
+  border-color: var(--border-ink);
+}
+input[type="checkbox"][switch]:checked {
+  background-color: var(--action-bg);
+  border-color: var(--action-bg);
+}
+input[type="checkbox"][switch]:checked::before {
+  background-color: var(--action-fg);
+  translate: calc(var(--switch-w) - var(--switch-h)) 0;
+}
+:dir(rtl) input[type="checkbox"][switch]:checked::before {
+  translate: calc(var(--switch-h) - var(--switch-w)) 0;
 }
 input[type="checkbox"][switch]:focus-visible {
   outline: 2px solid var(--action-bg);
   outline-offset: 3px;
+}
+input[type="checkbox"][switch]:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+@media (forced-colors: active) {
+  input[type="checkbox"][switch] {
+    border-color: ButtonText;
+    background-color: Canvas;
+  }
+  input[type="checkbox"][switch]::before {
+    background-color: ButtonText;
+  }
+  input[type="checkbox"][switch]:checked {
+    background-color: Highlight;
+    border-color: Highlight;
+  }
+  input[type="checkbox"][switch]:checked::before {
+    background-color: HighlightText;
+  }
 }
 
 @media (min-width: 1024px) {
@@ -1177,9 +1320,7 @@ input[type="checkbox"][switch]:focus-visible {
 }
 
 .notebook-section-task-footer {
-  margin-block-start: 1.25rem;
-  padding-block-start: 0.75rem;
-  border-block-start: 1px dashed var(--border-subtle);
+  margin-block-start: 1rem;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1599,14 +1740,13 @@ input[type="checkbox"][switch]:focus-visible {
   color: var(--ink-muted);
 }
 
-/* Branded Stationery Select — native single-line truncation + crisp native chevron
- * Adapts automatically to light/dark via viewport `color-scheme: light dark`. */
+/* Branded Stationery Select — native dropdown arrow adapted to light/dark via `color-scheme`,
+ * preserving single-arrow clarity without UA `appearance: none` double-chevron overlap. */
 .ink-select {
   inline-size: 100%;
+  max-inline-size: 100%;
   min-inline-size: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  border-color: var(--border-control);
   cursor: pointer;
 }
 
@@ -1617,7 +1757,7 @@ input[type="checkbox"][switch]:focus-visible {
 
 /* ============================================================================
  * Unified Form Field System (Refactoring UI §1.5.3 & §2.5.3)
- * Uniform subtle border at rest, crisp ink border on focus, inset well shadow
+ * Accessible control border at rest, crisp ink border on focus, inset well shadow
  * ============================================================================ */
 @layer components {
   .ink-field-label {
@@ -1634,7 +1774,7 @@ input[type="checkbox"][switch]:focus-visible {
     border-radius: 12px;
     background-color: var(--surface-raised);
     color: var(--ink-primary);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-control);
     font-size: 0.875rem;
     box-shadow: var(--shadow-inset);
     transition: border-color 140ms ease-out;
@@ -1772,7 +1912,7 @@ input[type="checkbox"][switch]:focus-visible {
   border-radius: 12px;
   background-color: var(--surface-raised);
   color: var(--ink-primary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-control);
   font: inherit;
   font-size: max(1rem, 1em);
   line-height: 1.4;
@@ -1882,7 +2022,7 @@ input[type="checkbox"][switch]:focus-visible {
 }
 
 .otp-slot {
-  border: 1.5px solid var(--border-subtle);
+  border: 1.5px solid var(--border-control);
   background-color: var(--surface-raised);
   color: var(--ink-primary);
   box-shadow: var(--shadow-inset);
@@ -1981,15 +2121,15 @@ input[type="checkbox"][switch]:focus-visible {
   color: var(--ink-primary);
   background-color: var(--surface-sheet);
   border-color: var(--border-subtle);
+  box-shadow: 0 1px 2px rgb(17 18 31 / 0.08);
 }
 
-/* Forced-colors-safe shape underline that never shifts tab dimensions */
-.mwg-tab[aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  inset: auto 0.625rem 0.125rem;
-  border-block-end: 2.5px solid var(--action-bg);
-  border-radius: 999px;
+@media (forced-colors: active) {
+  .mwg-tab[aria-selected="true"] {
+    border-color: Highlight;
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
 }
 
 /* Native <progress> Password Strength Bar (`modern-web-guidance/progress`)
@@ -2041,4 +2181,16 @@ input[type="checkbox"][switch]:focus-visible {
 
 .pw-strength-ticks > span:not(:last-child) {
   border-inline-end: 2px solid var(--surface-sheet);
+}
+
+/* Auto-growing Multi-line Textarea (`form-fields-automatically-fit-contents`)
+ * - Explicitly sets `height: auto` and `width: 100%` so horizontal width stays stable
+ *   while vertical block size expands dynamically from 3lh up to 10lh before scrolling. */
+textarea.ink-auto-textarea {
+  field-sizing: content;
+  height: auto;
+  width: 100%;
+  min-block-size: 3lh;
+  max-block-size: 10lh;
+  resize: vertical;
 }

@@ -15,7 +15,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.2.0",
-    "roughjs": "^4.6.6"
+    "roughjs": "^4.6.6",
+    "webauthn-polyfills": "^0.1.7"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.9",

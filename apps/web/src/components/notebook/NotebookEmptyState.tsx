@@ -40,7 +40,7 @@ export function NotebookEmptyState({
         {title}
       </p>
       {description && (
-        <p className="text-sm text-ink-secondary m-0 leading-relaxed">
+        <p className="text-sm text-ink-secondary leading-relaxed">
           {description}
         </p>
       )}

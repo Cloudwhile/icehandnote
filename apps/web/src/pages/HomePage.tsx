@@ -7,11 +7,12 @@
  * - Action Pyramid (§2.8): ONE Primary CTA ("开始阅读 →", `ink-btn-primary`);
  *   Secondary CTA ("全站關鍵字檢索 ⌘K", `ink-btn-secondary`).
  * - Complete Edge States (§8.4 P0): Loading skeleton, API error state with Retry, and empty tracks state.
- * - Strict Semantic Tokens (§5.2.3 & §5.6): Zero raw hex text/icon colors in JSX; icons pass >= 4.9:1 AA.
+ * - Anti-Placeholder Flash: Respects `settingsReady` so customized `hero_title` / `hero_tagline` never flash `'IceHandnote'`.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
 import { IconSnowflake } from '../components/ui/Icons';
 import { api, runDirectionalTransition } from '../lib/api';
@@ -26,6 +27,7 @@ import type {
 interface HomePageProps {
   locale: LocaleCode;
   siteSettings: SiteSettingsDto;
+  settingsReady?: boolean;
   onOpenSearch: () => void;
 }
 
@@ -50,7 +52,12 @@ function TrackIcon({ kind }: { kind: string }) {
   return <IconSnowflake className="w-6 h-6" />;
 }
 
-export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) {
+export function HomePage({
+  locale,
+  siteSettings,
+  settingsReady = true,
+  onOpenSearch,
+}: HomePageProps) {
   const copy = UI_COPY[locale];
   const navigate = useNavigate();
   const [tracks, setTracks] = useState<TrackSummaryDto[]>([]);
@@ -122,41 +129,29 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
 
           <div className="relative z-10 max-w-2xl space-y-4">
             <h1
-              className="text-3xl sm:text-4xl font-semibold text-ink-primary leading-tight tracking-tight m-0"
+              className="text-3xl sm:text-4xl font-semibold text-ink-primary leading-tight tracking-tight min-h-10 flex items-center"
               style={{ fontFamily: 'var(--font-hand)' }}
             >
-              <SafeHtml
-                as="span"
-                html={siteSettings.hero_title || siteSettings.site_name || copy.brandName}
-              />
+              {!settingsReady ? (
+                <span
+                  aria-hidden="true"
+                  className="inline-block w-64 max-w-full h-9 rounded-xl bg-surface-raised animate-pulse"
+                />
+              ) : (
+                <SafeHtml
+                  as="span"
+                  html={siteSettings.hero_title || siteSettings.site_name || copy.brandName}
+                />
+              )}
             </h1>
 
-            {/* Signature 2-stroke Ice Cyan + Violet hand-drawn marker underline */}
-            <svg
-              aria-hidden="true"
-              className="w-72 max-w-full h-3 block pointer-events-none"
-              viewBox="0 0 280 12"
-              fill="none"
-            >
-              <path
-                d="M4 7 C 78 2, 162 10, 274 4.5"
-                stroke="var(--marker-h1)"
-                strokeWidth="3.8"
-                strokeLinecap="round"
-              />
-              <path
-                d="M28 10.2 C 110 7.5, 198 11, 255 8.5"
-                stroke="var(--marker-h2)"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-              />
-            </svg>
+            <MarkerUnderline variant="hero" />
 
-            {siteSettings.hero_tagline && (
+            {settingsReady && siteSettings.hero_tagline && (
               <SafeHtml
                 as="p"
                 html={siteSettings.hero_tagline}
-                className="text-base text-ink-secondary leading-relaxed max-w-[60ch] m-0"
+                className="text-base text-ink-secondary leading-relaxed max-w-[60ch]"
               />
             )}
 
@@ -184,24 +179,42 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
             </div>
           </div>
 
-          {/* Animated Multi-Layer SVG Waves */}
-          <svg
+          {/* Seamless Multi-Layer Swimming SVG Waves */}
+          <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 bottom-0 w-full h-8"
-            viewBox="0 0 1200 40"
-            preserveAspectRatio="none"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-10 sm:h-11 overflow-hidden"
           >
-            <path
-              className="hero-wave-slow"
-              d="M0,22 C220,38 420,4 660,22 C900,38 1060,8 1200,20 L1200,40 L0,40 Z"
-              fill="var(--hero-wave-violet)"
-            />
-            <path
-              className="hero-wave-fast"
-              d="M0,28 C280,10 520,38 780,22 C980,10 1100,32 1200,26 L1200,40 L0,40 Z"
-              fill="var(--hero-wave-ice)"
-            />
-          </svg>
+            <svg
+              className="hero-wave-track hero-wave-slow"
+              viewBox="0 0 2400 56"
+              preserveAspectRatio="none"
+            >
+              <path
+                d="M0,26 C180,8 360,44 600,26 C840,8 1020,44 1200,26 C1380,8 1560,44 1800,26 C2040,8 2220,44 2400,26 L2400,56 L0,56 Z"
+                fill="var(--hero-wave-violet)"
+              />
+            </svg>
+            <svg
+              className="hero-wave-track hero-wave-mid"
+              viewBox="0 0 2400 56"
+              preserveAspectRatio="none"
+            >
+              <path
+                d="M0,31 C200,46 400,14 600,31 C800,46 1000,14 1200,31 C1400,46 1600,14 1800,31 C2000,46 2200,14 2400,31 L2400,56 L0,56 Z"
+                fill="var(--hero-wave-mid)"
+              />
+            </svg>
+            <svg
+              className="hero-wave-track hero-wave-fast"
+              viewBox="0 0 2400 56"
+              preserveAspectRatio="none"
+            >
+              <path
+                d="M0,35 C150,20 450,48 600,35 C750,20 1050,48 1200,35 C1350,20 1650,48 1800,35 C1950,20 2250,48 2400,35 L2400,56 L0,56 Z"
+                fill="var(--hero-wave-ice)"
+              />
+            </svg>
+          </div>
         </div>
       </section>
 
@@ -209,7 +222,7 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
       <section aria-labelledby="tracks-heading" className="space-y-6">
         <h2
           id="tracks-heading"
-          className="text-2xl font-semibold text-ink-primary m-0"
+          className="text-2xl font-semibold text-ink-primary"
           style={{ fontFamily: 'var(--font-hand)' }}
         >
           {copy.tracksHeading}
@@ -268,7 +281,6 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
                   >
                     <div className="space-y-3">
                       <div className="flex items-center justify-between gap-2">
-                        {/* Enclosed 40x40 Icon Shape (§7.3.1) with WCAG AA theme-adaptive ink */}
                         <div
                           className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface-raised border border-border-subtle"
                           style={{ color: iconInkVar }}
@@ -281,7 +293,7 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
                       </div>
 
                       <h3
-                        className="text-xl font-semibold text-ink-primary leading-snug m-0"
+                        className="text-xl font-semibold text-ink-primary leading-snug"
                         style={{ fontFamily: 'var(--font-hand)' }}
                       >
                         <Link
@@ -295,7 +307,7 @@ export function HomePage({ locale, siteSettings, onOpenSearch }: HomePageProps) 
                       <SafeHtml
                         as="p"
                         html={track.description}
-                        className="text-sm text-ink-secondary leading-relaxed m-0"
+                        className="text-sm text-ink-secondary leading-relaxed"
                       />
                     </div>
 

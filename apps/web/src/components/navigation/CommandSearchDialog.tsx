@@ -5,8 +5,8 @@ import { UI_COPY } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { LocaleCode, SearchHitDto } from '../../lib/types';
 import { NotebookEmptyState } from '../notebook/NotebookEmptyState';
-import { IconSnowflake } from '../ui/Icons';
-import { ModalDialog } from '../ui/ModalDialog';
+import { IconClose, IconSnowflake } from '../ui/Icons';
+import { ModalDialog, ModalHeader } from '../ui/ModalDialog';
 
 interface CommandSearchDialogProps {
   open: boolean;
@@ -77,23 +77,15 @@ export function CommandSearchDialog({
       maxWidthClass="max-w-lg"
     >
       <div className="p-4 sm:p-5 space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2
-            id={titleId}
-            className="text-base font-semibold m-0 text-ink-primary inline-flex items-center gap-2"
-            style={{ fontFamily: 'var(--font-hand)' }}
-          >
-            <IconSnowflake className="w-4 h-4 text-accent-ice" />
-            <span>{copy.searchTitle}</span>
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary border border-border-subtle cursor-pointer"
-          >
-            {copy.closeLabel}
-          </button>
-        </div>
+        <ModalHeader
+          titleId={titleId}
+          title={copy.searchTitle}
+          icon={<IconSnowflake className="w-4 h-4 text-accent-ice shrink-0" />}
+          closeLabel={copy.closeLabel}
+          onClose={onClose}
+          handFont
+          bordered={false}
+        />
 
         <search className="relative block">
           <input
@@ -113,12 +105,27 @@ export function CommandSearchDialog({
               }
             }}
             placeholder={copy.searchPlaceholder}
-            className="w-full px-3.5 py-2.5 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-sm ink-input-inset"
+            className={`w-full px-3.5 py-2.5 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-sm ink-input-inset ${
+              query ? 'pe-10' : ''
+            }`.trim()}
           />
+          {query && (
+            <button
+              type="button"
+              aria-label={copy.closeLabel}
+              onClick={() => {
+                setQuery('');
+                inputRef.current?.focus();
+              }}
+              className="absolute end-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors"
+            >
+              <IconClose className="w-3.5 h-3.5" />
+            </button>
+          )}
         </search>
 
         {query.trim() && (
-          <div className="max-h-80 overflow-y-auto space-y-2 studio-scroll-pane">
+          <div className="max-h-80 overflow-y-auto overscroll-contain space-y-2">
             {loading ? (
               <p className="text-xs text-ink-muted py-4 text-center">…</p>
             ) : hits.length === 0 ? (

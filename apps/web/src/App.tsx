@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   BrowserRouter,
   Route,
@@ -13,25 +13,37 @@ import { SiteFooter } from './components/navigation/SiteFooter';
 import { TopNavbar } from './components/navigation/TopNavbar';
 import { NotebookEmptyState } from './components/notebook/NotebookEmptyState';
 import { ToastProvider, useToast } from './components/ui/ToastProvider';
-import { api } from './lib/api';
+import {
+  api,
+  getCachedSessionUser,
+  saveCachedSessionUser,
+} from './lib/api';
 import { formatOAuthRedirectError } from './lib/apiError';
 import {
   detectSystemLocale,
+  EXT_COPY,
   getStoredLocalePreference,
+  isRegisteredLocale,
   type LocalePreference,
   normalizeLocale,
   resolvePreferredLocale,
   setStoredLocalePreference,
   UI_COPY,
 } from './lib/i18n';
-import { RC3_COPY } from './lib/i18nRc3';
+import { savePendingOAuthOtpChallenge } from './lib/passkeys';
 import { stripHtmlTags } from './lib/sanitizer';
-import { useColorScheme } from './lib/theme';
 import {
-  DEFAULT_SITE_SETTINGS,
-  type LocaleCode,
-  type SiteSettingsDto,
-  type UserProfileDto,
+  readCachedRouteTitle,
+  readInitialSiteSettings,
+  syncFavicon,
+  writeCachedRouteTitle,
+  writeSiteSettingsCache,
+} from './lib/siteSettings';
+import { useColorScheme } from './lib/theme';
+import type {
+  LocaleCode,
+  SiteSettingsDto,
+  UserProfileDto,
 } from './lib/types';
 import { AuthFlowPage } from './pages/AuthFlowPage';
 import { HomePage } from './pages/HomePage';
@@ -58,6 +70,13 @@ function NotFoundPage({ locale }: { locale: LocaleCode }) {
   );
 }
 
+function buildSsoEntryUrl(settings: SiteSettingsDto): string {
+  const origin = settings.blog_origin_url.trim().replace(/\/+$/, '');
+  if (!origin) return '';
+  const param = settings.sso_query_param?.trim() || 'sso_login';
+  return `${origin}/?${encodeURIComponent(param)}=1`;
+}
+
 function LocaleShellInner({
   locale,
   isKnownLocale,
@@ -68,12 +87,15 @@ function LocaleShellInner({
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
-  const rc3Auth = RC3_COPY[locale].auth;
+  const extAuth = EXT_COPY[locale].auth;
 
+  const [initialBoot] = useState(() => readInitialSiteSettings());
   const [siteSettings, setSiteSettings] = useState<SiteSettingsDto>(
-    DEFAULT_SITE_SETTINGS,
+    initialBoot.settings,
   );
   const [settingsResolved, setSettingsResolved] = useState(false);
+  const settingsReady = initialBoot.ready || settingsResolved;
+
   const [localePref, setLocalePref] = useState<LocalePreference>(() =>
     getStoredLocalePreference(),
   );
@@ -84,10 +106,18 @@ function LocaleShellInner({
   const [searchOpen, setSearchOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [pendingCollabInvite, setPendingCollabInvite] = useState('');
-  const [user, setUser] = useState<UserProfileDto | null>(null);
+  const [user, setUserState] = useState<UserProfileDto | null>(() =>
+    getCachedSessionUser(),
+  );
   const [authResolved, setAuthResolved] = useState(false);
-  const [blogSsoEntryUrl, setBlogSsoEntryUrl] = useState('');
-  const defaultFaviconHrefRef = useRef<string | null>(null);
+  const [blogSsoEntryUrl, setBlogSsoEntryUrl] = useState(() =>
+    buildSsoEntryUrl(initialBoot.settings),
+  );
+
+  const updateUser = useCallback((next: UserProfileDto | null) => {
+    setUserState(next);
+    saveCachedSessionUser(next);
+  }, []);
 
   const openAuthPage = useCallback(
     (mode: 'login' | 'register' = 'login') => {
@@ -140,31 +170,34 @@ function LocaleShellInner({
     [location.hash, location.pathname, location.search, navigate],
   );
 
-  // Sync `<html lang="...">`, plain-text `<title>`, and optional custom favicon
+  // Sync `<html lang="...">`, anti-flash `<title>`, and custom favicon
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
 
-  useEffect(() => {
-    const cleanTitle = stripHtmlTags(siteSettings.site_name);
-    if (cleanTitle) {
-      document.title = cleanTitle;
-    }
-  }, [siteSettings.site_name]);
+  const isTrackReaderRoute = location.pathname.startsWith(`/${locale}/tracks/`);
 
   useEffect(() => {
-    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (!link) return;
-    if (defaultFaviconHrefRef.current === null) {
-      defaultFaviconHrefRef.current = link.href;
+    if (!settingsReady) return;
+    if (isTrackReaderRoute) {
+      const cachedArticleTitle = readCachedRouteTitle(location.pathname);
+      if (cachedArticleTitle) {
+        document.title = cachedArticleTitle;
+        return;
+      }
     }
-    const nextLogo = siteSettings.logo_url.trim();
-    if (nextLogo) {
-      link.href = nextLogo;
-    } else if (defaultFaviconHrefRef.current) {
-      link.href = defaultFaviconHrefRef.current;
+    const cleanTitle = stripHtmlTags(siteSettings.site_name).trim();
+    if (cleanTitle) {
+      document.title = cleanTitle;
+      if (!isTrackReaderRoute) {
+        writeCachedRouteTitle(location.pathname, cleanTitle);
+      }
     }
-  }, [siteSettings.logo_url]);
+  }, [isTrackReaderRoute, location.pathname, settingsReady, siteSettings.site_name]);
+
+  useEffect(() => {
+    syncFavicon(siteSettings.logo_url, settingsReady);
+  }, [settingsReady, siteSettings.logo_url]);
 
   // Live sync when OS/browser language changes while user preference is `auto` (Follow System)
   useEffect(() => {
@@ -188,20 +221,14 @@ function LocaleShellInner({
     siteSettings.enabled_locales,
   ]);
 
-  const buildSsoEntryUrl = useCallback((settings: SiteSettingsDto): string => {
-    const origin = settings.blog_origin_url.trim().replace(/\/+$/, '');
-    if (!origin) return '';
-    const param = settings.sso_query_param?.trim() || 'sso_login';
-    return `${origin}/?${encodeURIComponent(param)}=1`;
-  }, []);
-
-  // Load live Site Settings once on mount
+  // Load live Site Settings once on mount and refresh persistent cache
   useEffect(() => {
     let active = true;
     void api
       .getSettings()
       .then((s) => {
         if (!active) return;
+        writeSiteSettingsCache(s);
         setSiteSettings(s);
         setBlogSsoEntryUrl(buildSsoEntryUrl(s));
       })
@@ -212,7 +239,36 @@ function LocaleShellInner({
     return () => {
       active = false;
     };
-  }, [buildSsoEntryUrl]);
+  }, []);
+
+  // Enforce `enabled_locales`: if the current URL locale is disabled in Site Settings, redirect cleanly
+  useEffect(() => {
+    if (!settingsResolved || !isKnownLocale) return;
+    if (
+      siteSettings.enabled_locales.length > 0 &&
+      !siteSettings.enabled_locales.includes(locale)
+    ) {
+      if (localePref !== 'auto' && !siteSettings.enabled_locales.includes(localePref)) {
+        setStoredLocalePreference('auto');
+        setLocalePref('auto');
+      }
+      const fallbackLoc = resolvePreferredLocale(
+        siteSettings.enabled_locales,
+        siteSettings.default_locale,
+      );
+      if (fallbackLoc !== locale) {
+        navigateToLocale(fallbackLoc, true);
+      }
+    }
+  }, [
+    isKnownLocale,
+    locale,
+    localePref,
+    navigateToLocale,
+    settingsResolved,
+    siteSettings.default_locale,
+    siteSettings.enabled_locales,
+  ]);
 
   // 1. Restore session once on initial mount (unless an SSO/OAuth ticket exchange will establish it)
   useEffect(() => {
@@ -224,7 +280,7 @@ function LocaleShellInner({
       .authMe()
       .then((me) => {
         if (!active) return;
-        setUser(me.user ?? null);
+        updateUser(me.authenticated ? (me.user ?? null) : null);
         setBlogSsoEntryUrl(me.blog_sso_entry_url);
       })
       .catch(() => {})
@@ -235,7 +291,7 @@ function LocaleShellInner({
     return () => {
       active = false;
     };
-  }, []);
+  }, [updateUser]);
 
   // 2. Verify incoming `?sso_token=...` from external SSO provider
   useEffect(() => {
@@ -248,8 +304,8 @@ function LocaleShellInner({
       .verifySsoToken(ssoToken)
       .then((session) => {
         if (!active) return;
-        setUser(session.user);
-        toast.success(rc3Auth.signedInWelcomeMsg(session.user.display_name));
+        updateUser(session.user);
+        toast.success(extAuth.signedInWelcomeMsg(session.user.display_name));
         stripQueryParams(['sso_token']);
       })
       .catch((err) => {
@@ -264,7 +320,7 @@ function LocaleShellInner({
     return () => {
       active = false;
     };
-  }, [location.search, rc3Auth, stripQueryParams, toast]);
+  }, [location.search, extAuth, stripQueryParams, toast, updateUser]);
 
   // 3. Handle OAuth callback query parameters (`oauth_ticket`, `oauth_onboarding`, `oauth_bound`, `oauth_error`)
   //    and password reset link (`reset_token`)
@@ -285,11 +341,24 @@ function LocaleShellInner({
     if (oauthTicket) {
       let active = true;
       void api
-        .exchangeOAuthTicket(oauthTicket)
-        .then((session) => {
+        .exchangeOAuthTicket(oauthTicket, locale)
+        .then((res) => {
           if (!active) return;
-          setUser(session.user);
-          toast.success(rc3Auth.signedInWelcomeMsg(session.user.display_name));
+          if (res.requires_otp) {
+            savePendingOAuthOtpChallenge(res);
+            toast.warning(extAuth.anomalyTitle);
+            const ret =
+              location.pathname.startsWith(`/${locale}/auth`)
+                ? `/${locale}`
+                : location.pathname;
+            navigate(
+              `/${locale}/auth/login?otp_challenge=1&return_to=${encodeURIComponent(ret)}`,
+              { replace: true },
+            );
+            return;
+          }
+          updateUser(res.user);
+          toast.success(extAuth.signedInWelcomeMsg(res.user.display_name));
           stripQueryParams(['oauth_ticket']);
         })
         .catch((err) => {
@@ -317,8 +386,8 @@ function LocaleShellInner({
       void api
         .authMe()
         .then((me) => {
-          setUser(me.user ?? null);
-          toast.success(rc3Auth.oauthBoundSuccessMsg);
+          updateUser(me.authenticated ? (me.user ?? null) : null);
+          toast.success(extAuth.oauthBoundSuccessMsg);
         })
         .catch((err) => toast.error(err));
       stripQueryParams(['oauth_bound']);
@@ -331,17 +400,27 @@ function LocaleShellInner({
         { replace: true },
       );
     }
-  }, [locale, location.pathname, location.search, navigate, rc3Auth, stripQueryParams, toast]);
+  }, [
+    locale,
+    location.pathname,
+    location.search,
+    navigate,
+    extAuth,
+    stripQueryParams,
+    toast,
+    updateUser,
+  ]);
 
   const acceptInviteToken = useCallback(
     async (token: string) => {
       try {
         const res = await api.acceptCollaboratorInvite(token);
         if (res.user) {
-          setUser(res.user);
+          updateUser(res.user);
         }
-        toast.success(rc3Auth.collabAcceptedMsg);
+        toast.success(extAuth.collabAcceptedMsg);
         const query = new URLSearchParams({
+          section: 'editor',
           track: res.track_slug,
           chapter: res.chapter_slug,
           step: res.step_slug,
@@ -351,7 +430,7 @@ function LocaleShellInner({
         toast.error(err);
       }
     },
-    [locale, navigate, rc3Auth.collabAcceptedMsg, toast],
+    [locale, navigate, extAuth.collabAcceptedMsg, toast, updateUser],
   );
 
   // 4. Handle incoming `?collab_invite=...` once auth resolution completes
@@ -366,7 +445,7 @@ function LocaleShellInner({
       void acceptInviteToken(inviteToken);
     } else {
       setPendingCollabInvite(inviteToken);
-      toast.info(rc3Auth.collabLoginRequiredMsg);
+      toast.info(extAuth.collabLoginRequiredMsg);
       navigate(`/${locale}/auth/login`, { replace: true });
     }
   }, [
@@ -375,7 +454,7 @@ function LocaleShellInner({
     locale,
     location.search,
     navigate,
-    rc3Auth.collabLoginRequiredMsg,
+    extAuth.collabLoginRequiredMsg,
     stripQueryParams,
     toast,
     user,
@@ -425,17 +504,18 @@ function LocaleShellInner({
 
   const handleLogout = async () => {
     await api.logout();
-    setUser(null);
-    toast.info(rc3Auth.signedOutMsg);
+    updateUser(null);
+    toast.info(extAuth.signedOutMsg);
   };
 
   const handleSettingsUpdated = (next: SiteSettingsDto) => {
+    writeSiteSettingsCache(next);
     setSiteSettings(next);
     setBlogSsoEntryUrl(buildSsoEntryUrl(next));
   };
 
   const handleAuthenticated = (authenticatedUser: UserProfileDto) => {
-    setUser(authenticatedUser);
+    updateUser(authenticatedUser);
     if (pendingCollabInvite) {
       const token = pendingCollabInvite;
       setPendingCollabInvite('');
@@ -451,7 +531,9 @@ function LocaleShellInner({
     location.pathname === `/${locale}/register`;
   const canAuthor = Boolean(user && (user.role === 'author' || user.role === 'admin'));
   const useStudioDashboardShell = isStudioRoute && canAuthor;
-  const hideChrome = useStudioDashboardShell || isAuthRoute;
+  // Also suppress public chrome while Studio auth is still resolving so refreshing `/studio` never flashes TopNavbar/SiteFooter
+  const hideChrome =
+    isAuthRoute || useStudioDashboardShell || (isStudioRoute && !authResolved);
 
   const authFlowCommonProps = {
     locale,
@@ -460,6 +542,7 @@ function LocaleShellInner({
     theme,
     onToggleTheme: toggleScheme,
     siteSettings,
+    settingsReady,
     settingsResolved,
     blogSsoEntryUrl,
     user,
@@ -485,6 +568,7 @@ function LocaleShellInner({
           onOpenSearch={() => setSearchOpen(true)}
           user={user}
           siteSettings={siteSettings}
+          settingsReady={settingsReady}
           onOpenAuth={() => openAuthPage('login')}
           onOpenProfile={() => setProfileOpen(true)}
           onLogout={() => void handleLogout()}
@@ -502,6 +586,7 @@ function LocaleShellInner({
                 <HomePage
                   locale={locale}
                   siteSettings={siteSettings}
+                  settingsReady={settingsReady}
                   onOpenSearch={() => setSearchOpen(true)}
                 />
               }
@@ -513,6 +598,7 @@ function LocaleShellInner({
                   locale={locale}
                   theme={theme}
                   siteSettings={siteSettings}
+                  settingsReady={settingsReady}
                   onChangeLocale={handleLocaleSwitch}
                 />
               }
@@ -530,6 +616,7 @@ function LocaleShellInner({
                   user={user}
                   authResolved={authResolved}
                   siteSettings={siteSettings}
+                  settingsReady={settingsReady}
                   onSettingsUpdated={handleSettingsUpdated}
                   onOpenAuth={() => openAuthPage('login')}
                   onOpenProfile={() => setProfileOpen(true)}
@@ -550,7 +637,11 @@ function LocaleShellInner({
       </div>
 
       {!hideChrome && (
-        <SiteFooter locale={locale} siteSettings={siteSettings} />
+        <SiteFooter
+          locale={locale}
+          siteSettings={siteSettings}
+          settingsReady={settingsReady}
+        />
       )}
 
       <CommandSearchDialog
@@ -565,8 +656,8 @@ function LocaleShellInner({
         locale={locale}
         user={user}
         siteSettings={siteSettings}
-        onUserUpdated={(next) => setUser(next)}
-        onCurrentSessionRevoked={() => setUser(null)}
+        onUserUpdated={(next) => updateUser(next)}
+        onCurrentSessionRevoked={() => updateUser(null)}
       />
     </div>
   );
@@ -574,11 +665,7 @@ function LocaleShellInner({
 
 function LocaleShell() {
   const params = useParams();
-  const isKnownLocale =
-    params.locale === 'zh-CN' ||
-    params.locale === 'en' ||
-    params.locale === 'zh-TW' ||
-    params.locale === 'ja';
+  const isKnownLocale = isRegisteredLocale(params.locale);
   const locale = normalizeLocale(params.locale);
 
   return (
@@ -594,10 +681,25 @@ function RootRedirect({ subpath = '' }: { subpath?: string }) {
   useEffect(() => {
     let active = true;
     const suffix = `${subpath}${location.search}${location.hash}`;
+    const initial = readInitialSiteSettings();
+    if (initial.ready) {
+      const target = resolvePreferredLocale(
+        initial.settings.enabled_locales,
+        initial.settings.default_locale,
+      );
+      navigate(`/${target}${suffix}`, { replace: true });
+      return () => {
+        active = false;
+      };
+    }
+
     fetch('/api/v1/settings')
       .then((r) => (r.ok ? r.json() : null))
-      .then((s: { default_locale?: string; enabled_locales?: string[] } | null) => {
+      .then((s: SiteSettingsDto | null) => {
         if (!active) return;
+        if (s && typeof s.site_name === 'string') {
+          writeSiteSettingsCache(s);
+        }
         const enabled = (s?.enabled_locales ?? ['zh-CN', 'en', 'zh-TW', 'ja']).map(
           normalizeLocale,
         );

@@ -6,11 +6,11 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { UI_COPY } from '../../lib/i18n';
-import { RC3_COPY } from '../../lib/i18nRc3';
+import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
 import type {
   LocaleCode,
+  SiteSettingsDto,
   StudioSettingsTabId,
   StudioTrackDto,
 } from '../../lib/types';
@@ -22,6 +22,7 @@ import {
   IconSettings,
   IconShield,
 } from '../ui/Icons';
+import { StatusBadge } from '../ui/StatusBadge';
 
 export type StudioSectionId =
   | 'overview'
@@ -40,6 +41,8 @@ const SETTINGS_SUB_ITEMS: readonly StudioSettingsTabId[] = [
 
 interface StudioSidebarContentProps {
   locale: LocaleCode;
+  siteSettings?: SiteSettingsDto;
+  settingsReady?: boolean;
   activeSection: StudioSectionId;
   onSelectSection: (section: StudioSectionId) => void;
   activeSettingsTab: StudioSettingsTabId;
@@ -59,6 +62,8 @@ interface StudioSidebarContentProps {
 
 export function StudioSidebarContent({
   locale,
+  siteSettings,
+  settingsReady = true,
   activeSection,
   onSelectSection,
   activeSettingsTab,
@@ -76,7 +81,7 @@ export function StudioSidebarContent({
   onCloseMobileDrawer,
 }: StudioSidebarContentProps) {
   const s = UI_COPY[locale].studio;
-  const settingsTabs = RC3_COPY[locale].settings.settingsTabs;
+  const settingsTabs = EXT_COPY[locale].settings.settingsTabs;
   const [treeQuery, setTreeQuery] = useState('');
   const [editorTreeOpen, setEditorTreeOpen] = useState(
     activeSection === 'editor',
@@ -144,15 +149,9 @@ export function StudioSidebarContent({
               {s.sections.overview}
             </span>
             {pendingCount > 0 && (
-              <span
-                className="px-1.5 py-0.5 rounded-full text-xs font-mono font-semibold tabular-nums shrink-0"
-                style={{
-                  backgroundColor: 'var(--alert-warn-badge-bg)',
-                  color: 'var(--alert-warn-badge-fg)',
-                }}
-              >
+              <StatusBadge tone="warn" pill mono className="px-1.5">
                 {pendingCount}
-              </span>
+              </StatusBadge>
             )}
           </button>
 
@@ -292,32 +291,24 @@ export function StudioSidebarContent({
                                           <SafeHtml as="span" html={st.title} />
                                         </span>
                                         {st.takedown_reason && (
-                                          <span
-                                            className="text-xs font-mono px-1 rounded shrink-0"
-                                            style={{
-                                              backgroundColor:
-                                                'var(--alert-danger-badge-bg)',
-                                              color:
-                                                'var(--alert-danger-badge-fg)',
-                                            }}
+                                          <StatusBadge
+                                            tone="danger"
+                                            mono
+                                            className="px-1 py-0"
                                             title={st.takedown_reason}
                                           >
-                                            {RC3_COPY[locale].studio.takenDownBadge}
-                                          </span>
+                                            {EXT_COPY[locale].studio.takenDownBadge}
+                                          </StatusBadge>
                                         )}
                                         {hasDraft && (
-                                          <span
-                                            className="text-xs font-mono px-1 rounded shrink-0"
-                                            style={{
-                                              backgroundColor:
-                                                'var(--alert-note-badge-bg)',
-                                              color:
-                                                'var(--alert-note-badge-fg)',
-                                            }}
+                                          <StatusBadge
+                                            tone="info"
+                                            mono
+                                            className="px-1 py-0"
                                             title={s.hasDraftTitle}
                                           >
                                             {s.draftChip}
-                                          </span>
+                                          </StatusBadge>
                                         )}
                                         {hasDrift && (
                                           <span
@@ -464,10 +455,22 @@ export function StudioSidebarContent({
           href="https://github.com/Cloudwhile/icehandnote"
           target="_blank"
           rel="noopener noreferrer"
-          className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-baseline gap-1.5 transition-colors"
+          className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-center gap-1.5 min-h-7 min-w-0 max-w-full transition-colors"
         >
-          <span>IceHandnote · Cloudwhile</span>
-          <span className="font-mono text-xs text-ink-muted">AGPL-3.0</span>
+          {settingsReady && siteSettings?.site_name ? (
+            <>
+              <SafeHtml
+                as="span"
+                html={siteSettings.site_name}
+                className="studio-ellipsis max-w-28"
+              />
+              <span aria-hidden="true">·</span>
+            </>
+          ) : null}
+          <span className="shrink-0">Cloudwhile</span>
+          <span className="font-mono text-xs text-ink-muted shrink-0">
+            AGPL-3.0
+          </span>
         </a>
       </div>
     </div>

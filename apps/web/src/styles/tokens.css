@@ -31,9 +31,9 @@
   --palette-ice-950: #001d3b;
 
   --palette-paper-50: #fffffa;
-  --palette-paper-100: #fdfdf6;
-  --palette-paper-150: #f4f1e6;
-  --palette-paper-200: #e4e2d3;
+  --palette-paper-100: #f6f3e8;
+  --palette-paper-150: #efeadd;
+  --palette-paper-200: #e3ded0;
   --palette-paper-300: #c8c3b1;
   --palette-paper-600: #685a4e;
   --palette-paper-700: #52453c;
@@ -90,7 +90,8 @@
   --ink-muted: var(--palette-paper-600);
 
   --border-ink: var(--palette-paper-950);
-  --border-subtle: var(--palette-paper-200);
+  --border-subtle: #d5d0be;
+  --border-control: #968a7b;
 
   --action-bg: var(--palette-primary-600);
   --action-fg: #ffffff;
@@ -105,8 +106,9 @@
   --steps-checked-bg: var(--palette-success-100);
   --steps-checkbox-accent: var(--palette-success-900);
   --hero-grad-start: var(--palette-primary-50);
-  --hero-wave-violet: rgba(139, 61, 255, 0.10);
-  --hero-wave-ice: rgba(13, 202, 240, 0.12);
+  --hero-wave-violet: rgba(139, 61, 255, 0.13);
+  --hero-wave-mid: rgba(99, 102, 241, 0.10);
+  --hero-wave-ice: rgba(13, 202, 240, 0.16);
   --dot-grid-color: rgba(31, 20, 17, 0.13);
   --mark-bg: var(--palette-warn-200);
   --scrollbar-thumb: var(--palette-paper-600);
@@ -211,6 +213,7 @@
 
     --border-ink: var(--palette-dusk-300);
     --border-subtle: var(--palette-dusk-700);
+    --border-control: #8088a0;
 
     --action-bg: var(--palette-primary-300);
     --action-fg: var(--palette-primary-950);
@@ -224,8 +227,9 @@
     --steps-checked-bg: var(--palette-success-950);
     --steps-checkbox-accent: var(--palette-success-800);
     --hero-grad-start: #1d1636;
-    --hero-wave-violet: rgba(139, 61, 255, 0.18);
-    --hero-wave-ice: rgba(13, 202, 240, 0.16);
+    --hero-wave-violet: rgba(139, 61, 255, 0.22);
+    --hero-wave-mid: rgba(99, 102, 241, 0.16);
+    --hero-wave-ice: rgba(13, 202, 240, 0.20);
     --dot-grid-color: rgba(246, 251, 253, 0.085);
     --mark-bg: rgba(245, 158, 11, 0.35);
     --scrollbar-thumb: var(--palette-primary-400);
@@ -328,7 +332,8 @@
     --ink-muted: light-dark(var(--palette-paper-600), var(--palette-dusk-400));
 
     --border-ink: light-dark(var(--palette-paper-950), var(--palette-dusk-300));
-    --border-subtle: light-dark(var(--palette-paper-200), var(--palette-dusk-700));
+    --border-subtle: light-dark(#d5d0be, var(--palette-dusk-700));
+    --border-control: light-dark(#968a7b, #8088a0);
 
     --action-bg: light-dark(var(--palette-primary-600), var(--palette-primary-300));
     --action-fg: light-dark(#ffffff, var(--palette-primary-950));
@@ -342,8 +347,9 @@
     --steps-checked-bg: light-dark(var(--palette-success-100), var(--palette-success-950));
     --steps-checkbox-accent: light-dark(var(--palette-success-900), var(--palette-success-800));
     --hero-grad-start: light-dark(var(--palette-primary-50), #1d1636);
-    --hero-wave-violet: light-dark(rgba(139, 61, 255, 0.10), rgba(139, 61, 255, 0.18));
-    --hero-wave-ice: light-dark(rgba(13, 202, 240, 0.12), rgba(13, 202, 240, 0.16));
+    --hero-wave-violet: light-dark(rgba(139, 61, 255, 0.13), rgba(139, 61, 255, 0.22));
+    --hero-wave-mid: light-dark(rgba(99, 102, 241, 0.10), rgba(99, 102, 241, 0.16));
+    --hero-wave-ice: light-dark(rgba(13, 202, 240, 0.16), rgba(13, 202, 240, 0.20));
     --dot-grid-color: light-dark(rgba(31, 20, 17, 0.13), rgba(246, 251, 253, 0.085));
     --mark-bg: light-dark(var(--palette-warn-200), rgba(245, 158, 11, 0.35));
     --scrollbar-thumb: light-dark(var(--palette-paper-600), var(--palette-primary-400));

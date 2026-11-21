@@ -21,7 +21,9 @@ export function getResolvedTheme(): ResolvedTheme {
 /**
  * Implements the Modern Web Guidance `dark-mode-toggle` two-state smart toggle:
  * - Toggles to the opposite of the currently rendered scheme.
- * - If the target matches the OS preference, removes the localStorage override and resets `<meta>` to `light dark`.
+ * - Only clears `localStorage` when `defaultSiteTheme === 'system'` and the target matches OS preference
+ *   (or when reverting back to an explicit admin-configured site default), so switching away from a forced
+ *   site `default_theme` always persists in `localStorage` across page reloads.
  * - Never retroactively deletes a stored override on `matchMedia` change.
  */
 export function useColorScheme(defaultSiteTheme: 'system' | 'dark' | 'light' = 'system') {
@@ -51,10 +53,14 @@ export function useColorScheme(defaultSiteTheme: 'system' | 'dark' | 'light' = '
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const syncFromEnv = () => setResolved(getResolvedTheme());
+    const unoverriddenMeta =
+      defaultSiteTheme === 'dark' || defaultSiteTheme === 'light'
+        ? defaultSiteTheme
+        : 'light dark';
 
     const onStorage = (e: StorageEvent) => {
       if (e.key === 'color-scheme') {
-        const next = e.newValue === 'light' || e.newValue === 'dark' ? e.newValue : 'light dark';
+        const next = e.newValue === 'light' || e.newValue === 'dark' ? e.newValue : unoverriddenMeta;
         const meta = document.querySelector('meta[name="color-scheme"]');
         if (meta) meta.setAttribute('content', next);
         syncFromEnv();
@@ -67,18 +73,25 @@ export function useColorScheme(defaultSiteTheme: 'system' | 'dark' | 'light' = '
       media.removeEventListener('change', syncFromEnv);
       window.removeEventListener('storage', onStorage);
     };
-  }, []);
+  }, [defaultSiteTheme]);
 
   const toggleScheme = () => {
     const current = getResolvedTheme();
     const target: ResolvedTheme = current === 'dark' ? 'light' : 'dark';
     const osScheme = getSystemScheme();
     const meta = document.querySelector('meta[name="color-scheme"]');
+    const returnsToSystem = defaultSiteTheme === 'system' && target === osScheme;
+    const returnsToForcedSiteDefault =
+      (defaultSiteTheme === 'dark' || defaultSiteTheme === 'light') &&
+      target === defaultSiteTheme;
 
     try {
-      if (target === osScheme) {
+      if (returnsToSystem) {
         localStorage.removeItem('color-scheme');
         if (meta) meta.setAttribute('content', 'light dark');
+      } else if (returnsToForcedSiteDefault) {
+        localStorage.removeItem('color-scheme');
+        if (meta) meta.setAttribute('content', defaultSiteTheme);
       } else {
         localStorage.setItem('color-scheme', target);
         if (meta) meta.setAttribute('content', target);

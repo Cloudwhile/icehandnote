@@ -1,0 +1,121 @@
+/*
+ * Shared Site Version & Update Check Hook + Status Badge (`StudioOverviewPanel` & `StudioSettingsPanel`).
+ */
+
+import { useCallback, useState } from 'react';
+import { api } from '../../lib/api';
+import { UI_COPY } from '../../lib/i18n';
+import { APP_VERSION, type LocaleCode, type UpdateCheckResponse } from '../../lib/types';
+import { StatusBadge } from '../ui/StatusBadge';
+import { useToast } from '../ui/ToastProvider';
+
+export function useSiteUpdateCheck(toastOnError = false) {
+  const toast = useToast();
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<UpdateCheckResponse | null>(null);
+  const [error, setError] = useState(false);
+
+  const checkUpdate = useCallback(async () => {
+    if (checking) return;
+    setChecking(true);
+    setError(false);
+    try {
+      const res = await api.checkSiteUpdate();
+      setResult(res);
+    } catch (err) {
+      setError(true);
+      if (toastOnError) {
+        toast.error(err);
+      }
+    } finally {
+      setChecking(false);
+    }
+  }, [checking, toast, toastOnError]);
+
+  return {
+    checking,
+    result,
+    error,
+    currentVersion: result?.current_version ?? APP_VERSION,
+    checkUpdate,
+  };
+}
+
+export interface UpdateCheckStatusProps {
+  locale: LocaleCode;
+  checking: boolean;
+  result: UpdateCheckResponse | null;
+  error: boolean;
+  compact?: boolean;
+}
+
+export function UpdateCheckStatus({
+  locale,
+  checking,
+  result,
+  error,
+  compact = false,
+}: UpdateCheckStatusProps) {
+  const st = UI_COPY[locale].studio.settings;
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      className="inline-flex flex-wrap items-center gap-2.5 text-xs"
+    >
+      {!checking && error && (
+        <span className="font-semibold text-accent-danger">
+          {st.updateCheckFailed}
+        </span>
+      )}
+
+      {!checking && !error && result && (
+        <>
+          {result.has_update ? (
+            compact ? (
+              <a
+                href={result.release_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono font-semibold text-link-ink no-underline hover:underline"
+              >
+                {st.updateAvailableBadge(result.latest_version)} ↗
+              </a>
+            ) : (
+              <>
+                <StatusBadge tone="warn" mono>
+                  {st.updateAvailableBadge(result.latest_version)}
+                </StatusBadge>
+                <a
+                  href={result.release_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
+                >
+                  {st.viewReleaseLink}
+                </a>
+              </>
+            )
+          ) : (
+            <>
+              <span className="font-semibold text-accent-success">
+                ✓ {st.upToDateBadge}
+              </span>
+              {!compact && (
+                <a
+                  href={result.release_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
+                >
+                  {st.viewReleaseLink}
+                </a>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </span>
+  );
+}

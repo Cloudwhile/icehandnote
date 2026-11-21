@@ -287,6 +287,8 @@ export interface UserProfileDto {
   oauth_avatar_url?: string;
   uploaded_avatar_url?: string;
   oauth_provider?: string | null;
+  oauth_bindings?: string[];
+  has_password?: boolean;
   bio: string;
   role: UserRole;
   auth_source: string;
@@ -328,6 +330,24 @@ export interface CheckUsernameResponse {
 export type LoginResultResponse =
   | ({ requires_otp?: false } & AuthSessionResponse)
   | LoginOtpChallengeResponse;
+
+export interface UserPasskeyDto {
+  id: string;
+  name: string;
+  aaguid: string;
+  device_type: 'singleDevice' | 'multiDevice' | string;
+  backed_up: boolean;
+  transports: string[];
+  created_at: string;
+  last_used_at?: string | null;
+}
+
+export interface PasskeyListResponseDto {
+  enabled: boolean;
+  rp_id: string;
+  user_id: string;
+  passkeys: UserPasskeyDto[];
+}
 
 export interface UserSessionDto {
   id: string;
@@ -495,6 +515,7 @@ export interface SiteSettingsDto {
   oauth_userinfo_url: string;
   oauth_scopes: string;
   oauth_providers?: OAuthProviderDto[];
+  enable_passkeys: boolean;
   enable_margin_notes: boolean;
   enable_likes: boolean;
   enable_progress_tracking: boolean;
@@ -562,6 +583,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   oauth_userinfo_url: '',
   oauth_scopes: 'openid profile email',
   oauth_providers: [],
+  enable_passkeys: true,
   enable_margin_notes: true,
   enable_likes: true,
   enable_progress_tracking: true,
@@ -571,11 +593,29 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
 
 export const APP_VERSION = 'v0.1.0-rc.4';
 
+export type PostgresSslMode =
+  | 'prefer'
+  | 'disable'
+  | 'require'
+  | 'verify-ca'
+  | 'verify-full';
+
+export interface PostgresConnectionFieldsDto {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password?: string;
+  ssl_mode: PostgresSslMode;
+}
+
 export interface StorageStatusDto {
   active_backend: 'local' | 'postgres';
   configured_mode: string;
   database_url_masked: string;
   has_saved_url: boolean;
+  has_saved_password: boolean;
+  postgres: PostgresConnectionFieldsDto;
 }
 
 export interface SwitchStorageResponseDto extends StorageStatusDto {
@@ -601,6 +641,8 @@ export interface SmtpSettingsDto {
   reset_html: string;
   takedown_subject: string;
   takedown_html: string;
+  ban_subject: string;
+  ban_html: string;
 }
 
 export interface SmtpTemplatePreviewDto {

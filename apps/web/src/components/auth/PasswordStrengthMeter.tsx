@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { RC3_COPY } from '../../lib/i18nRc3';
+import { EXT_COPY } from '../../lib/i18n';
 import type { LocaleCode } from '../../lib/types';
 
 export interface PasswordStrengthResult {
@@ -52,19 +52,19 @@ export function PasswordStrengthMeter({
   locale,
   id,
 }: PasswordStrengthMeterProps) {
-  const rc3 = RC3_COPY[locale].auth;
+  const extAuth = EXT_COPY[locale].auth;
   const { score, tier } = evaluatePasswordStrength(password);
 
   const labelText =
     tier === 'idle'
-      ? rc3.pwStrengthIdle
+      ? extAuth.pwStrengthIdle
       : tier === 'weak'
-        ? rc3.pwStrengthWeak
+        ? extAuth.pwStrengthWeak
         : tier === 'fair'
-          ? rc3.pwStrengthFair
+          ? extAuth.pwStrengthFair
           : tier === 'good'
-            ? rc3.pwStrengthGood
-            : rc3.pwStrengthStrong;
+            ? extAuth.pwStrengthGood
+            : extAuth.pwStrengthStrong;
 
   const fillVar =
     tier === 'weak'
@@ -85,7 +85,7 @@ export function PasswordStrengthMeter({
   return (
     <div id={id} className="mt-2 space-y-1.5">
       <div className="flex items-center justify-between gap-2 text-xs">
-        <span className="text-ink-muted">{rc3.pwStrengthLabel}</span>
+        <span className="text-ink-muted">{extAuth.pwStrengthLabel}</span>
         <span
           role="status"
           aria-live="polite"
@@ -100,7 +100,7 @@ export function PasswordStrengthMeter({
           className="pw-strength-meter"
           max={4}
           value={score}
-          aria-label={`${rc3.pwStrengthLabel}: ${labelText}`}
+          aria-label={`${extAuth.pwStrengthLabel}: ${labelText}`}
           style={{ '--progress-bar-fill': fillVar } as CSSProperties}
         />
         <span aria-hidden="true" className="pw-strength-ticks">
@@ -110,9 +110,11 @@ export function PasswordStrengthMeter({
           <span />
         </span>
       </div>
-      <p className="text-xs text-ink-muted m-0 leading-snug">
-        {rc3.pwStrengthAdvisory}
-      </p>
+      {extAuth.pwStrengthAdvisory && (
+        <p className="text-xs text-ink-muted leading-snug">
+          {extAuth.pwStrengthAdvisory}
+        </p>
+      )}
     </div>
   );
 }

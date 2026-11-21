@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ChapterSidebarAndDrawer } from '../components/navigation/ChapterSidebarAndDrawer';
 import { CcLicenseCard } from '../components/notebook/CcLicenseCard';
+import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
 import { NotebookAlert } from '../components/notebook/NotebookAlert';
 import { NotebookBlockRenderer } from '../components/notebook/NotebookBlockRenderer';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
@@ -11,6 +12,7 @@ import { UserAvatar } from '../components/ui/UserAvatar';
 import { api, runDirectionalTransition } from '../lib/api';
 import { normalizeLocale, UI_COPY } from '../lib/i18n';
 import { SafeHtml, stripHtmlTags } from '../lib/sanitizer';
+import { writeCachedRouteTitle } from '../lib/siteSettings';
 import type { ResolvedTheme } from '../lib/theme';
 import type {
   LocaleCode,
@@ -24,6 +26,7 @@ interface StepReaderPageProps {
   locale: LocaleCode;
   theme: ResolvedTheme;
   siteSettings: SiteSettingsDto;
+  settingsReady?: boolean;
   onChangeLocale: (next: LocaleCode) => void;
 }
 
@@ -69,6 +72,7 @@ export function StepReaderPage({
   locale,
   theme,
   siteSettings,
+  settingsReady = true,
   onChangeLocale,
 }: StepReaderPageProps) {
   const { track = '', chapter = '', step = '' } = useParams();
@@ -105,14 +109,15 @@ export function StepReaderPage({
   }, [detail?.step_id]);
 
   useEffect(() => {
-    if (!detail) return;
-    const brand = stripHtmlTags(siteSettings.site_name || copy.brandName);
-    const plainTitle = stripHtmlTags(detail.title);
-    document.title = plainTitle ? `${plainTitle} · ${brand}` : brand;
-    return () => {
-      document.title = brand;
-    };
-  }, [detail, siteSettings.site_name, copy.brandName]);
+    if (!detail || !settingsReady) return;
+    const brand = stripHtmlTags(siteSettings.site_name || copy.brandName).trim();
+    const plainTitle = stripHtmlTags(detail.title).trim();
+    const fullTitle = plainTitle && brand ? `${plainTitle} · ${brand}` : plainTitle || brand;
+    if (fullTitle) {
+      document.title = fullTitle;
+      writeCachedRouteTitle(location.pathname, fullTitle);
+    }
+  }, [detail, settingsReady, siteSettings.site_name, copy.brandName, location.pathname]);
 
   // Load all sibling series once per locale so the sidebar cleanly distinguishes series
   useEffect(() => {
@@ -505,31 +510,18 @@ export function StepReaderPage({
 
                 <div>
                   <h1
-                    className="text-2xl sm:text-3xl font-semibold text-ink-primary leading-tight tracking-tight m-0"
+                    className="text-2xl sm:text-3xl font-semibold text-ink-primary leading-tight tracking-tight"
                     style={{ fontFamily: 'var(--font-hand)' }}
                   >
                     <SafeHtml as="span" html={detail.title} />
                   </h1>
-                  {/* H1 Dusk Violet Marker Underline */}
-                  <svg
-                    aria-hidden="true"
-                    className="w-64 max-w-full h-3 mt-0.5 block pointer-events-none"
-                    viewBox="0 0 260 12"
-                    fill="none"
-                  >
-                    <path
-                      d="M3 7.5 C 72 2.5, 155 10.5, 256 4.8"
-                      stroke="var(--marker-h1)"
-                      strokeWidth="4"
-                      strokeLinecap="round"
-                    />
-                  </svg>
+                  <MarkerUnderline variant="h1" />
                 </div>
 
                 <SafeHtml
                   as="p"
                   html={detail.summary}
-                  className="text-base text-ink-secondary leading-relaxed m-0"
+                  className="text-base text-ink-secondary leading-relaxed"
                 />
 
                 <div className="pt-2 flex flex-wrap items-center gap-2.5 text-xs text-ink-muted">
@@ -606,22 +598,8 @@ export function StepReaderPage({
                 />
               </div>
 
-              {/* Article Footer: Creative Commons Stamp + Like Button + Task Progress + Directional Prev/Next */}
-              <footer className="mt-12 pt-8 border-t border-dashed border-border-subtle space-y-6">
-                <CcLicenseCard
-                  locale={locale}
-                  copy={copy}
-                  stepLicense={detail.license}
-                  siteDefaultLicense={siteSettings.default_license}
-                  authorName={
-                    detail.authors && detail.authors.length > 0
-                      ? detail.authors.map((a) => a.display_name || a.username).join(', ')
-                      : stripHtmlTags(
-                          detail.author_name?.trim() || siteSettings.default_author_name,
-                        )
-                  }
-                />
-
+              {/* Article Footer: Reaction + Task Progress + Creative Commons Stamp + Single Directional Navigation Divider */}
+              <footer className="mt-10 space-y-6">
                 {(siteSettings.enable_likes ||
                   (siteSettings.enable_progress_tracking && totalTaskCount > 0)) && (
                   <div className="flex flex-wrap items-center justify-between gap-4">
@@ -676,8 +654,22 @@ export function StepReaderPage({
                   </div>
                 )}
 
+                <CcLicenseCard
+                  locale={locale}
+                  copy={copy}
+                  stepLicense={detail.license}
+                  siteDefaultLicense={siteSettings.default_license}
+                  authorName={
+                    detail.authors && detail.authors.length > 0
+                      ? detail.authors.map((a) => a.display_name || a.username).join(', ')
+                      : stripHtmlTags(
+                          detail.author_name?.trim() || siteSettings.default_author_name,
+                        )
+                  }
+                />
+
                 {/* Directional Navigation Row (One Primary Action on the right!) */}
-                <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
+                <div className="flex flex-wrap items-center justify-between gap-4 pt-5 border-t border-dashed border-border-subtle">
                   {detail.prev_step ? (
                     <button
                       type="button"
