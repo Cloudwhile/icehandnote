@@ -100,6 +100,7 @@ export function SiteBrand({
             <SafeHtml
               as="span"
               html={resolvedNameHtml}
+              linkVariant="chrome"
               className={`${textSizeCls} font-semibold tracking-tight ${
                 nameMaxWidthClass ? `studio-ellipsis ${nameMaxWidthClass}` : 'truncate'
               }`}
@@ -108,6 +109,7 @@ export function SiteBrand({
               <SafeHtml
                 as="span"
                 html={siteSettings.brand_badge}
+                linkVariant="chrome"
                 className="font-mono text-xs font-semibold uppercase tracking-wider text-accent-ice hidden sm:inline shrink-0"
               />
             )}

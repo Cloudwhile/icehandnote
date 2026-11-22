@@ -295,6 +295,41 @@ a.ink-inline-link:active {
   opacity: 0.86;
 }
 
+/* Understated UI chrome links inside SafeHtml slots (e.g. custom SiteFooter text):
+ * text-only color transition on hover, no wavy/hover underline or layout shift,
+ * with a high-contrast :focus-visible outline and Forced Colors underline fallback. */
+a.ink-chrome-link {
+  color: var(--ink-secondary);
+  font-weight: 500;
+  text-decoration: none;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 140ms ease-out;
+}
+
+a.ink-chrome-link:hover {
+  color: var(--link-ink);
+  text-decoration: none;
+  box-shadow: none;
+}
+
+a.ink-chrome-link:active {
+  color: var(--link-hover-ink);
+  text-decoration: none;
+  box-shadow: none;
+}
+
+a.ink-chrome-link:focus-visible {
+  outline: 2px solid var(--link-ink);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  a.ink-chrome-link {
+    text-decoration: underline;
+  }
+}
+
 /* Tactile Hand-Drawn Keyboard Keycap & Key Combo Component */
 .notebook-prose kbd,
 .rich-editable kbd,

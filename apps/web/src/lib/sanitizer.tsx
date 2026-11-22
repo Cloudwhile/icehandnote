@@ -1,5 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { enhanceRichHtmlElement } from './inlineCodeHighlight';
+import {
+  enhanceRichHtmlElement,
+  type RichLinkVariant,
+} from './inlineCodeHighlight';
 
 const ALLOWED_ELEMENTS = [
   'p',
@@ -141,6 +144,7 @@ export async function safeSetHtml(
   el: HTMLElement,
   html: string,
   isCancelled?: () => boolean,
+  opts?: { linkVariant?: RichLinkVariant },
 ): Promise<void> {
   if (isCancelled?.()) return;
 
@@ -155,7 +159,7 @@ export async function safeSetHtml(
     ).setHTML(html, {
       sanitizer: { elements: ALLOWED_ELEMENTS, attributes: ALLOWED_ATTRIBUTES },
     });
-    enhanceRichHtmlElement(el);
+    enhanceRichHtmlElement(el, opts);
     return;
   }
 
@@ -168,27 +172,33 @@ export async function safeSetHtml(
     ALLOW_DATA_ATTR: false,
     KEEP_CONTENT: false,
   });
-  enhanceRichHtmlElement(el);
+  enhanceRichHtmlElement(el, opts);
 }
 
 interface SafeHtmlProps {
   html: string;
   className?: string;
   as?: 'div' | 'span' | 'p';
+  linkVariant?: RichLinkVariant;
 }
 
-export function SafeHtml({ html, className, as = 'div' }: SafeHtmlProps) {
+export function SafeHtml({
+  html,
+  className,
+  as = 'div',
+  linkVariant = 'prose',
+}: SafeHtmlProps) {
   const ref = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
     let cancelled = false;
-    void safeSetHtml(node, html, () => cancelled);
+    void safeSetHtml(node, html, () => cancelled, { linkVariant });
     return () => {
       cancelled = true;
     };
-  }, [html]);
+  }, [html, linkVariant]);
 
   const Tag = as;
   return <Tag ref={ref as never} className={className} />;

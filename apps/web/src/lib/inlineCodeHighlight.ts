@@ -500,13 +500,19 @@ export function highlightInlineCodeHtml(raw: string): string {
   return scanGeneralInlineCode(raw);
 }
 
+export type RichLinkVariant = 'prose' | 'chrome';
+
 /**
  * Enhances sanitized rich HTML containers with inline code syntax tokens and
- * explicit `.ink-inline-link` hooks for hover/active interaction feedback.
+ * explicit link-variant hooks (`.ink-inline-link` for editorial prose or
+ * `.ink-chrome-link` for understated UI chrome such as custom footers).
  */
 export function enhanceRichHtmlElement(
   root: ParentNode,
-  opts?: { skipActiveSelectionIn?: HTMLElement | null },
+  opts?: {
+    skipActiveSelectionIn?: HTMLElement | null;
+    linkVariant?: RichLinkVariant;
+  },
 ): void {
   const activeSel =
     opts?.skipActiveSelectionIn && typeof window !== 'undefined'
@@ -532,9 +538,16 @@ export function enhanceRichHtmlElement(
     }
   });
 
+  const linkVariant = opts?.linkVariant ?? 'prose';
   root.querySelectorAll('a[href]').forEach((anchorEl) => {
-    if (!anchorEl.classList.contains('ink-inline-link')) {
-      anchorEl.classList.add('ink-inline-link');
+    if (linkVariant === 'chrome') {
+      anchorEl.classList.remove('ink-inline-link');
+      anchorEl.classList.add('ink-chrome-link');
+    } else {
+      anchorEl.classList.remove('ink-chrome-link');
+      if (!anchorEl.classList.contains('ink-inline-link')) {
+        anchorEl.classList.add('ink-inline-link');
+      }
     }
   });
 }

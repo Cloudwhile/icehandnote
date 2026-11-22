@@ -42,11 +42,16 @@ export function SiteFooter({
                 as="span"
                 html={siteSettings.site_name || copy.brandName}
                 className="font-semibold text-ink-secondary"
+                linkVariant="chrome"
               />
               {siteSettings.footer_text && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <SafeHtml as="span" html={siteSettings.footer_text} />
+                  <SafeHtml
+                    as="span"
+                    html={siteSettings.footer_text}
+                    linkVariant="chrome"
+                  />
                 </>
               )}
             </div>
