@@ -519,6 +519,137 @@ pub fn compute_device_fingerprint(client_device_id: Option<&str>, ua: &str) -> S
     }
 }
 
+/// Sliding trust window (days) before a previously verified `(ip, device)` pair requires re-verification.
+pub const TRUSTED_DEVICE_TTL_DAYS: i64 = 30;
+
+/// Parse and canonicalize a single IP candidate from proxy headers (`CF-Connecting-IP`, `X-Forwarded-For`,
+/// `Forwarded`, `X-Real-IP`, etc.): strips quotes/brackets/ports, rejects obfuscated/unknown tokens,
+/// and unmaps IPv4-mapped IPv6 addresses (`::ffff:203.0.113.10` -> `203.0.113.10`).
+pub fn normalize_ip_candidate(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"').trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown")
+        || trimmed.starts_with('_')
+    {
+        return None;
+    }
+
+    let candidate = if let Some(rest) = trimmed.strip_prefix('[') {
+        // Bracketed IPv6 with optional port: `[2001:db8::1]:443` or `[2001:db8::1]`
+        let end = rest.find(']')?;
+        &rest[..end]
+    } else if let Ok(sock) = trimmed.parse::<std::net::SocketAddr>() {
+        return Some(canonicalize_ip_addr(sock.ip()));
+    } else {
+        trimmed
+    };
+
+    // Strip optional IPv6 zone index (e.g. `fe80::1%eth0`)
+    let no_zone = candidate.split('%').next().unwrap_or(candidate).trim();
+    if let Ok(ip) = no_zone.parse::<std::net::IpAddr>() {
+        return Some(canonicalize_ip_addr(ip));
+    }
+
+    // Handle bare `ipv4:port` if `SocketAddr` parse failed on non-numeric port
+    if let Some((host, port)) = no_zone.rsplit_once(':') {
+        if !host.contains(':') && port.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                return Some(canonicalize_ip_addr(ip));
+            }
+        }
+    }
+
+    None
+}
+
+fn canonicalize_ip_addr(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => v6.to_string(),
+        },
+    }
+}
+
+/// Canonicalize a stored or extracted client IP string for consistent comparison/storage.
+/// Falls back to a trimmed ASCII-bounded string if the input is non-IP text.
+pub fn normalize_client_ip(raw: &str) -> String {
+    if let Some(ip) = normalize_ip_candidate(raw) {
+        return ip;
+    }
+    raw.trim().chars().take(64).collect()
+}
+
+/// Evaluate whether a sign-in from `(ip_address, device_fingerprint)` is anomalous against active
+/// trusted `(ip, device)` pairs (or session fallback pairs when the account has no trusted-device
+/// history yet, e.g. pre-0010 sessions or migrated storage).
+///
+/// Enforces:
+/// 1. Exact `(ip, device)` pair trust on a SINGLE baseline row (preventing cross-pair bypasses where
+///    `IP_A` was only seen with `Device_1` and `Device_2` was only seen with `IP_B`).
+/// 2. Trust TTL expiry: if prior trusted history existed but none is within `TRUSTED_DEVICE_TTL_DAYS`,
+///    step-up re-verification is required rather than treating the login as first-ever baseline.
+/// 3. Cold-start session fallback: when `user_trusted_devices` is empty, active/recent `user_sessions`
+///    with non-empty IP or device fingerprint serve as baseline so existing sessions stay protected.
+pub fn evaluate_login_anomaly(
+    ip_address: &str,
+    device_fingerprint: &str,
+    trusted_active: &[(String, String)],
+    has_any_trusted_history: bool,
+    session_fallback_pairs: &[(String, String)],
+) -> Option<&'static str> {
+    let clean_ip = normalize_client_ip(ip_address);
+    let clean_fp = device_fingerprint.trim();
+
+    let baseline: Vec<(String, String)> = if !trusted_active.is_empty() {
+        trusted_active
+            .iter()
+            .map(|(ip, fp)| (normalize_client_ip(ip), fp.trim().to_string()))
+            .filter(|(ip, fp)| !ip.is_empty() || !fp.is_empty())
+            .collect()
+    } else if has_any_trusted_history {
+        // Account previously established trusted devices, but all expired past TTL -> force re-verification.
+        return Some("new_ip_and_device");
+    } else {
+        session_fallback_pairs
+            .iter()
+            .map(|(ip, fp)| (normalize_client_ip(ip), fp.trim().to_string()))
+            .filter(|(ip, fp)| !ip.is_empty() || !fp.is_empty())
+            .collect()
+    };
+
+    if baseline.is_empty() {
+        return None;
+    }
+
+    let exact_pair_known = baseline.iter().any(|(known_ip, known_fp)| {
+        let ip_ok = clean_ip.is_empty() || known_ip.is_empty() || known_ip == &clean_ip;
+        let fp_ok = clean_fp.is_empty() || known_fp.is_empty() || known_fp == clean_fp;
+        ip_ok && fp_ok
+    });
+    if exact_pair_known {
+        return None;
+    }
+
+    let ip_seen = clean_ip.is_empty()
+        || baseline
+            .iter()
+            .any(|(known_ip, _)| !known_ip.is_empty() && known_ip == &clean_ip);
+    let dev_seen = clean_fp.is_empty()
+        || baseline
+            .iter()
+            .any(|(_, known_fp)| !known_fp.is_empty() && known_fp == clean_fp);
+
+    match (ip_seen, dev_seen) {
+        (false, false) => Some("new_ip_and_device"),
+        (false, true) => Some("new_ip"),
+        (true, false) => Some("new_device"),
+        // Both IP and device appeared individually on different trusted rows, never together as a pair.
+        (true, true) => Some("new_ip_and_device"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioLocaleBadgeDto {
     pub locale: String,
@@ -996,5 +1127,84 @@ mod tests {
         assert!(!is_deliverable_email("wp-1@users.sso.invalid"));
         assert!(is_deliverable_email("noreply@icehandnote.dev"));
         assert!(is_deliverable_email("Alice+tag@Gmail.COM"));
+    }
+
+    #[test]
+    fn normalizes_proxy_ip_candidates_and_evaluates_pair_based_login_anomalies() {
+        assert_eq!(
+            normalize_ip_candidate("203.0.113.42"),
+            Some("203.0.113.42".to_string())
+        );
+        assert_eq!(
+            normalize_ip_candidate("203.0.113.42:54321"),
+            Some("203.0.113.42".to_string())
+        );
+        assert_eq!(
+            normalize_ip_candidate("::ffff:198.51.100.10"),
+            Some("198.51.100.10".to_string())
+        );
+        assert_eq!(
+            normalize_ip_candidate("\"[2001:db8::1]:443\""),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(normalize_ip_candidate("unknown"), None);
+        assert_eq!(normalize_ip_candidate("_hidden"), None);
+
+        // First login ever -> no baseline -> no anomaly
+        assert_eq!(
+            evaluate_login_anomaly("198.51.100.10", "dev:a:chrome", &[], false, &[]),
+            None
+        );
+
+        // Cold-start session fallback protects existing users whose trusted_devices table is empty
+        let legacy_sessions = vec![("198.51.100.10".to_string(), "".to_string())];
+        assert_eq!(
+            evaluate_login_anomaly(
+                "203.0.113.42",
+                "dev:b:safari",
+                &[],
+                false,
+                &legacy_sessions
+            ),
+            Some("new_ip_and_device")
+        );
+        assert_eq!(
+            evaluate_login_anomaly(
+                "::ffff:198.51.100.10",
+                "dev:a:chrome",
+                &[],
+                false,
+                &legacy_sessions
+            ),
+            None
+        );
+
+        // Pair-based trust: cross-pair combination (IP_1 + Dev_B) must NOT bypass anomaly detection
+        let trusted = vec![
+            ("198.51.100.10".to_string(), "dev:a:chrome".to_string()),
+            ("203.0.113.42".to_string(), "dev:b:safari".to_string()),
+        ];
+        assert_eq!(
+            evaluate_login_anomaly("198.51.100.10", "dev:a:chrome", &trusted, true, &[]),
+            None
+        );
+        assert_eq!(
+            evaluate_login_anomaly("198.51.100.10", "dev:b:safari", &trusted, true, &[]),
+            Some("new_ip_and_device")
+        );
+        assert_eq!(
+            evaluate_login_anomaly("192.0.2.77", "dev:a:chrome", &trusted, true, &[]),
+            Some("new_ip")
+        );
+        assert_eq!(
+            evaluate_login_anomaly("198.51.100.10", "dev:c:firefox", &trusted, true, &[]),
+            Some("new_device")
+        );
+
+        // Expired trust history (all past 30d TTL) forces re-verification
+        assert_eq!(
+            evaluate_login_anomaly("198.51.100.10", "dev:a:chrome", &[], true, &[]),
+            Some("new_ip_and_device")
+        );
     }
 }

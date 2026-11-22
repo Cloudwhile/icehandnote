@@ -19,14 +19,15 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
-        constant_time_str_eq, generate_action_token, generate_email_verification_code,
-        hash_action_token, hash_email_verification_code, hash_password, hash_session_token,
-        mask_email_address, normalize_avatar_source, normalize_collaborator_role,
-        normalize_locale_scope, parse_user_agent_device, verify_password, BlogSsoClaims,
-        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
-        StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto,
-        UserProfileDto, UserRole, UserSessionDto,
+        constant_time_str_eq, evaluate_login_anomaly, generate_action_token,
+        generate_email_verification_code, hash_action_token, hash_email_verification_code,
+        hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
+        normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
+        parse_user_agent_device, verify_password, BlogSsoClaims, CollaborationAuditLogDto,
+        CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, InvitePreviewDto,
+        SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioStepEditorDto, StudioTrackDto,
+        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
+        TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet,
     error::{DomainError, ErrorCode},
@@ -1656,6 +1657,7 @@ impl TutorialRepository for LocalSeedRepository {
         let uid = user_rec.profile.id;
         let dto = Self::resolve_user_dto(user_rec, &grav);
         state.sessions.retain(|s| s.user_id != uid);
+        state.trusted_devices.retain(|d| d.user_id != uid);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -1726,6 +1728,7 @@ impl TutorialRepository for LocalSeedRepository {
         user_rec.password_hash = Some(hash_password(&user_rec.profile.username, new_password));
         let dto = Self::resolve_user_dto(user_rec, &grav);
         state.sessions.retain(|s| s.user_id != user_id);
+        state.trusted_devices.retain(|d| d.user_id != user_id);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -2014,15 +2017,32 @@ impl TutorialRepository for LocalSeedRepository {
 
     async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<bool> {
         let mut state = self.state.write().await;
-        let before = state.sessions.len();
-        state
+        let now = Utc::now();
+        let Some(pos) = state
             .sessions
-            .retain(|s| !(s.user_id == user_id && s.id == session_id));
-        let removed = state.sessions.len() != before;
-        if removed {
-            self.persist_state(&state);
+            .iter()
+            .position(|s| s.user_id == user_id && s.id == session_id)
+        else {
+            return Ok(false);
+        };
+        let removed_sess = state.sessions.remove(pos);
+        let rem_ip = normalize_client_ip(&removed_sess.ip_address);
+        let rem_fp = removed_sess.device_fingerprint.trim().to_string();
+        let still_active_same_pair = state.sessions.iter().any(|s| {
+            s.user_id == user_id
+                && s.expires_at > now
+                && normalize_client_ip(&s.ip_address) == rem_ip
+                && s.device_fingerprint.trim() == rem_fp
+        });
+        if !still_active_same_pair && (!rem_ip.is_empty() || !rem_fp.is_empty()) {
+            state.trusted_devices.retain(|d| {
+                !(d.user_id == user_id
+                    && normalize_client_ip(&d.ip_address) == rem_ip
+                    && d.device_fingerprint.trim() == rem_fp)
+            });
         }
-        Ok(removed)
+        self.persist_state(&state);
+        Ok(true)
     }
 
     async fn revoke_other_user_sessions(
@@ -2031,13 +2051,35 @@ impl TutorialRepository for LocalSeedRepository {
         current_raw_token: &str,
     ) -> Result<usize> {
         let current_hash = hash_session_token(current_raw_token);
+        let now = Utc::now();
         let mut state = self.state.write().await;
         let before = state.sessions.len();
         state
             .sessions
             .retain(|s| s.user_id != user_id || s.token_hash == current_hash);
         let removed = before.saturating_sub(state.sessions.len());
-        if removed > 0 {
+        let kept_pairs: HashSet<(String, String)> = state
+            .sessions
+            .iter()
+            .filter(|s| s.user_id == user_id && s.expires_at > now)
+            .map(|s| {
+                (
+                    normalize_client_ip(&s.ip_address),
+                    s.device_fingerprint.trim().to_string(),
+                )
+            })
+            .collect();
+        let trusted_before = state.trusted_devices.len();
+        if !kept_pairs.is_empty() {
+            state.trusted_devices.retain(|d| {
+                d.user_id != user_id
+                    || kept_pairs.contains(&(
+                        normalize_client_ip(&d.ip_address),
+                        d.device_fingerprint.trim().to_string(),
+                    ))
+            });
+        }
+        if removed > 0 || state.trusted_devices.len() != trusted_before {
             self.persist_state(&state);
         }
         Ok(removed)
@@ -2057,26 +2099,42 @@ impl TutorialRepository for LocalSeedRepository {
         ip_address: &str,
         device_fingerprint: &str,
     ) -> Result<Option<String>> {
-        let clean_ip = ip_address.trim();
-        let clean_fp = device_fingerprint.trim();
+        let now = Utc::now();
+        let ttl_cutoff = now - Duration::days(TRUSTED_DEVICE_TTL_DAYS);
         let state = self.state.read().await;
-        let known: Vec<&StoredTrustedDeviceRecord> = state
+        let all_trusted: Vec<&StoredTrustedDeviceRecord> = state
             .trusted_devices
             .iter()
             .filter(|d| d.user_id == user_id)
             .collect();
-        if known.is_empty() {
-            return Ok(None);
-        }
-        let ip_known = clean_ip.is_empty() || known.iter().any(|d| d.ip_address == clean_ip);
-        let dev_known =
-            clean_fp.is_empty() || known.iter().any(|d| d.device_fingerprint == clean_fp);
-        match (ip_known, dev_known) {
-            (false, false) => Ok(Some("new_ip_and_device".to_string())),
-            (false, true) => Ok(Some("new_ip".to_string())),
-            (true, false) => Ok(Some("new_device".to_string())),
-            (true, true) => Ok(None),
-        }
+        let has_any_trusted_history = !all_trusted.is_empty();
+        let active_trusted: Vec<(String, String)> = all_trusted
+            .into_iter()
+            .filter(|d| d.last_seen_at >= ttl_cutoff)
+            .map(|d| (d.ip_address.clone(), d.device_fingerprint.clone()))
+            .collect();
+        let session_fallback_pairs: Vec<(String, String)> = if has_any_trusted_history {
+            Vec::new()
+        } else {
+            state
+                .sessions
+                .iter()
+                .filter(|s| {
+                    s.user_id == user_id
+                        && (!s.ip_address.trim().is_empty()
+                            || !s.device_fingerprint.trim().is_empty())
+                })
+                .map(|s| (s.ip_address.clone(), s.device_fingerprint.clone()))
+                .collect()
+        };
+        Ok(evaluate_login_anomaly(
+            ip_address,
+            device_fingerprint,
+            &active_trusted,
+            has_any_trusted_history,
+            &session_fallback_pairs,
+        )
+        .map(str::to_string))
     }
 
     async fn record_trusted_device(
@@ -2086,7 +2144,7 @@ impl TutorialRepository for LocalSeedRepository {
         device_fingerprint: &str,
         device_label: &str,
     ) -> Result<()> {
-        let clean_ip = ip_address.trim();
+        let clean_ip = normalize_client_ip(ip_address);
         let clean_fp = device_fingerprint.trim();
         if clean_ip.is_empty() && clean_fp.is_empty() {
             return Ok(());
@@ -2094,8 +2152,11 @@ impl TutorialRepository for LocalSeedRepository {
         let now = Utc::now();
         let mut state = self.state.write().await;
         if let Some(existing) = state.trusted_devices.iter_mut().find(|d| {
-            d.user_id == user_id && d.ip_address == clean_ip && d.device_fingerprint == clean_fp
+            d.user_id == user_id
+                && normalize_client_ip(&d.ip_address) == clean_ip
+                && d.device_fingerprint.trim() == clean_fp
         }) {
+            existing.ip_address = clean_ip;
             existing.last_seen_at = now;
             if !device_label.trim().is_empty() {
                 existing.device_label = device_label.trim().to_string();
@@ -2104,7 +2165,7 @@ impl TutorialRepository for LocalSeedRepository {
             state.trusted_devices.push(StoredTrustedDeviceRecord {
                 id: Uuid::new_v4(),
                 user_id,
-                ip_address: clean_ip.to_string(),
+                ip_address: clean_ip,
                 device_fingerprint: clean_fp.to_string(),
                 device_label: device_label.trim().to_string(),
                 first_seen_at: now,

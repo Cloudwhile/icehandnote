@@ -11,15 +11,17 @@ use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
         compute_step_content_sha256, compute_step_etag, constant_time_str_eq,
-        extract_body_without_frontmatter, format_step_markdown_file_with_meta,
-        generate_action_token, generate_email_verification_code, hash_action_token,
-        hash_email_verification_code, hash_password, hash_session_token, mask_email_address,
-        normalize_avatar_source, normalize_collaborator_role, normalize_locale_scope,
+        evaluate_login_anomaly, extract_body_without_frontmatter,
+        format_step_markdown_file_with_meta, generate_action_token,
+        generate_email_verification_code, hash_action_token, hash_email_verification_code,
+        hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
+        normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
         parse_user_agent_device, verify_password, ArticleAuthorDto, BlogSsoClaims,
         CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
         InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioChapterDto,
         StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto, StudioTrackDto,
         UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
+        TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet, compile_notebook_markdown,
     error::{DomainError, ErrorCode},
@@ -2623,6 +2625,10 @@ impl TutorialRepository for PostgresRepository {
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM user_trusted_devices WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
 
         let grav = self.fetch_gravatar_base().await;
@@ -2717,6 +2723,10 @@ impl TutorialRepository for PostgresRepository {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM user_sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM user_trusted_devices WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
@@ -3060,12 +3070,63 @@ impl TutorialRepository for PostgresRepository {
     }
 
     async fn revoke_user_session(&self, user_id: Uuid, session_id: Uuid) -> Result<bool> {
-        let res = sqlx::query("DELETE FROM user_sessions WHERE user_id = $1 AND id = $2")
+        let removed_opt = sqlx::query(
+            "DELETE FROM user_sessions WHERE user_id = $1 AND id = $2 RETURNING ip_address, device_fingerprint",
+        )
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = removed_opt else {
+            return Ok(false);
+        };
+        let rem_ip = normalize_client_ip(&row.try_get::<String, _>("ip_address").unwrap_or_default());
+        let rem_fp = row
+            .try_get::<String, _>("device_fingerprint")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !rem_ip.is_empty() || !rem_fp.is_empty() {
+            let remaining_rows = sqlx::query(
+                "SELECT ip_address, device_fingerprint FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()",
+            )
             .bind(user_id)
-            .bind(session_id)
-            .execute(&self.pool)
+            .fetch_all(&self.pool)
             .await?;
-        Ok(res.rows_affected() > 0)
+            let still_active = remaining_rows.iter().any(|r| {
+                let ip = normalize_client_ip(
+                    &r.try_get::<String, _>("ip_address").unwrap_or_default(),
+                );
+                let fp = r
+                    .try_get::<String, _>("device_fingerprint")
+                    .unwrap_or_default();
+                ip == rem_ip && fp.trim() == rem_fp
+            });
+            if !still_active {
+                let trusted_rows = sqlx::query(
+                    "SELECT id, ip_address, device_fingerprint FROM user_trusted_devices WHERE user_id = $1",
+                )
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await?;
+                for tr in trusted_rows {
+                    let tid: Uuid = tr.try_get("id")?;
+                    let tip = normalize_client_ip(
+                        &tr.try_get::<String, _>("ip_address").unwrap_or_default(),
+                    );
+                    let tfp = tr
+                        .try_get::<String, _>("device_fingerprint")
+                        .unwrap_or_default();
+                    if tip == rem_ip && tfp.trim() == rem_fp {
+                        let _ = sqlx::query("DELETE FROM user_trusted_devices WHERE id = $1")
+                            .bind(tid)
+                            .execute(&self.pool)
+                            .await;
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 
     async fn revoke_other_user_sessions(
@@ -3081,6 +3142,52 @@ impl TutorialRepository for PostgresRepository {
         .bind(&current_hash)
         .execute(&self.pool)
         .await?;
+
+        let remaining_rows = sqlx::query(
+            "SELECT ip_address, device_fingerprint FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let kept_pairs: HashSet<(String, String)> = remaining_rows
+            .into_iter()
+            .map(|r| {
+                let ip = normalize_client_ip(
+                    &r.try_get::<String, _>("ip_address").unwrap_or_default(),
+                );
+                let fp = r
+                    .try_get::<String, _>("device_fingerprint")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                (ip, fp)
+            })
+            .collect();
+        if !kept_pairs.is_empty() {
+            let trusted_rows = sqlx::query(
+                "SELECT id, ip_address, device_fingerprint FROM user_trusted_devices WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?;
+            for tr in trusted_rows {
+                let tid: Uuid = tr.try_get("id")?;
+                let tip = normalize_client_ip(
+                    &tr.try_get::<String, _>("ip_address").unwrap_or_default(),
+                );
+                let tfp = tr
+                    .try_get::<String, _>("device_fingerprint")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if !kept_pairs.contains(&(tip, tfp)) {
+                    let _ = sqlx::query("DELETE FROM user_trusted_devices WHERE id = $1")
+                        .bind(tid)
+                        .execute(&self.pool)
+                        .await;
+                }
+            }
+        }
         Ok(res.rows_affected() as usize)
     }
 
@@ -3099,33 +3206,54 @@ impl TutorialRepository for PostgresRepository {
         ip_address: &str,
         device_fingerprint: &str,
     ) -> Result<Option<String>> {
-        let clean_ip = ip_address.trim();
-        let clean_fp = device_fingerprint.trim();
+        let ttl_cutoff = Utc::now() - Duration::days(TRUSTED_DEVICE_TTL_DAYS);
         let rows = sqlx::query(
-            "SELECT ip_address, device_fingerprint FROM user_trusted_devices WHERE user_id = $1",
+            "SELECT ip_address, device_fingerprint, last_seen_at FROM user_trusted_devices WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let ip_known = clean_ip.is_empty()
-            || rows
-                .iter()
-                .any(|r| r.try_get::<String, _>("ip_address").unwrap_or_default() == clean_ip);
-        let dev_known = clean_fp.is_empty()
-            || rows.iter().any(|r| {
-                r.try_get::<String, _>("device_fingerprint")
-                    .unwrap_or_default()
-                    == clean_fp
-            });
-        match (ip_known, dev_known) {
-            (false, false) => Ok(Some("new_ip_and_device".to_string())),
-            (false, true) => Ok(Some("new_ip".to_string())),
-            (true, false) => Ok(Some("new_device".to_string())),
-            (true, true) => Ok(None),
-        }
+        let has_any_trusted_history = !rows.is_empty();
+        let active_trusted: Vec<(String, String)> = rows
+            .into_iter()
+            .filter_map(|r| {
+                let seen: DateTime<Utc> = r.try_get("last_seen_at").ok()?;
+                if seen < ttl_cutoff {
+                    return None;
+                }
+                let ip = r.try_get::<String, _>("ip_address").unwrap_or_default();
+                let fp = r
+                    .try_get::<String, _>("device_fingerprint")
+                    .unwrap_or_default();
+                Some((ip, fp))
+            })
+            .collect();
+        let session_fallback_pairs: Vec<(String, String)> = if has_any_trusted_history {
+            Vec::new()
+        } else {
+            sqlx::query(
+                "SELECT ip_address, device_fingerprint FROM user_sessions WHERE user_id = $1 AND (ip_address <> '' OR device_fingerprint <> '')",
+            )
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|r| {
+                (
+                    r.try_get::<String, _>("ip_address").unwrap_or_default(),
+                    r.try_get::<String, _>("device_fingerprint").unwrap_or_default(),
+                )
+            })
+            .collect()
+        };
+        Ok(evaluate_login_anomaly(
+            ip_address,
+            device_fingerprint,
+            &active_trusted,
+            has_any_trusted_history,
+            &session_fallback_pairs,
+        )
+        .map(str::to_string))
     }
 
     async fn record_trusted_device(
@@ -3135,7 +3263,7 @@ impl TutorialRepository for PostgresRepository {
         device_fingerprint: &str,
         device_label: &str,
     ) -> Result<()> {
-        let clean_ip = ip_address.trim();
+        let clean_ip = normalize_client_ip(ip_address);
         let clean_fp = device_fingerprint.trim();
         if clean_ip.is_empty() && clean_fp.is_empty() {
             return Ok(());
@@ -3150,7 +3278,7 @@ impl TutorialRepository for PostgresRepository {
         )
         .bind(Uuid::new_v4())
         .bind(user_id)
-        .bind(clean_ip)
+        .bind(&clean_ip)
         .bind(clean_fp)
         .bind(device_label.trim())
         .execute(&self.pool)
