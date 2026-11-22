@@ -4,6 +4,17 @@ All notable changes to **IceHandnote** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-rc.6] - 2026-11-22
+
+### Added
+- **Borderless Hand-Drawn Stationery Flow Article Editor**: Redesigned `VisualBlockEditor` and `StudioEditorPanel` onto a borderless loose-leaf stationery sheet featuring a `/` slash command palette (`SlashCommandMenu`), live Markdown prefix auto-conversion (`## `, `### `, `#### `, `## [ ] `, `- [ ] `, `- `, `1. `, `> `, ```` ``` ````, `:::tip `), IME-safe `Enter`/`Backspace`/Arrow cross-block split/merge/navigation, in-place `<StickerCardFrame>` alert editing & `<WashiCodeFrame>` drafting code pads with floating style/tone/margin-note popovers (`BlockFloatingControls`), inline selection formatting toolbar, single-axis pointer drag-handle block reordering, and direct `Ctrl+V` clipboard screenshot paste + drag-and-drop image auto-upload across both Visual and Markdown modes.
+
+### Changed
+- **Strict RFC Email Validation, Normalization & Deliverability**: Replaced naive `@` substring checks across Rust (`icehandnote-core`, `icehandnote-db`, `icehandnote-api`, `icehandnote-cli`) and React (`email.ts`, `useFormValidation.ts`) with unified RFC 5321/5322/1035/5891/2606 validation (`validate_and_normalize_email`, `is_valid_email`, `is_deliverable_email`), canonical lowercase domain normalization, Punycode IDN TLD support, reserved sinkhole filtering (`.localhost`, `.local`, `.invalid`, Null-MX example domains), SMTP `from_email` validation, and post-interaction `:user-invalid` + ARIA constraint synchronization across all 7 email forms.
+
+### Fixed
+- **Mobile Studio & Reader Scroll Locking & Swipe Drawer Lifecycle**: Scoped `.studio-scroll-pane` (`overflow-y: auto; overscroll-behavior: contain`) strictly to desktop viewports so `< 1024px` mobile Studio pages and `<RoughDiagram>` canvases scroll naturally without touch-scroll trapping, fixed `SwipeDrawerDialog` `IntersectionObserver` premature Frame-1 auto-close & native `Escape` state sync on `#studio-sidebar-drawer` and `#mobile-chapter-drawer`, capped mobile `TopNavbar` menu height, and eliminated `375px` flex input intrinsic-width overflow in flow editor blocks.
+
 ## [0.1.0-rc.5] - 2026-11-22
 
 ### Added
@@ -95,6 +106,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Argon2id local user authentication, CLI admin bootstrap (`icehandnote-cli`), and optional WordPress HMAC-SHA256 cross-site SSO bridge (`deploy/wordpress-sso-bridge.php`).
   - Automated CI/CD workflows for workspace tests, standalone Windows & Linux executable bundles, and verified GHCR OCI container images.
 
+[0.1.0-rc.6]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.5...v0.1.0-rc.6
 [0.1.0-rc.5]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.4...v0.1.0-rc.5
 [0.1.0-rc.4]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.3...v0.1.0-rc.4
 [0.1.0-rc.3]: https://github.com/Cloudwhile/icehandnote/compare/v0.1.0-rc.2...v0.1.0-rc.3

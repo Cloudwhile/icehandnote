@@ -52,7 +52,7 @@
 
 | 镜像标签 | 说明 |
 | :--- | :--- |
-| `ghcr.io/cloudwhile/icehandnote:<tag>` | 已发布版本标签镜像（按发布 `tag` 作为版本号，如 `v0.1.0-rc.5`） |
+| `ghcr.io/cloudwhile/icehandnote:<tag>` | 已发布版本标签镜像（按发布 `tag` 作为版本号，如 `v0.1.0-rc.6`） |
 | `ghcr.io/cloudwhile/icehandnote:latest` | 最新 `v*` 发布标签镜像（仅在推送 `v*` tag 时更新，绝不打在 `sha256-*` 分支快照上） |
 | `ghcr.io/cloudwhile/icehandnote:sha256-<digest>` | 未打标签的 `main` 分支最新快照镜像（按镜像 `sha256` 摘要作为版本号） |
 
