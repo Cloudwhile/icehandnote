@@ -44,6 +44,10 @@ export function OAuthOnboardingPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+  const onProviderNameResolvedRef = useRef(onProviderNameResolved);
+  onProviderNameResolvedRef.current = onProviderNameResolved;
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   const [info, setInfo] = useState<OAuthOnboardingInfoDto | null>(null);
   const [tab, setTab] = useState<'register' | 'bind'>('register');
@@ -74,7 +78,7 @@ export function OAuthOnboardingPanel({
       .then((res) => {
         if (!active) return;
         setInfo(res);
-        onProviderNameResolved(res.provider_name);
+        onProviderNameResolvedRef.current(res.provider_name);
         setUsername(res.suggested_username);
         setDisplayName(res.display_name);
         setEmail(res.email);
@@ -90,13 +94,13 @@ export function OAuthOnboardingPanel({
       })
       .catch((err) => {
         if (!active) return;
-        toast.error(err);
+        toastRef.current.error(err);
         navigate(`/${locale}/auth/login`, { replace: true });
       });
     return () => {
       active = false;
     };
-  }, [locale, navigate, onboardingToken, onProviderNameResolved, toast]);
+  }, [locale, navigate, onboardingToken]);
 
   if (!info) {
     return (

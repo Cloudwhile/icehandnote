@@ -109,6 +109,8 @@ export function UsernameField({
 }: UsernameFieldProps) {
   const internalRef = useRef<HTMLInputElement | null>(null);
   const resolvedRef = inputRef ?? internalRef;
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
   const copy = UI_COPY[locale].auth;
   const extAuth = EXT_COPY[locale].auth;
   const errId = `${id}-err`;
@@ -122,8 +124,8 @@ export function UsernameField({
   );
 
   useEffect(() => {
-    onStatusChange?.(status);
-  }, [status, onStatusChange]);
+    onStatusChangeRef.current?.(status);
+  }, [status]);
 
   return (
     <div className="auth-field">

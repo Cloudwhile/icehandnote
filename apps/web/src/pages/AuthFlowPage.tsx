@@ -202,17 +202,19 @@ export function AuthFlowPage({
 
           <Link
             to={`/${locale}`}
-            className="hidden sm:inline-flex items-center gap-1 min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised no-underline transition-colors"
+            aria-label={extAuth.backToHome}
+            title={extAuth.backToHome}
+            className="inline-flex items-center justify-center gap-1 w-9 h-9 sm:w-auto sm:min-h-8 sm:px-2.5 sm:py-1 rounded-xl text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised no-underline transition-colors ink-icon-target"
           >
             <IconArrowLeft className="w-3.5 h-3.5" />
-            <span>{extAuth.backToHome}</span>
+            <span className="hidden sm:inline">{extAuth.backToHome}</span>
           </Link>
         </div>
       </header>
 
       {/* Main Centered Stationery Sheet */}
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-6 sm:py-10">
-        <div className="w-full max-w-[448px] mx-auto">
+        <div className="w-full max-w-md mx-auto">
           <div className="notebook-sheet-stack">
             <div className="notebook-sheet-card p-6 sm:p-8">
               <div className="mb-6">

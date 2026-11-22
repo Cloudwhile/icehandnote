@@ -4,7 +4,7 @@
  * `<ProfileSecurityTab>`, and `<ProfileSessionsTab>`.
  */
 
-import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { api } from '../../lib/api';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import { syncPasskeyUserDetails } from '../../lib/passkeys';
@@ -59,6 +59,14 @@ export function UserProfileModal({
   } | null>(null);
 
   const wasOpenRef = useRef(false);
+
+  const handlePasskeyIdentityResolved = useCallback((rpId: string, userId: string) => {
+    setPasskeyIdentity((prev) =>
+      prev && prev.rpId === rpId && prev.userId === userId
+        ? prev
+        : { rpId, userId },
+    );
+  }, []);
 
   useEffect(() => {
     if (!open) {
@@ -167,6 +175,7 @@ export function UserProfileModal({
       onClose={onClose}
       ariaLabelledBy={titleId}
       maxWidthClass="max-w-lg"
+      stableScrollbarGutter
     >
       <div className="p-5 sm:p-6">
         <ModalHeader
@@ -193,108 +202,110 @@ export function UserProfileModal({
           ]}
         />
 
-        {tab === 'profile' ? (
-          <div role="tabpanel" aria-labelledby="profile-tab-profile">
-            <form
-              method="POST"
-              onSubmit={(e) => void handleSaveProfile(e)}
-              className="mt-5 space-y-5"
-            >
-              <AvatarSourcePicker
-                locale={locale}
-                name={displayName || user.username}
-                avatarSource={avatarSource}
-                onChangeSource={setAvatarSource}
-                sources={availableAvatarSources}
-                previewUrl={previewUrl}
-                uploading={uploading}
-                onSelectUploadFile={(file) => void handleUploadAvatar(file)}
-              />
+        <div role="tabpanel" aria-labelledby="profile-tab-profile" hidden={tab !== 'profile'}>
+          <form
+            method="POST"
+            onSubmit={(e) => void handleSaveProfile(e)}
+            className="mt-5 space-y-5"
+          >
+            <AvatarSourcePicker
+              locale={locale}
+              name={displayName || user.username}
+              avatarSource={avatarSource}
+              onChangeSource={setAvatarSource}
+              sources={availableAvatarSources}
+              previewUrl={previewUrl}
+              uploading={uploading}
+              onSelectUploadFile={(file) => void handleUploadAvatar(file)}
+            />
 
-              <div className="space-y-3.5">
-                <div>
-                  <label htmlFor="prof-display-name" className="ink-field-label">
-                    {p.displayNameLabel}
-                  </label>
-                  <input
-                    id="prof-display-name"
-                    type="text"
-                    required
-                    maxLength={64}
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    className="ink-field-input"
-                  />
+            <div className="space-y-3.5">
+              <div>
+                <label htmlFor="prof-display-name" className="ink-field-label">
+                  {p.displayNameLabel}
+                </label>
+                <input
+                  id="prof-display-name"
+                  type="text"
+                  required
+                  maxLength={64}
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="ink-field-input"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-xs font-semibold text-ink-secondary">
+                    {p.currentEmailLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenEmailChange(true);
+                      setTab('security');
+                    }}
+                    className="inline-flex items-center min-h-7 -my-1 px-1 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                  >
+                    {p.changeEmailBtn}
+                  </button>
                 </div>
-
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-1.5">
-                    <span className="text-xs font-semibold text-ink-secondary">
-                      {p.currentEmailLabel}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenEmailChange(true);
-                        setTab('security');
-                      }}
-                      className="inline-flex items-center min-h-7 -my-1 px-1 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
-                    >
-                      {p.changeEmailBtn}
-                    </button>
-                  </div>
-                  <div className="px-3 py-2 rounded-xl bg-surface-sunken text-ink-secondary border border-border-subtle text-xs font-mono truncate">
-                    {user.email || '—'}
-                  </div>
-                </div>
-
-                <div>
-                  <label htmlFor="prof-bio" className="ink-field-label">
-                    {p.bioLabel}
-                  </label>
-                  <textarea
-                    id="prof-bio"
-                    rows={3}
-                    maxLength={300}
-                    value={bio}
-                    onChange={(e) => setBio(e.target.value)}
-                    placeholder={p.bioPlaceholder}
-                    className="ink-field-input"
-                  />
+                <div className="px-3 py-2 rounded-xl bg-surface-sunken text-ink-secondary border border-border-subtle text-xs font-mono truncate">
+                  {user.email || '—'}
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-1">
-                <button
-                  type="submit"
-                  disabled={savingProfile || !isProfileDirty}
-                  className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {savingProfile ? p.savingProfileBtn : p.saveProfileBtn}
-                </button>
+              <div>
+                <label htmlFor="prof-bio" className="ink-field-label">
+                  {p.bioLabel}
+                </label>
+                <textarea
+                  id="prof-bio"
+                  rows={3}
+                  maxLength={300}
+                  value={bio}
+                  onChange={(e) => setBio(e.target.value)}
+                  placeholder={p.bioPlaceholder}
+                  className="ink-field-input"
+                />
               </div>
-            </form>
-          </div>
-        ) : tab === 'security' ? (
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-1">
+              <button
+                type="submit"
+                disabled={savingProfile || !isProfileDirty}
+                className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingProfile ? p.savingProfileBtn : p.saveProfileBtn}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div role="tabpanel" aria-labelledby="profile-tab-security" hidden={tab !== 'security'}>
           <ProfileSecurityTab
             open={open}
+            active={open && tab === 'security'}
             locale={locale}
             user={user}
             siteSettings={siteSettings}
             initialOpenEmailChange={openEmailChange}
             onUserUpdated={onUserUpdated}
-            onPasskeyIdentityResolved={(rpId, userId) =>
-              setPasskeyIdentity({ rpId, userId })
-            }
+            onPasskeyIdentityResolved={handlePasskeyIdentityResolved}
           />
-        ) : (
+        </div>
+
+        <div role="tabpanel" aria-labelledby="profile-tab-sessions" hidden={tab !== 'sessions'}>
           <ProfileSessionsTab
             open={open}
+            active={open && tab === 'sessions'}
             locale={locale}
             onClose={onClose}
             onCurrentSessionRevoked={onCurrentSessionRevoked}
           />
-        )}
+        </div>
       </div>
     </ModalDialog>
   );

@@ -51,6 +51,8 @@ export function PasswordResetFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const confirmPwRef = useRef<HTMLInputElement | null>(null);
+  const onTokenVerifiedChangeRef = useRef(onTokenVerifiedChange);
+  onTokenVerifiedChangeRef.current = onTokenVerifiedChange;
 
   const [forgotEmail, setForgotEmail] = useState(resetEmailFromUrl);
   const [resetEmail, setResetEmail] = useState(resetEmailFromUrl);
@@ -86,8 +88,8 @@ export function PasswordResetFlowPanel({
   }, [mode, resetEmailFromUrl]);
 
   useEffect(() => {
-    onTokenVerifiedChange(Boolean(effectiveResetToken));
-  }, [effectiveResetToken, onTokenVerifiedChange]);
+    onTokenVerifiedChangeRef.current(Boolean(effectiveResetToken));
+  }, [effectiveResetToken]);
 
   useEffect(() => {
     const confirmInput = confirmPwRef.current;
@@ -268,7 +270,7 @@ export function PasswordResetFlowPanel({
         >
           <Link
             to={`/${locale}/auth/login${returnQuerySuffix}`}
-            className="inline-flex items-center justify-center min-h-7 px-2 font-semibold text-ink-muted hover:text-ink-primary no-underline"
+            className="inline-flex items-center justify-center min-h-7 px-2 font-semibold text-ink-muted hover:text-link-ink no-underline hover:underline underline-offset-4 transition-colors"
           >
             {extAuth.backToSignIn}
           </Link>
@@ -478,7 +480,7 @@ export function PasswordResetFlowPanel({
       >
         <Link
           to={`/${locale}/auth/login${returnQuerySuffix}`}
-          className="inline-flex items-center justify-center min-h-7 px-2 text-xs font-semibold text-ink-muted hover:text-ink-primary no-underline"
+          className="inline-flex items-center justify-center min-h-7 px-2 text-xs font-semibold text-ink-muted hover:text-link-ink no-underline hover:underline underline-offset-4 transition-colors"
         >
           {extAuth.backToSignIn}
         </Link>

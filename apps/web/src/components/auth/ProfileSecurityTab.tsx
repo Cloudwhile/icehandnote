@@ -48,6 +48,7 @@ export function formatAccountTimestamp(iso: string, locale: LocaleCode): string 
 
 export interface ProfileSecurityTabProps {
   open: boolean;
+  active?: boolean;
   locale: LocaleCode;
   user: UserProfileDto;
   siteSettings: SiteSettingsDto;
@@ -58,6 +59,7 @@ export interface ProfileSecurityTabProps {
 
 export function ProfileSecurityTab({
   open,
+  active,
   locale,
   user,
   siteSettings,
@@ -65,11 +67,18 @@ export function ProfileSecurityTab({
   onUserUpdated,
   onPasskeyIdentityResolved,
 }: ProfileSecurityTabProps) {
+  const isTabActive = active ?? open;
   const p = EXT_COPY[locale].profile;
   const extAuth = EXT_COPY[locale].auth;
   const toast = useToast();
   const pwFormRef = useRef<HTMLFormElement | null>(null);
   const emailFormRef = useRef<HTMLFormElement | null>(null);
+  const onPasskeyIdentityResolvedRef = useRef(onPasskeyIdentityResolved);
+  onPasskeyIdentityResolvedRef.current = onPasskeyIdentityResolved;
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  const fetchedForSessionRef = useRef(false);
+  const hasLoadedOnceRef = useRef(false);
 
   const [changingEmail, setChangingEmail] = useState(initialOpenEmailChange);
   const [newEmailInput, setNewEmailInput] = useState('');
@@ -93,7 +102,9 @@ export function ProfileSecurityTab({
   const [passkeys, setPasskeys] = useState<UserPasskeyDto[]>([]);
   const [passkeyRpId, setPasskeyRpId] = useState('');
   const [passkeyUserId, setPasskeyUserId] = useState('');
-  const [loadingPasskeys, setLoadingPasskeys] = useState(false);
+  const [loadingPasskeys, setLoadingPasskeys] = useState(
+    () => siteSettings.enable_passkeys,
+  );
   const [passkeySupported, setPasskeySupported] = useState(true);
   const [addingPasskey, setAddingPasskey] = useState(false);
   const [renamingPasskeyId, setRenamingPasskeyId] = useState<string | null>(null);
@@ -101,18 +112,25 @@ export function ProfileSecurityTab({
   const [savingPasskeyId, setSavingPasskeyId] = useState<string | null>(null);
   const [deletingPasskeyId, setDeletingPasskeyId] = useState<string | null>(null);
 
-  useAccessibleFormValidation(pwFormRef, [open]);
-  useAccessibleFormValidation(emailFormRef, [open, changingEmail, Boolean(emailCodeSentTo)]);
+  useAccessibleFormValidation(pwFormRef, [open, isTabActive]);
+  useAccessibleFormValidation(emailFormRef, [
+    open,
+    isTabActive,
+    changingEmail,
+    Boolean(emailCodeSentTo),
+  ]);
 
   useEffect(() => {
-    if (initialOpenEmailChange) {
+    if (open && isTabActive && initialOpenEmailChange) {
       setChangingEmail(true);
     }
-  }, [initialOpenEmailChange]);
+  }, [open, isTabActive, initialOpenEmailChange]);
 
   const loadPasskeys = useCallback(async () => {
     if (!siteSettings.enable_passkeys) return;
-    setLoadingPasskeys(true);
+    if (!hasLoadedOnceRef.current) {
+      setLoadingPasskeys(true);
+    }
     try {
       const [caps, res] = await Promise.all([
         detectPasskeyCapabilities(),
@@ -122,23 +140,40 @@ export function ProfileSecurityTab({
       setPasskeys(res.passkeys);
       setPasskeyRpId(res.rp_id);
       setPasskeyUserId(res.user_id);
-      onPasskeyIdentityResolved?.(res.rp_id, res.user_id);
+      onPasskeyIdentityResolvedRef.current?.(res.rp_id, res.user_id);
       void syncAcceptedPasskeys(
         res.rp_id,
         res.user_id,
         res.passkeys.map((pk) => pk.id),
       );
     } catch (err) {
-      toast.error(err);
+      toastRef.current.error(err);
     } finally {
+      hasLoadedOnceRef.current = true;
       setLoadingPasskeys(false);
     }
-  }, [onPasskeyIdentityResolved, siteSettings.enable_passkeys, toast]);
+  }, [siteSettings.enable_passkeys]);
 
   useEffect(() => {
-    if (!open || !siteSettings.enable_passkeys) return;
+    if (!open) {
+      fetchedForSessionRef.current = false;
+      setChangingEmail(false);
+      setNewEmailInput('');
+      setEmailCodeSentTo('');
+      setEmailOtpCode('');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setRenamingPasskeyId(null);
+      setRenamingPasskeyText('');
+      return;
+    }
+    if (!isTabActive || !siteSettings.enable_passkeys || fetchedForSessionRef.current) {
+      return;
+    }
+    fetchedForSessionRef.current = true;
     void loadPasskeys();
-  }, [open, siteSettings.enable_passkeys, loadPasskeys]);
+  }, [open, isTabActive, siteSettings.enable_passkeys, loadPasskeys]);
 
   const handleSendEmailChangeCode = async () => {
     const clean = normalizeEmail(newEmailInput);
@@ -359,11 +394,7 @@ export function ProfileSecurityTab({
     newPassword.length >= 8 && confirmPassword.length >= 8;
 
   return (
-    <div
-      role="tabpanel"
-      aria-labelledby="profile-tab-security"
-      className="mt-5 space-y-6"
-    >
+    <div className="mt-5 space-y-6">
       {/* 1. Email Address Change with New-Email OTP Verification */}
       <div className="p-4 rounded-xl bg-surface-raised border border-border-subtle space-y-3.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -511,7 +542,12 @@ export function ProfileSecurityTab({
           {!passkeySupported ? (
             <div className="text-xs text-ink-muted">{p.passkeyUnsupportedHint}</div>
           ) : loadingPasskeys ? (
-            <div className="h-12 rounded-xl bg-surface-sheet/70 animate-pulse" />
+            <div
+              aria-busy="true"
+              className="px-3 py-2.5 rounded-xl bg-surface-sheet/70 border border-transparent text-xs text-transparent select-none animate-pulse"
+            >
+              {'\u00A0'}
+            </div>
           ) : passkeys.length === 0 ? (
             <div className="px-3 py-2.5 rounded-xl bg-surface-sheet/60 border border-dashed border-border-subtle text-xs text-ink-muted">
               {p.passkeyEmptyText}

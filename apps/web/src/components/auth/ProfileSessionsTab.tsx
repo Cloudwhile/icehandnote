@@ -2,7 +2,7 @@
  * Decoupled Active Sessions Tab (`UserProfileModal` Tab: `'sessions'`).
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, clearAuthSession } from '../../lib/api';
 import { EXT_COPY } from '../../lib/i18n';
 import type { LocaleCode, UserSessionDto } from '../../lib/types';
@@ -13,6 +13,7 @@ import { formatAccountTimestamp } from './ProfileSecurityTab';
 
 export interface ProfileSessionsTabProps {
   open: boolean;
+  active?: boolean;
   locale: LocaleCode;
   onClose: () => void;
   onCurrentSessionRevoked?: () => void;
@@ -20,34 +21,50 @@ export interface ProfileSessionsTabProps {
 
 export function ProfileSessionsTab({
   open,
+  active,
   locale,
   onClose,
   onCurrentSessionRevoked,
 }: ProfileSessionsTabProps) {
+  const isTabActive = active ?? open;
   const p = EXT_COPY[locale].profile;
   const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  const fetchedForSessionRef = useRef(false);
+  const hasLoadedOnceRef = useRef(false);
 
   const [sessions, setSessions] = useState<UserSessionDto[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [revokingOthers, setRevokingOthers] = useState(false);
 
   const loadSessions = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnceRef.current) {
+      setLoading(true);
+    }
     try {
       const list = await api.listMySessions();
       setSessions(list);
     } catch (err) {
-      toast.error(err);
+      toastRef.current.error(err);
     } finally {
+      hasLoadedOnceRef.current = true;
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      fetchedForSessionRef.current = false;
+      return;
+    }
+    if (!isTabActive || fetchedForSessionRef.current) {
+      return;
+    }
+    fetchedForSessionRef.current = true;
     void loadSessions();
-  }, [open, loadSessions]);
+  }, [open, isTabActive, loadSessions]);
 
   const handleRevokeSession = async (session: UserSessionDto) => {
     if (revokingId) return;
@@ -85,11 +102,7 @@ export function ProfileSessionsTab({
   };
 
   return (
-    <div
-      role="tabpanel"
-      aria-labelledby="profile-tab-sessions"
-      className="mt-5 space-y-4"
-    >
+    <div className="mt-5 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1 flex-1 min-w-0">
           <h3 className="text-sm font-semibold text-ink-primary">
@@ -121,7 +134,7 @@ export function ProfileSessionsTab({
           {p.sessionsEmpty}
         </div>
       ) : (
-        <ul className="list-none p-0 space-y-2.5 max-h-80 overflow-y-auto pr-0.5">
+        <ul className="list-none p-0 space-y-2.5 max-h-80 overflow-y-auto ink-thin-scrollbar pr-0.5">
           {sessions.map((session) => (
             <li
               key={session.id}

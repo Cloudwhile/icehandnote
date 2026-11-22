@@ -45,6 +45,8 @@ export function RegisterFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+  const onStepChangeRef = useRef(onStepChange);
+  onStepChangeRef.current = onStepChange;
 
   const [step, setStep] = useState<'details' | 'otp'>('details');
   const [username, setUsername] = useState('');
@@ -65,8 +67,8 @@ export function RegisterFlowPanel({
   useAccessibleFormValidation(formRef, [step, settingsResolved]);
 
   useEffect(() => {
-    onStepChange(step);
-  }, [step, onStepChange]);
+    onStepChangeRef.current(step);
+  }, [step]);
 
   const requestRegisterCode = async (targetEmail: string): Promise<boolean> => {
     const cleanEmail = normalizeEmail(targetEmail);

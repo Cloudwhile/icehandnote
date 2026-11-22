@@ -66,6 +66,8 @@ export function LoginFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const conditionalAbortRef = useRef<AbortController | null>(null);
+  const onChallengeChangeRef = useRef(onChallengeChange);
+  onChallengeChangeRef.current = onChallengeChange;
 
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -91,8 +93,8 @@ export function LoginFlowPanel({
   useAccessibleFormValidation(formRef, [Boolean(loginChallenge), settingsResolved]);
 
   useEffect(() => {
-    onChallengeChange(Boolean(loginChallenge));
-  }, [loginChallenge, onChallengeChange]);
+    onChallengeChangeRef.current(Boolean(loginChallenge));
+  }, [loginChallenge]);
 
   // Hydrate pending OAuth Anomaly OTP challenge handed off from App.tsx
   useEffect(() => {
