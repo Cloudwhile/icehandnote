@@ -7,7 +7,7 @@
  *   + Optional custom badge text (`badge`) overriding the default stamp label.
  */
 
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { AlertKind } from '../../lib/types';
 import {
@@ -16,36 +16,36 @@ import {
   PostmarkOrnament,
   PushpinOrnament,
   resolveAlertAppearance,
+  type StickerToneTokens,
   TagEyeletOrnament,
   TornBottomEdge,
   WashiTapeOrnament,
 } from './StationeryStickers';
 
-interface NotebookAlertProps {
+export interface StickerCardFrameProps {
   kind: AlertKind;
-  stampText: string;
-  title: string;
-  bodyHtml: string;
-  detailSummary?: string | null;
-  detailHtml?: string | null;
   style?: string | null;
   tone?: string | null;
-  badge?: string | null;
+  className?: string;
+  topRightControl?: ReactNode;
+  children: (ctx: {
+    tokens: StickerToneTokens;
+  }) => ReactNode;
 }
 
-export function NotebookAlert({
+/**
+ * Shared physical stationery sticker shell (9 semantic kinds × 7 ornaments × 6 palettes),
+ * reused by both `<NotebookAlert>` (reader) and `<AlertBlockBody>` (in-place Studio editor).
+ */
+export function StickerCardFrame({
   kind,
-  stampText,
-  title,
-  bodyHtml,
-  detailSummary,
-  detailHtml,
   style: rawStyle,
   tone: rawTone,
-  badge,
-}: NotebookAlertProps) {
+  className = 'my-6 max-w-[68ch]',
+  topRightControl,
+  children,
+}: StickerCardFrameProps) {
   const { style, tokens } = resolveAlertAppearance(kind, rawStyle, rawTone);
-  const displayBadge = badge?.trim() || stampText;
 
   const customVars = {
     '--sticker-bg': tokens.bg,
@@ -80,7 +80,7 @@ export function NotebookAlert({
     <aside
       role="note"
       data-sticker-style={style}
-      className={`sticker-card my-6 max-w-[68ch] ${padClass}`}
+      className={`sticker-card ${padClass} ${className}`.trim()}
       style={{
         ...customVars,
         borderRadius: radiusStyle,
@@ -124,7 +124,7 @@ export function NotebookAlert({
         </div>
       )}
 
-      {/* 3. Corner Tape + Serrated Tear (`torn`) */}
+      {/* 3. Corner Tape (`torn`) */}
       {style === 'torn' && (
         <div className="pointer-events-none absolute -top-2 -start-2 z-10">
           <WashiTapeOrnament
@@ -178,6 +178,10 @@ export function NotebookAlert({
         </div>
       )}
 
+      {topRightControl && (
+        <div className="absolute top-2 end-2 z-10">{topRightControl}</div>
+      )}
+
       <div className="relative z-1 flex items-start gap-3">
         {/* Enclosed 32x32 Hand-Drawn Icon Stamp */}
         <div
@@ -191,7 +195,47 @@ export function NotebookAlert({
           {ALERT_DOODLE_ICONS[kind]}
         </div>
 
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1">{children({ tokens })}</div>
+      </div>
+
+      {style === 'torn' && (
+        <div className="mt-2.5 -mx-2">
+          <TornBottomEdge borderStroke={tokens.border} />
+        </div>
+      )}
+    </aside>
+  );
+}
+
+interface NotebookAlertProps {
+  kind: AlertKind;
+  stampText: string;
+  title: string;
+  bodyHtml: string;
+  detailSummary?: string | null;
+  detailHtml?: string | null;
+  style?: string | null;
+  tone?: string | null;
+  badge?: string | null;
+}
+
+export function NotebookAlert({
+  kind,
+  stampText,
+  title,
+  bodyHtml,
+  detailSummary,
+  detailHtml,
+  style: rawStyle,
+  tone: rawTone,
+  badge,
+}: NotebookAlertProps) {
+  const displayBadge = badge?.trim() || stampText;
+
+  return (
+    <StickerCardFrame kind={kind} style={rawStyle} tone={rawTone}>
+      {({ tokens }) => (
+        <>
           {/* Tier 1: Stamp Badge + Handwritten Sticker Title */}
           <div className="flex flex-wrap items-baseline gap-2">
             <span
@@ -253,14 +297,8 @@ export function NotebookAlert({
               </div>
             </details>
           )}
-        </div>
-      </div>
-
-      {style === 'torn' && (
-        <div className="mt-2.5 -mx-2">
-          <TornBottomEdge borderStroke={tokens.border} />
-        </div>
+        </>
       )}
-    </aside>
+    </StickerCardFrame>
   );
 }

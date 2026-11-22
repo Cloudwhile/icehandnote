@@ -16,6 +16,7 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { normalizeEmail } from '../../lib/email';
 import {
   EXT_COPY,
   getEnabledLocaleMetas,
@@ -294,6 +295,7 @@ export function StudioEditorPanel({
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState('');
   const [uploadingMdImage, setUploadingMdImage] = useState(false);
+  const [uploadingVisualImage, setUploadingVisualImage] = useState(false);
 
   const [savedSnapshot, setSavedSnapshot] = useState('');
   const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>({
@@ -710,18 +712,31 @@ export function StudioEditorPanel({
     handleVisualBlocksChange([...visualBlocks, createDefaultVisualBlock(kind)]);
   };
 
-  const handleAppendSectionTask = () => {
-    handleVisualBlocksChange([
-      ...visualBlocks,
-      {
+  const handleUploadVisualImage = async (file: File) => {
+    if (uploadingVisualImage) return;
+    setUploadingVisualImage(true);
+    try {
+      const uploaded = await api.uploadStudioMedia(file);
+      const alt = file.name.replace(/\.[^.]+$/, '') || 'image';
+      const nextImg: VisualBlock = {
         id: createVisualId(),
-        type: 'heading',
-        level: 2,
-        text: '',
-        isTask: true,
-        defaultChecked: false,
-      },
-    ]);
+        type: 'image',
+        src: uploaded.url,
+        alt,
+        caption: '',
+        marginNote: '',
+      };
+      setVisualBlocks((prev) => {
+        const updated = [...prev, nextImg];
+        setDocBody(serializeVisualBlocksToMarkdown(updated));
+        return updated;
+      });
+      toast.success(extCopy.studio.imageUploadedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setUploadingVisualImage(false);
+    }
   };
 
   const handleTogglePreviewSplit = () => {
@@ -895,8 +910,12 @@ export function StudioEditorPanel({
 
   const handleInviteCollaborator = async (e: FormEvent) => {
     e.preventDefault();
-    const cleanEmail = inviteEmail.trim();
-    if (!cleanEmail || inviting) return;
+    const cleanEmail = normalizeEmail(inviteEmail);
+    if (!cleanEmail) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (inviting) return;
     setInviting(true);
     try {
       const res = await api.createCollaboratorInvite(
@@ -1293,8 +1312,9 @@ export function StudioEditorPanel({
             <VisualBlockToolStrip
               locale={locale}
               blockCount={visualBlocks.length}
+              uploadingImage={uploadingVisualImage}
               onInsertBlock={handleAppendVisualBlock}
-              onInsertSectionTask={handleAppendSectionTask}
+              onUploadImageFile={(file) => void handleUploadVisualImage(file)}
             />
           ) : (
             <div className="flex flex-wrap items-center gap-1.5">
@@ -1419,32 +1439,45 @@ export function StudioEditorPanel({
             }
           >
             <div className="min-w-0">
-              {/* Panel 1: Visual Block Canvas */}
+              {/* Panel 1: Hand-Drawn Stationery Flow Writing Canvas */}
               <div
                 role="tabpanel"
                 aria-labelledby={`${modeTabPrefix}-visual`}
                 hidden={editorMode !== 'visual'}
+                className="min-w-0 max-w-full"
               >
-                <div className="editor-tabpanel-body studio-panel p-5 sm:p-7 space-y-6">
-                  <div className="pb-4 border-b border-dashed border-border-subtle space-y-1.5">
-                    <input
-                      type="text"
-                      aria-label={s.titleInputLabel}
-                      value={docTitle}
-                      onChange={(e) => setDocTitle(e.target.value)}
-                      placeholder={extCopy.studio.editorCanvasTitlePlaceholder}
-                      style={{ fontFamily: 'var(--font-hand)' }}
-                      className="w-full bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-tight tracking-tight"
-                    />
-                    <MarkerUnderline variant="canvas" />
-                  </div>
+                <div className="editor-tabpanel-body notebook-sheet-stack">
+                  <div className="notebook-sheet-card p-5 sm:p-8 lg:p-10 space-y-6">
+                    <div className="pb-4 border-b border-dashed border-border-subtle space-y-2">
+                      <input
+                        type="text"
+                        size={1}
+                        aria-label={s.titleInputLabel}
+                        value={docTitle}
+                        onChange={(e) => setDocTitle(e.target.value)}
+                        placeholder={extCopy.studio.editorCanvasTitlePlaceholder}
+                        style={{ fontFamily: 'var(--font-hand)' }}
+                        className="w-full min-w-0 bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-tight tracking-tight"
+                      />
+                      <MarkerUnderline variant="canvas" />
+                      <textarea
+                        rows={1}
+                        aria-label={s.summaryInputLabel}
+                        value={docSummary}
+                        onChange={(e) => setDocSummary(e.target.value)}
+                        placeholder={extCopy.studio.flowEditor.summaryInlinePlaceholder}
+                        className="flow-editor-textarea text-sm text-ink-secondary leading-relaxed placeholder:text-ink-muted/60"
+                      />
+                    </div>
 
-                  <VisualBlockEditor
-                    locale={locale}
-                    blocks={visualBlocks}
-                    onChange={handleVisualBlocksChange}
-                    hideTopInserter
-                  />
+                    <VisualBlockEditor
+                      locale={locale}
+                      theme={theme}
+                      blocks={visualBlocks}
+                      onChange={handleVisualBlocksChange}
+                      hideTopInserter
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1453,6 +1486,7 @@ export function StudioEditorPanel({
                 role="tabpanel"
                 aria-labelledby={`${modeTabPrefix}-markdown`}
                 hidden={editorMode !== 'markdown'}
+                className="min-w-0 max-w-full"
               >
                 <div className="editor-tabpanel-body studio-panel p-5 space-y-3">
                   <div className="flex items-baseline justify-between gap-2">
@@ -1472,6 +1506,30 @@ export function StudioEditorPanel({
                     rows={26}
                     value={docBody}
                     onChange={(e) => setDocBody(e.target.value)}
+                    onPaste={(e) => {
+                      const img = Array.from(e.clipboardData?.items ?? []).find(
+                        (it) => it.kind === 'file' && it.type.startsWith('image/'),
+                      );
+                      const file = img?.getAsFile();
+                      if (file) {
+                        e.preventDefault();
+                        void handleUploadMdImage(file);
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      if (e.dataTransfer?.types?.includes('Files')) {
+                        e.preventDefault();
+                      }
+                    }}
+                    onDrop={(e) => {
+                      const file = Array.from(e.dataTransfer?.files ?? []).find(
+                        (f) => f.type.startsWith('image/'),
+                      );
+                      if (file) {
+                        e.preventDefault();
+                        void handleUploadMdImage(file);
+                      }
+                    }}
                     spellCheck={false}
                     className="ink-field-input min-h-[34rem] p-4 font-mono text-xs sm:text-sm leading-relaxed resize-y"
                   />

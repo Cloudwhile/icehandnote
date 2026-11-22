@@ -15,9 +15,13 @@ interface PopupMenuProps {
   triggerAriaLabel?: string;
   triggerTitle?: string;
   triggerClassName?: string;
+  triggerStyle?: React.CSSProperties;
+  onTriggerPointerDown?: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onTriggerClickCapture?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   showChevron?: boolean;
   align?: 'start' | 'end';
   minWidthClass?: string;
+  variant?: 'menu' | 'panel';
   children: (helpers: { close: (fromPointer?: boolean) => void }) => ReactNode;
 }
 
@@ -46,9 +50,13 @@ export function PopupMenu({
   triggerAriaLabel,
   triggerTitle,
   triggerClassName = '',
+  triggerStyle,
+  onTriggerPointerDown,
+  onTriggerClickCapture,
   showChevron = true,
   align = 'end',
   minWidthClass = '',
+  variant = 'menu',
   children,
 }: PopupMenuProps) {
   const triggerId = useId();
@@ -147,13 +155,13 @@ export function PopupMenu({
     return () => pop.removeEventListener('toggle', onToggle);
   }, [getEnabledItems, positionFallback]);
 
-  // Install ARIA roles + arrow/Home/End fallback ONLY when native focusgroup is unsupported
+  // Install ARIA roles + arrow/Home/End fallback ONLY when in 'menu' variant and native focusgroup is unsupported
   useEffect(() => {
     const group = groupRef.current;
     if (!group) return;
 
-    const nativeFg = supportsFocusgroup();
-    if (!nativeFg) {
+    const nativeFg = variant === 'menu' && supportsFocusgroup();
+    if (variant === 'menu' && !nativeFg) {
       group.setAttribute('role', 'menu');
       group.querySelectorAll('button:not([role]), a:not([role])').forEach((el) => {
         el.setAttribute('role', 'menuitem');
@@ -167,6 +175,7 @@ export function PopupMenu({
         closeMenu(false);
         return;
       }
+      if (variant !== 'menu') return;
       if (event.key === 'Tab') {
         popoverRef.current?.hidePopover();
         return;
@@ -196,7 +205,7 @@ export function PopupMenu({
 
     group.addEventListener('keydown', onKeyDown, true);
     return () => group.removeEventListener('keydown', onKeyDown, true);
-  }, [closeMenu, getEnabledItems, open]);
+  }, [closeMenu, getEnabledItems, open, variant]);
 
   // Close when focus leaves the menu system
   useEffect(() => {
@@ -215,14 +224,20 @@ export function PopupMenu({
     return () => document.removeEventListener('focusin', onFocusIn);
   }, [open]);
 
-  const handleTriggerPointerDown = () => {
+  const handleTriggerPointerDown = (
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
     pointerPressedRef.current = true;
     enterOnOpenRef.current = false;
+    onTriggerPointerDown?.(event);
   };
 
   const handleTriggerClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onTriggerClickCapture?.(event);
+    if (event.defaultPrevented) return;
+
     const isKeyboard = event.detail === 0;
-    if (isKeyboard && !open) {
+    if (variant === 'menu' && isKeyboard && !open) {
       enterOnOpenRef.current = true;
     }
 
@@ -249,7 +264,7 @@ export function PopupMenu({
   };
 
   const handleTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === 'ArrowDown') {
+    if (variant === 'menu' && event.key === 'ArrowDown') {
       event.preventDefault();
       if (open) {
         getEnabledItems()[0]?.focus({ preventScroll: true });
@@ -266,10 +281,11 @@ export function PopupMenu({
         ref={triggerRef}
         id={triggerId}
         type="button"
-        aria-haspopup="menu"
+        aria-haspopup={variant === 'menu' ? 'menu' : undefined}
         aria-expanded={open}
         aria-label={triggerAriaLabel}
         title={triggerTitle}
+        style={triggerStyle}
         onPointerDown={handleTriggerPointerDown}
         onClick={handleTriggerClick}
         onKeyDown={handleTriggerKeyDown}
@@ -297,13 +313,17 @@ export function PopupMenu({
         id={menuId}
         popover="auto"
         data-align={align}
-        className={`ink-menu-popover ${minWidthClass}`}
+        className={`ink-menu-popover ${
+          variant === 'panel' ? 'ink-menu-popover--panel' : ''
+        } ${minWidthClass}`.trim()}
       >
         <div
           ref={groupRef}
           aria-labelledby={triggerId}
-          className="ink-menu-list"
-          {...({ focusgroup: 'menu nomemory' } as Record<string, string>)}
+          className={variant === 'menu' ? 'ink-menu-list' : ''}
+          {...(variant === 'menu'
+            ? ({ focusgroup: 'menu nomemory' } as Record<string, string>)
+            : {})}
         >
           {children({ close: closeMenu })}
         </div>

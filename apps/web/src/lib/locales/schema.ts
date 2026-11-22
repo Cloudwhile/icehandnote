@@ -835,6 +835,28 @@ export interface ExtendedMessages {
     editorStatusPublished: string;
     editorStatusDraft: string;
     editorCanvasTitlePlaceholder: string;
+    flowEditor: {
+      slashPlaceholder: string;
+      firstParagraphPlaceholder: string;
+      summaryInlinePlaceholder: string;
+      slashMenuTitle: string;
+      slashEmpty: string;
+      turnIntoLabel: string;
+      stylePopoverBtn: string;
+      addMarginBtn: string;
+      removeMarginBtn: string;
+      toggleDetailBtn: string;
+      editDiagramBtn: string;
+      hideDiagramEditorBtn: string;
+      dropImageHint: string;
+      emptyImageDropHint: string;
+      quickToolbarHint: string;
+      dragHandleAria: string;
+      insertHandleAria: string;
+      addStepDetailBtn: string;
+      changeImageBtn: string;
+      pasteImageUrlBtn: string;
+    };
   };
   users: {
     createUserBtn: string;

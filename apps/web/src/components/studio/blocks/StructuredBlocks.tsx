@@ -1,197 +1,311 @@
 /*
- * Structured Visual Block Bodies:
- * - `StepsBlockBody`: Checkable notebook steps (`:::steps[...]`).
- * - `AlertBlockBody`: 9-kind stationery alerts with physical silhouette + `<ToneSwatchPicker>` + collapsible details.
- * - `CodeCardBlockBody`: Notebook code sheets (`washi`, `ruled`, `clip`, etc.) + `<AuthorMarginNoteInput>`.
- * - `ListBlockBody`: Ordered / Unordered list editor using `<SegmentedControl>`.
+ * Hand-Drawn Stationery WYSIWYG Structured Block Bodies:
+ * - `AlertBlockBody`: Renders in-place inside `.sticker-card` (`<StickerCardFrame>`) with real stamp badges,
+ *   svg ornaments, and clean style/tone/disclosure controls tucked inside `<AlertStylePopover>`.
+ * - `CodeCardBlockBody`: Renders in-place inside `.washi-code-surface` (`<WashiCodeFrame>`) with drafting grid/ruled
+ *   paper lines, `<CodeStylePopover>`, and optional side `<InlineAuthorMarginSticky>`.
+ * - `StepsBlockBody`: Renders inside real `.notebook-task-paragraph` / `.notebook-steps-card` with Enter-to-add,
+ *   Enter-on-empty to exit, Backspace cleanup, and on-demand `+ Detail` reveal.
+ * - `ListBlockBody`: Borderless live `✦` / `1.` items directly on the stationery sheet with Enter/Backspace flow.
  */
 
-import { UI_COPY } from '../../../lib/i18n';
+import { type KeyboardEvent as ReactKeyboardEvent, useRef, useState } from 'react';
+import { EXT_COPY, UI_COPY } from '../../../lib/i18n';
 import type { LocaleCode } from '../../../lib/types';
 import {
   createVisualId,
+  normalizeCodeCardStyle,
   type VisualBlock,
   type VisualStepItem,
 } from '../../../lib/visualBlocks';
-import {
-  ALERT_DOODLE_ICONS,
-  ALL_ALERT_KINDS,
-  ALL_CODE_CARD_STYLES,
-  ALL_STICKER_STYLES,
-  DEFAULT_ALERT_PRESET,
-  STICKER_TONE_TOKENS,
-} from '../../notebook/StationeryStickers';
-import { ToneSwatchPicker } from '../../notebook/ToneSwatchPicker';
-import {
-  IconArrowDown,
-  IconArrowUp,
-  IconPlus,
-  IconTrash,
-} from '../../ui/Icons';
+import { StickerCardFrame } from '../../notebook/NotebookAlert';
+import { WashiCodeFrame } from '../../notebook/WashiCodeCard';
+import { IconPlus, IconTrash } from '../../ui/Icons';
 import { SegmentedControl } from '../../ui/Tabs';
-import { AuthorMarginNoteInput } from './AuthorMarginNoteInput';
+import {
+  AlertStylePopover,
+  CodeStylePopover,
+  InlineAuthorMarginSticky,
+  isImeComposing,
+  useAutoResizeTextarea,
+} from './BlockFloatingControls';
+import type { FlowBlockHandlers } from './TextAndMediaBlocks';
 
 export function StepsBlockBody({
   block,
   locale,
   taskStartOffset,
   onUpdate,
+  flow,
 }: {
   block: Extract<VisualBlock, { type: 'steps' }>;
   locale: LocaleCode;
   taskStartOffset: number;
   onUpdate: (next: Extract<VisualBlock, { type: 'steps' }>) => void;
+  flow: FlowBlockHandlers;
 }) {
   const v = UI_COPY[locale].studio.visual;
+  const extFlow = EXT_COPY[locale].studio.flowEditor;
+  const lastCompEndRef = useRef<number | null>(null);
+  const [expandedDetailIds, setExpandedDetailIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const scheduleItemFocus = (idx: number, caret: number | 'end' = 0) => {
+    requestAnimationFrame(() => {
+      const container = document.querySelector<HTMLElement>(
+        `[data-flow-block-id="${block.id}"]`,
+      );
+      const input = container?.querySelector<HTMLInputElement>(
+        `[data-flow-step-idx="${idx}"]`,
+      );
+      if (input) {
+        input.focus({ preventScroll: true });
+        const pos = caret === 'end' ? input.value.length : caret;
+        input.setSelectionRange(pos, pos);
+      }
+    });
+  };
+
+  const isMulti = block.items.length > 1 || block.title.trim().length > 0;
+  const shellClass = isMulti ? 'notebook-steps-card' : 'notebook-task-paragraph';
 
   return (
-    <div className="space-y-3">
-      {(block.items.length > 1 || block.title.trim().length > 0) && (
-        <div>
-          <label className="block mb-1 text-xs font-semibold text-ink-secondary">
-            {v.stepsTitleLabel}
-          </label>
+    <div className={`${shellClass} my-1!`}>
+      {isMulti && (
+        <div className="px-4 py-2.5 border-b border-dashed border-border-subtle bg-surface-sheet/80 flex items-center justify-between gap-2">
           <input
             type="text"
+            size={1}
             value={block.title}
             onChange={(e) => onUpdate({ ...block, title: e.target.value })}
-            placeholder={v.stepsTitlePlaceholder}
-            className="w-full px-3 py-2 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-sm font-semibold ink-input-inset"
+            placeholder={v.stepsTitlePlaceholder || v.types.steps}
+            className="flex-1 min-w-0 bg-transparent border-0 p-0 text-sm font-semibold text-ink-primary placeholder:text-ink-muted/70 focus:outline-none"
           />
+          <span className="font-mono text-xs text-ink-muted tabular-nums shrink-0">
+            {block.items.filter((it) => it.defaultChecked).length}/{block.items.length}
+          </span>
         </div>
       )}
 
-      <div className="space-y-2">
+      <div>
         {block.items.map((stepItem, sIdx) => {
           const globalTaskNum = taskStartOffset + sIdx + 1;
+          const showDetail =
+            stepItem.detail.length > 0 || expandedDetailIds.has(stepItem.id);
+
           const updateStepItem = (patch: Partial<VisualStepItem>) => {
-            const nextItems = block.items.map((it, i) =>
-              i === sIdx ? { ...it, ...patch } : it,
-            );
-            onUpdate({ ...block, items: nextItems });
-          };
-          const moveStepItem = (delta: -1 | 1) => {
-            const target = sIdx + delta;
-            if (target < 0 || target >= block.items.length) return;
-            const nextItems = [...block.items];
-            const [m] = nextItems.splice(sIdx, 1);
-            nextItems.splice(target, 0, m);
-            onUpdate({ ...block, items: nextItems });
-          };
-          const removeStepItem = () => {
-            const nextItems = block.items.filter((_, i) => i !== sIdx);
             onUpdate({
               ...block,
-              items:
-                nextItems.length > 0
-                  ? nextItems
-                  : [
-                      {
-                        id: createVisualId('st'),
-                        title: '',
-                        detail: '',
-                        defaultChecked: false,
-                      },
-                    ],
+              items: block.items.map((it, i) =>
+                i === sIdx ? { ...it, ...patch } : it,
+              ),
             });
           };
 
           return (
             <div
               key={stepItem.id}
-              className="p-2.5 rounded-xl bg-surface-sheet border border-border-subtle flex items-start gap-2"
+              data-checked={stepItem.defaultChecked ? 'true' : 'false'}
+              className="notebook-step-row group cursor-default!"
             >
-              <div className="flex flex-col items-center gap-1 pt-0.5 shrink-0">
-                <span className="font-mono text-xs font-semibold text-link-ink tabular-nums">
-                  {String(globalTaskNum).padStart(2, '0')}
-                </span>
-                <label
-                  title={v.defaultCheckedTitle}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center hover:bg-surface-raised cursor-pointer transition-colors"
-                >
-                  <input
-                    type="checkbox"
-                    checked={stepItem.defaultChecked}
-                    onChange={(e) =>
-                      updateStepItem({ defaultChecked: e.target.checked })
-                    }
-                    aria-label={v.defaultCheckedTitle}
-                    className="w-4 h-4 cursor-pointer"
-                  />
-                </label>
-              </div>
+              <input
+                type="checkbox"
+                checked={stepItem.defaultChecked}
+                onChange={(e) =>
+                  updateStepItem({ defaultChecked: e.target.checked })
+                }
+                aria-label={v.defaultCheckedTitle}
+                title={v.defaultCheckedTitle}
+                className="notebook-step-checkbox mt-1!"
+              />
 
-              <div className="flex-1 min-w-0 space-y-1.5">
+              <span className="font-mono text-xs font-semibold text-link-ink mt-1 shrink-0 tabular-nums">
+                {String(globalTaskNum).padStart(2, '0')}.
+              </span>
+
+              <div className="flex-1 min-w-0 space-y-1">
                 <input
                   type="text"
+                  size={1}
+                  data-flow-input={sIdx === 0 ? 'primary' : undefined}
+                  data-flow-step-idx={sIdx}
                   value={stepItem.title}
+                  onCompositionEnd={(e) => {
+                    lastCompEndRef.current = e.timeStamp;
+                  }}
                   onChange={(e) => updateStepItem({ title: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (isImeComposing(e, lastCompEndRef.current)) return;
+                    const start = e.currentTarget.selectionStart ?? 0;
+                    const end = e.currentTarget.selectionEnd ?? 0;
+
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (!stepItem.title.trim()) {
+                        if (block.items.length === 1) {
+                          flow.onReplaceBlock(
+                            {
+                              id: block.id,
+                              type: 'paragraph',
+                              text: '',
+                              marginNote: '',
+                            },
+                            { caret: 0 },
+                          );
+                        } else {
+                          const nextItems = block.items.filter((_, i) => i !== sIdx);
+                          flow.onCommitAndInsertAfter(
+                            { ...block, items: nextItems },
+                            {
+                              id: createVisualId(),
+                              type: 'paragraph',
+                              text: '',
+                              marginNote: '',
+                            },
+                            0,
+                          );
+                        }
+                        return;
+                      }
+
+                      const head = stepItem.title.slice(0, start);
+                      const tail = stepItem.title.slice(end);
+                      const nextItems = [...block.items];
+                      nextItems[sIdx] = { ...stepItem, title: head };
+                      nextItems.splice(sIdx + 1, 0, {
+                        id: createVisualId('st'),
+                        title: tail,
+                        detail: '',
+                        defaultChecked: false,
+                      });
+                      onUpdate({ ...block, items: nextItems });
+                      scheduleItemFocus(sIdx + 1, 0);
+                      return;
+                    }
+
+                    if (
+                      e.key === 'Backspace' &&
+                      start === 0 &&
+                      end === 0 &&
+                      !stepItem.title &&
+                      !stepItem.detail
+                    ) {
+                      e.preventDefault();
+                      if (block.items.length <= 1) {
+                        flow.onReplaceBlock(
+                          {
+                            id: block.id,
+                            type: 'paragraph',
+                            text: '',
+                            marginNote: '',
+                          },
+                          { caret: 0 },
+                        );
+                      } else {
+                        const prevIdx = Math.max(0, sIdx - 1);
+                        const nextItems = block.items.filter((_, i) => i !== sIdx);
+                        onUpdate({ ...block, items: nextItems });
+                        scheduleItemFocus(prevIdx, 'end');
+                      }
+                      return;
+                    }
+
+                    if (e.key === 'ArrowUp' && sIdx > 0) {
+                      e.preventDefault();
+                      scheduleItemFocus(sIdx - 1, 'end');
+                    } else if (e.key === 'ArrowUp' && sIdx === 0 && start === 0) {
+                      e.preventDefault();
+                      flow.onMoveFocusVertical(-1);
+                    } else if (
+                      e.key === 'ArrowDown' &&
+                      sIdx < block.items.length - 1
+                    ) {
+                      e.preventDefault();
+                      scheduleItemFocus(sIdx + 1, 0);
+                    } else if (
+                      e.key === 'ArrowDown' &&
+                      sIdx === block.items.length - 1 &&
+                      start === stepItem.title.length
+                    ) {
+                      e.preventDefault();
+                      flow.onMoveFocusVertical(1);
+                    }
+                  }}
                   placeholder={v.stepItemTitlePlaceholder}
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-surface-raised text-ink-primary border border-border-subtle text-sm"
+                  className="w-full min-w-0 bg-transparent border-0 p-0 text-sm text-ink-primary font-semibold placeholder:font-normal placeholder:text-ink-muted/65 focus:outline-none"
                 />
-                <input
-                  type="text"
-                  value={stepItem.detail}
-                  onChange={(e) => updateStepItem({ detail: e.target.value })}
-                  placeholder={v.stepItemDetailPlaceholder}
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-surface-raised text-ink-secondary border border-border-subtle text-xs"
-                />
+
+                {showDetail && (
+                  <input
+                    type="text"
+                    size={1}
+                    value={stepItem.detail}
+                    onChange={(e) => updateStepItem({ detail: e.target.value })}
+                    placeholder={v.stepItemDetailPlaceholder}
+                    className="w-full min-w-0 bg-transparent border-0 p-0 text-xs text-ink-secondary placeholder:text-ink-muted/65 focus:outline-none"
+                  />
+                )}
               </div>
 
-              <div className="flex flex-col gap-0.5 shrink-0">
-                <button
-                  type="button"
-                  disabled={sIdx === 0}
-                  onClick={() => moveStepItem(-1)}
-                  aria-label={v.moveUp}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised disabled:opacity-35 cursor-pointer"
-                >
-                  <IconArrowUp className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  disabled={sIdx === block.items.length - 1}
-                  onClick={() => moveStepItem(1)}
-                  aria-label={v.moveDown}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised disabled:opacity-35 cursor-pointer"
-                >
-                  <IconArrowDown className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={removeStepItem}
-                  aria-label={v.deleteBlock}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger hover:bg-surface-raised cursor-pointer"
-                >
-                  <IconTrash className="w-3.5 h-3.5" />
-                </button>
+              <div className="flow-hover-controls flex items-center gap-1 shrink-0">
+                {!showDetail && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedDetailIds((prev) => new Set(prev).add(stepItem.id))
+                    }
+                    className="min-h-7 px-2 py-0.5 rounded-lg text-xs text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer"
+                  >
+                    {extFlow.addStepDetailBtn}
+                  </button>
+                )}
+                {block.items.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdate({
+                        ...block,
+                        items: block.items.filter((_, i) => i !== sIdx),
+                      })
+                    }
+                    aria-label={v.deleteBlock}
+                    className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger hover:bg-surface-raised cursor-pointer"
+                  >
+                    <IconTrash className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
           );
         })}
       </div>
 
-      <button
-        type="button"
-        onClick={() =>
-          onUpdate({
-            ...block,
-            items: [
-              ...block.items,
-              {
-                id: createVisualId('st'),
-                title: '',
-                detail: '',
-                defaultChecked: false,
-              },
-            ],
-          })
-        }
-        className="min-h-8 px-3 py-1.5 rounded-lg text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-link-ink inline-flex items-center gap-1.5 cursor-pointer"
-      >
-        <IconPlus className="w-3.5 h-3.5" />
-        <span>{v.addStepItem}</span>
-      </button>
+      <div className="px-3.5 py-2 border-t border-dashed border-border-subtle/70 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            const nextIdx = block.items.length;
+            onUpdate({
+              ...block,
+              items: [
+                ...block.items,
+                {
+                  id: createVisualId('st'),
+                  title: '',
+                  detail: '',
+                  defaultChecked: false,
+                },
+              ],
+            });
+            scheduleItemFocus(nextIdx, 0);
+          }}
+          className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle inline-flex items-center gap-1 cursor-pointer transition-colors"
+        >
+          <IconPlus className="w-3.5 h-3.5" />
+          <span>{v.addStepItem}</span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -207,153 +321,111 @@ export function AlertBlockBody({
 }) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const detailRef = useRef<HTMLTextAreaElement | null>(null);
+  const [detailForcedOpen, setDetailForcedOpen] = useState(false);
+
+  const hasDetailContent = Boolean(
+    block.detailSummary.trim() || block.detailBody.trim(),
+  );
+  const showDetail = detailForcedOpen || hasDetailContent;
+  const displayBadge = block.badge.trim() || copy.alertStamps[block.kind];
+
+  useAutoResizeTextarea(bodyRef, block.body);
+  useAutoResizeTextarea(detailRef, block.detailBody);
 
   return (
-    <div className="space-y-3">
-      {/* 1. Sticker Semantic Type (9 kinds) */}
-      <div
-        role="group"
-        aria-label={v.alertKindLabel}
-        className="flex flex-wrap gap-1.5"
-      >
-        {ALL_ALERT_KINDS.map((kind) => {
-          const active = block.kind === kind;
-          const presetTone = block.tone || DEFAULT_ALERT_PRESET[kind].tone;
-          const tok = STICKER_TONE_TOKENS[presetTone];
-          return (
-            <button
-              key={kind}
-              type="button"
-              aria-pressed={active}
-              onClick={() => onUpdate({ ...block, kind })}
-              className="min-h-7 px-2.5 py-0.5 rounded-full text-xs font-semibold border inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-              style={
-                active
-                  ? {
-                      backgroundColor: tok.badgeBg,
-                      color: tok.badgeFg,
-                      borderColor: tok.border,
-                    }
-                  : {
-                      backgroundColor: 'var(--surface-sheet)',
-                      color: 'var(--ink-muted)',
-                      borderColor: 'var(--border-subtle)',
-                    }
+    <StickerCardFrame
+      kind={block.kind}
+      style={block.style}
+      tone={block.tone}
+      className="my-2 w-full"
+      topRightControl={
+        <div className="flow-hover-controls">
+          <AlertStylePopover
+            block={block}
+            locale={locale}
+            detailOpen={showDetail}
+            onToggleDetail={() => {
+              if (showDetail) {
+                setDetailForcedOpen(false);
+                onUpdate({ ...block, detailSummary: '', detailBody: '' });
+              } else {
+                setDetailForcedOpen(true);
               }
+            }}
+            onUpdate={onUpdate}
+          />
+        </div>
+      }
+    >
+      {({ tokens }) => (
+        <div className="space-y-1.5 pe-9 sm:pe-20">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span
+              className="font-hand text-xs sm:text-sm font-semibold tracking-wide px-2 py-0.5 rounded border border-dashed shrink-0"
+              style={{
+                backgroundColor: tokens.badgeBg,
+                color: tokens.badgeFg,
+                borderColor: tokens.border,
+              }}
             >
-              <span className="scale-90 inline-flex">
-                {ALERT_DOODLE_ICONS[kind]}
-              </span>
-              <span>{copy.alertStamps[kind]}</span>
-            </button>
-          );
-        })}
-      </div>
+              {displayBadge}
+            </span>
 
-      {/* 2. Physical Sticker Silhouette + Paper Tone Swatches */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 p-2.5 rounded-xl bg-surface-sheet border border-border-subtle">
-        <div
-          role="group"
-          aria-label={v.stickerStyleLabel}
-          className="flex flex-wrap items-center gap-1"
-        >
-          <button
-            type="button"
-            aria-pressed={block.style === ''}
-            onClick={() => onUpdate({ ...block, style: '' })}
-            className={`min-h-7 px-2 py-0.5 rounded-md text-xs border cursor-pointer transition-colors ${
-              block.style === ''
-                ? 'font-semibold bg-action-subtle text-link-ink border-border-ink'
-                : 'bg-surface-raised/60 text-ink-muted border-border-subtle hover:text-ink-primary'
-            }`}
-          >
-            {v.stickerAutoOption}
-          </button>
-          {ALL_STICKER_STYLES.map((st) => {
-            const active = block.style === st;
-            return (
-              <button
-                key={st}
-                type="button"
-                aria-pressed={active}
-                onClick={() => onUpdate({ ...block, style: st })}
-                className={`min-h-7 px-2 py-0.5 rounded-md text-xs border cursor-pointer transition-colors ${
-                  active
-                    ? 'font-semibold bg-action-subtle text-link-ink border-border-ink'
-                    : 'bg-surface-raised/60 text-ink-muted border-border-subtle hover:text-ink-primary'
-                }`}
-              >
-                {copy.stickerStyles[st]}
-              </button>
-            );
-          })}
-        </div>
+            <input
+              type="text"
+              size={1}
+              value={block.title}
+              onChange={(e) => onUpdate({ ...block, title: e.target.value })}
+              placeholder={v.alertTitlePlaceholder}
+              className="flex-1 min-w-24 bg-transparent border-0 p-0 font-hand text-base sm:text-lg font-semibold leading-snug focus:outline-none placeholder:opacity-55"
+              style={{ color: tokens.title }}
+            />
+          </div>
 
-        <ToneSwatchPicker
-          value={block.tone}
-          onChange={(nextTone) => onUpdate({ ...block, tone: nextTone })}
-          copy={copy}
-          ariaLabel={v.stickerToneLabel}
-          autoOptionLabel={v.stickerAutoOption}
-          ringOffsetClass="ring-offset-surface-sheet"
-        />
-      </div>
-
-      {/* 3. Title + Optional Custom Stamp Badge */}
-      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
-        <div className="sm:col-span-9">
-          <input
-            type="text"
-            value={block.title}
-            onChange={(e) => onUpdate({ ...block, title: e.target.value })}
-            placeholder={v.alertTitlePlaceholder}
-            className="w-full px-3 py-2 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-sm font-semibold ink-input-inset"
-          />
-        </div>
-        <div className="sm:col-span-3">
-          <input
-            type="text"
-            maxLength={24}
-            value={block.badge}
-            onChange={(e) => onUpdate({ ...block, badge: e.target.value })}
-            aria-label={v.stickerBadgePlaceholder}
-            placeholder={
-              copy.alertStamps[block.kind] || v.stickerBadgePlaceholder
-            }
-            className="w-full px-2.5 py-2 rounded-xl bg-surface-sheet text-ink-secondary border border-border-subtle text-xs font-hand font-semibold"
-          />
-        </div>
-      </div>
-
-      <textarea
-        rows={Math.min(8, Math.max(2, block.body.split('\n').length + 1))}
-        value={block.body}
-        onChange={(e) => onUpdate({ ...block, body: e.target.value })}
-        placeholder={v.alertBodyPlaceholder}
-        className="w-full p-3 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle text-sm leading-relaxed ink-input-inset"
-      />
-
-      <div className="pt-1 border-t border-dashed border-border-subtle space-y-2">
-        <input
-          type="text"
-          value={block.detailSummary}
-          onChange={(e) =>
-            onUpdate({ ...block, detailSummary: e.target.value })
-          }
-          placeholder={v.alertDetailSummaryPlaceholder}
-          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-sheet text-ink-secondary border border-border-subtle text-xs"
-        />
-        {(block.detailSummary.trim() || block.detailBody.trim()) && (
           <textarea
+            ref={bodyRef}
+            data-flow-input="primary"
             rows={2}
-            value={block.detailBody}
-            onChange={(e) => onUpdate({ ...block, detailBody: e.target.value })}
-            placeholder={v.alertDetailBodyPlaceholder}
-            className="w-full p-2.5 rounded-lg bg-surface-sheet text-ink-secondary border border-border-subtle text-xs leading-relaxed"
+            value={block.body}
+            onChange={(e) => onUpdate({ ...block, body: e.target.value })}
+            placeholder={v.alertBodyPlaceholder}
+            className="flow-editor-textarea text-sm leading-relaxed placeholder:opacity-60"
+            style={{ color: tokens.body }}
           />
-        )}
-      </div>
-    </div>
+
+          {showDetail && (
+            <div
+              className="mt-2 pt-2 border-t border-dashed space-y-1.5"
+              style={{ borderColor: tokens.border }}
+            >
+              <input
+                type="text"
+                value={block.detailSummary}
+                onChange={(e) =>
+                  onUpdate({ ...block, detailSummary: e.target.value })
+                }
+                placeholder={v.alertDetailSummaryPlaceholder}
+                className="w-full bg-transparent border-0 p-0 text-xs font-semibold focus:outline-none placeholder:opacity-65"
+                style={{ color: tokens.title }}
+              />
+              <textarea
+                ref={detailRef}
+                rows={2}
+                value={block.detailBody}
+                onChange={(e) =>
+                  onUpdate({ ...block, detailBody: e.target.value })
+                }
+                placeholder={v.alertDetailBodyPlaceholder}
+                className="flow-editor-textarea text-xs sm:text-sm leading-relaxed placeholder:opacity-60"
+                style={{ color: tokens.body }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </StickerCardFrame>
   );
 }
 
@@ -362,79 +434,129 @@ export function CodeCardBlockBody({
   locale,
   langListId,
   onUpdate,
+  flow,
 }: {
   block: Extract<VisualBlock, { type: 'code_card' }>;
   locale: LocaleCode;
   langListId: string;
   onUpdate: (next: Extract<VisualBlock, { type: 'code_card' }>) => void;
+  flow: FlowBlockHandlers;
 }) {
-  const copy = UI_COPY[locale];
-  const v = copy.studio.visual;
+  const v = UI_COPY[locale].studio.visual;
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const sheetStyle = normalizeCodeCardStyle(block.style);
+  useAutoResizeTextarea(taRef, block.code, 384);
+
+  const showMarginSticky = Boolean(block.marginNote.trim()) || flow.marginNoteOpen;
+
+  const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      flow.onCommitAndInsertAfter(
+        block,
+        { id: createVisualId(), type: 'paragraph', text: '', marginNote: '' },
+        0,
+      );
+      return;
+    }
+
+    if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      const el = e.currentTarget;
+      const start = el.selectionStart ?? block.code.length;
+      const end = el.selectionEnd ?? block.code.length;
+      const nextCode =
+        block.code.slice(0, start) + '  ' + block.code.slice(end);
+      onUpdate({ ...block, code: nextCode });
+      requestAnimationFrame(() => {
+        el.setSelectionRange(start + 2, start + 2);
+      });
+    }
+  };
 
   return (
-    <div className="space-y-2.5">
-      <div
-        role="group"
-        aria-label={v.codeStyleLabel}
-        className="flex flex-wrap gap-1.5"
-      >
-        {ALL_CODE_CARD_STYLES.map((st) => {
-          const active = block.style === st;
-          return (
-            <button
-              key={st}
-              type="button"
-              aria-pressed={active}
-              onClick={() => onUpdate({ ...block, style: st })}
-              className={`min-h-7 px-2.5 py-0.5 rounded-lg text-xs border cursor-pointer transition-colors ${
-                active
-                  ? 'font-semibold bg-action-subtle text-link-ink border-border-ink'
-                  : 'bg-surface-sheet text-ink-muted border-border-subtle hover:text-ink-primary'
-              }`}
-            >
-              {copy.codeCardStyles[st]}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
-        <div className="sm:col-span-4">
+    <div
+      className={
+        showMarginSticky
+          ? 'xl:grid xl:grid-cols-[minmax(0,1fr)_210px] xl:gap-5 items-start'
+          : ''
+      }
+    >
+      <WashiCodeFrame
+        style={sheetStyle}
+        seedKey={`${block.language}:${block.filename}:${block.code.length}`}
+        className="my-2"
+        headerStart={
           <input
             type="text"
-            list={langListId}
-            value={block.language}
-            onChange={(e) => onUpdate({ ...block, language: e.target.value })}
-            aria-label={v.codeLangLabel}
-            placeholder="rust"
-            className="w-full px-2.5 py-1.5 rounded-lg bg-surface-sheet text-ink-primary border border-border-subtle text-xs font-mono"
-          />
-        </div>
-        <div className="sm:col-span-8">
-          <input
-            type="text"
+            size={1}
             value={block.filename}
             onChange={(e) => onUpdate({ ...block, filename: e.target.value })}
             placeholder={v.codeFilePlaceholder}
-            className="w-full px-2.5 py-1.5 rounded-lg bg-surface-sheet text-ink-primary border border-border-subtle text-xs font-mono"
+            className="font-hand text-sm sm:text-base font-semibold min-w-16 max-w-full flex-1 px-2 py-0.5 rounded-md border border-dashed focus:outline-none"
+            style={{
+              color: 'var(--code-fg)',
+              backgroundColor: 'var(--code-bg)',
+              borderColor: 'var(--code-border-subtle)',
+            }}
+          />
+        }
+        headerEnd={(tokens) => (
+          <>
+            <input
+              type="text"
+              size={1}
+              list={langListId}
+              value={block.language}
+              onChange={(e) => onUpdate({ ...block, language: e.target.value })}
+              aria-label={v.codeLangLabel}
+              placeholder="text"
+              className="w-20 sm:w-24 min-w-0 px-2 py-0.5 rounded font-mono text-xs font-semibold uppercase tracking-wider border border-dashed text-center focus:outline-none"
+              style={{
+                backgroundColor: tokens.badgeBg,
+                borderColor: tokens.border,
+                color: tokens.badgeFg,
+              }}
+            />
+
+            <CodeStylePopover
+              block={block}
+              locale={locale}
+              onUpdate={onUpdate}
+              onOpenMarginNote={flow.onOpenMarginNote}
+            />
+          </>
+        )}
+      >
+        <div className="px-4 py-3">
+          <textarea
+            ref={taRef}
+            data-flow-input="primary"
+            rows={4}
+            value={block.code}
+            onChange={(e) => onUpdate({ ...block, code: e.target.value })}
+            onKeyDown={handleKeyDown}
+            placeholder={v.codeBodyPlaceholder}
+            spellCheck={false}
+            className="flow-editor-textarea flow-editor-textarea--code font-mono text-xs sm:text-sm placeholder:opacity-50"
+            style={{ color: 'var(--code-fg)' }}
           />
         </div>
-      </div>
+      </WashiCodeFrame>
 
-      <textarea
-        rows={Math.min(14, Math.max(4, block.code.split('\n').length + 1))}
-        value={block.code}
-        onChange={(e) => onUpdate({ ...block, code: e.target.value })}
-        placeholder={v.codeBodyPlaceholder}
-        spellCheck={false}
-        className="w-full p-3 rounded-xl bg-surface-sheet text-ink-primary border border-border-subtle font-mono text-xs leading-relaxed ink-input-inset"
-      />
-
-      <AuthorMarginNoteInput
-        locale={locale}
-        rawValue={block.marginNote}
-        onChange={(nextRaw) => onUpdate({ ...block, marginNote: nextRaw })}
-      />
+      {showMarginSticky && (
+        <div className="mt-3 xl:mt-0">
+          <InlineAuthorMarginSticky
+            locale={locale}
+            rawValue={block.marginNote}
+            onChange={(nextRaw) => onUpdate({ ...block, marginNote: nextRaw })}
+            onRemove={() => {
+              onUpdate({ ...block, marginNote: '' });
+              flow.onCloseMarginNote();
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -443,72 +565,183 @@ export function ListBlockBody({
   block,
   locale,
   onUpdate,
+  flow,
 }: {
   block: Extract<VisualBlock, { type: 'list' }>;
   locale: LocaleCode;
   onUpdate: (next: Extract<VisualBlock, { type: 'list' }>) => void;
+  flow: FlowBlockHandlers;
 }) {
   const v = UI_COPY[locale].studio.visual;
+  const lastCompEndRef = useRef<number | null>(null);
+
+  const scheduleItemFocus = (idx: number, caret: number | 'end' = 0) => {
+    requestAnimationFrame(() => {
+      const container = document.querySelector<HTMLElement>(
+        `[data-flow-block-id="${block.id}"]`,
+      );
+      const input = container?.querySelector<HTMLInputElement>(
+        `[data-flow-list-idx="${idx}"]`,
+      );
+      if (input) {
+        input.focus({ preventScroll: true });
+        const pos = caret === 'end' ? input.value.length : caret;
+        input.setSelectionRange(pos, pos);
+      }
+    });
+  };
 
   return (
-    <div className="space-y-2.5">
-      <SegmentedControl
-        options={[
-          { value: 'unordered' as const, label: v.listUnordered },
-          { value: 'ordered' as const, label: v.listOrdered },
-        ]}
-        value={block.ordered ? 'ordered' : 'unordered'}
-        onChange={(mode) =>
-          onUpdate({ ...block, ordered: mode === 'ordered' })
-        }
-        ariaLabel={v.types.list}
-        surface="sheet"
-      />
+    <div className="relative space-y-1.5">
+      <div className="flow-hover-controls flex justify-end mb-1">
+        <SegmentedControl
+          options={[
+            { value: 'unordered' as const, label: v.listUnordered },
+            { value: 'ordered' as const, label: v.listOrdered },
+          ]}
+          value={block.ordered ? 'ordered' : 'unordered'}
+          onChange={(mode) =>
+            onUpdate({ ...block, ordered: mode === 'ordered' })
+          }
+          ariaLabel={v.types.list}
+          surface="sheet"
+        />
+      </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {block.items.map((itemText, lIdx) => (
-          <div key={lIdx} className="flex items-center gap-2">
-            <span className="font-mono text-xs text-link-ink w-5 text-end shrink-0 tabular-nums">
+          <div key={lIdx} className="flex items-baseline gap-2.5">
+            <span className="font-mono text-xs text-link-ink w-5 text-end shrink-0 tabular-nums select-none">
               {block.ordered ? `${lIdx + 1}.` : '✦'}
             </span>
             <input
               type="text"
+              size={1}
+              data-flow-input={lIdx === 0 ? 'primary' : undefined}
+              data-flow-list-idx={lIdx}
               value={itemText}
-              onChange={(e) => {
-                const nextItems = block.items.map((it, i) =>
-                  i === lIdx ? e.target.value : it,
-                );
-                onUpdate({ ...block, items: nextItems });
+              onCompositionEnd={(e) => {
+                lastCompEndRef.current = e.timeStamp;
               }}
-              placeholder={v.listItemPlaceholder}
-              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-surface-sheet text-ink-primary border border-border-subtle text-sm"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                const nextItems = block.items.filter((_, i) => i !== lIdx);
+              onChange={(e) => {
+                const val = e.target.value;
+                if (block.items.length === 1 && val.startsWith('[ ] ')) {
+                  flow.onReplaceBlock(
+                    {
+                      id: block.id,
+                      type: 'steps',
+                      title: '',
+                      scope: 'paragraph',
+                      items: [
+                        {
+                          id: createVisualId('st'),
+                          title: val.slice(4),
+                          detail: '',
+                          defaultChecked: false,
+                        },
+                      ],
+                    },
+                    { caret: 0 },
+                  );
+                  return;
+                }
                 onUpdate({
                   ...block,
-                  items: nextItems.length > 0 ? nextItems : [''],
+                  items: block.items.map((it, i) => (i === lIdx ? val : it)),
                 });
               }}
-              aria-label={v.deleteBlock}
-              className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger hover:bg-surface-sheet cursor-pointer shrink-0"
-            >
-              <IconTrash className="w-3.5 h-3.5" />
-            </button>
+              onKeyDown={(e) => {
+                if (isImeComposing(e, lastCompEndRef.current)) return;
+                const start = e.currentTarget.selectionStart ?? 0;
+                const end = e.currentTarget.selectionEnd ?? 0;
+
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (!itemText.trim()) {
+                    if (block.items.length <= 1) {
+                      flow.onReplaceBlock(
+                        {
+                          id: block.id,
+                          type: 'paragraph',
+                          text: '',
+                          marginNote: '',
+                        },
+                        { caret: 0 },
+                      );
+                    } else {
+                      const nextItems = block.items.filter((_, i) => i !== lIdx);
+                      flow.onCommitAndInsertAfter(
+                        { ...block, items: nextItems },
+                        {
+                          id: createVisualId(),
+                          type: 'paragraph',
+                          text: '',
+                          marginNote: '',
+                        },
+                        0,
+                      );
+                    }
+                    return;
+                  }
+                  const head = itemText.slice(0, start);
+                  const tail = itemText.slice(end);
+                  const nextItems = [...block.items];
+                  nextItems[lIdx] = head;
+                  nextItems.splice(lIdx + 1, 0, tail);
+                  onUpdate({ ...block, items: nextItems });
+                  scheduleItemFocus(lIdx + 1, 0);
+                  return;
+                }
+
+                if (e.key === 'Backspace' && start === 0 && end === 0) {
+                  e.preventDefault();
+                  if (block.items.length <= 1) {
+                    flow.onReplaceBlock(
+                      {
+                        id: block.id,
+                        type: 'paragraph',
+                        text: itemText,
+                        marginNote: '',
+                      },
+                      { caret: 0 },
+                    );
+                  } else if (lIdx > 0) {
+                    const prevLen = block.items[lIdx - 1].length;
+                    const nextItems = block.items.filter((_, i) => i !== lIdx);
+                    nextItems[lIdx - 1] = `${nextItems[lIdx - 1]}${itemText}`;
+                    onUpdate({ ...block, items: nextItems });
+                    scheduleItemFocus(lIdx - 1, prevLen);
+                  }
+                  return;
+                }
+
+                if (e.key === 'ArrowUp' && lIdx > 0) {
+                  e.preventDefault();
+                  scheduleItemFocus(lIdx - 1, 'end');
+                } else if (e.key === 'ArrowUp' && lIdx === 0 && start === 0) {
+                  e.preventDefault();
+                  flow.onMoveFocusVertical(-1);
+                } else if (
+                  e.key === 'ArrowDown' &&
+                  lIdx < block.items.length - 1
+                ) {
+                  e.preventDefault();
+                  scheduleItemFocus(lIdx + 1, 0);
+                } else if (
+                  e.key === 'ArrowDown' &&
+                  lIdx === block.items.length - 1 &&
+                  start === itemText.length
+                ) {
+                  e.preventDefault();
+                  flow.onMoveFocusVertical(1);
+                }
+              }}
+              placeholder={v.listItemPlaceholder}
+              className="flex-1 min-w-0 bg-transparent border-0 p-0 text-base text-ink-primary placeholder:text-ink-muted/65 focus:outline-none leading-relaxed"
+            />
           </div>
         ))}
       </div>
-
-      <button
-        type="button"
-        onClick={() => onUpdate({ ...block, items: [...block.items, ''] })}
-        className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-link-ink inline-flex items-center gap-1.5 cursor-pointer"
-      >
-        <IconPlus className="w-3.5 h-3.5" />
-        <span>{v.addListItem}</span>
-      </button>
     </div>
   );
 }

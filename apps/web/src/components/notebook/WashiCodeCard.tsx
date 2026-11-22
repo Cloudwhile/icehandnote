@@ -9,7 +9,7 @@
  *   - `torn`: Corner masking tape + serrated hand-torn bottom edge + 20px graph grid
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getLanguageDisplayLabel,
   highlightCodeToLines,
@@ -21,9 +21,125 @@ import {
   PaperclipOrnament,
   SpiralBindingRings,
   STICKER_TONE_TOKENS,
+  type StickerToneTokens,
   TornBottomEdge,
   WashiTapeOrnament,
 } from './StationeryStickers';
+
+export function WashiCodeFrame({
+  style,
+  seedKey,
+  className = 'my-6',
+  headerStart,
+  headerEnd,
+  children,
+}: {
+  style?: string | null;
+  seedKey: string;
+  className?: string;
+  headerStart: ReactNode;
+  headerEnd: (tapeTokens: StickerToneTokens) => ReactNode;
+  children: ReactNode;
+}) {
+  const sheetStyle = normalizeCodeCardStyle(style);
+  const tapePreset = useMemo(() => {
+    const idx = hashSeed(seedKey) % WASHI_TAPE_CYCLE.length;
+    return WASHI_TAPE_CYCLE[idx];
+  }, [seedKey]);
+  const tapeTokens = STICKER_TONE_TOKENS[tapePreset.tone];
+
+  return (
+    <div
+      className={`relative group min-w-0 max-w-full ${className} ${
+        sheetStyle === 'washi' || sheetStyle === 'index' ? 'pt-2' : ''
+      }`.trim()}
+    >
+      {sheetStyle === 'washi' && (
+        <div className="pointer-events-none absolute -top-1 left-1/2 -translate-x-1/2 z-10">
+          <WashiTapeOrnament
+            fill={tapeTokens.badgeBg}
+            stroke={tapeTokens.border}
+            pattern={tapePreset.pattern}
+            tiltDeg={tapePreset.tilt}
+          />
+        </div>
+      )}
+
+      {sheetStyle === 'index' && (
+        <div className="pointer-events-none absolute -top-2 end-8 z-10">
+          <PaperclipOrnament stroke="var(--accent-ice-ink)" />
+        </div>
+      )}
+
+      {sheetStyle === 'torn' && (
+        <div className="pointer-events-none absolute -top-2 -start-2 z-10">
+          <WashiTapeOrnament
+            fill={STICKER_TONE_TOKENS.kraft.badgeBg}
+            stroke={STICKER_TONE_TOKENS.kraft.border}
+            pattern="stripe"
+            tiltDeg={-28}
+            compact
+          />
+        </div>
+      )}
+
+      <div
+        data-code-style={sheetStyle}
+        className="washi-code-surface w-full max-w-full min-w-0 overflow-visible"
+      >
+        {sheetStyle === 'spiral' && <SpiralBindingRings />}
+
+        <div
+          className={`washi-code-header flex flex-wrap items-center justify-between gap-2.5 px-3.5 sm:px-4 py-2 ${
+            sheetStyle === 'spiral' ? '' : 'rounded-t-[12px]'
+          }`}
+        >
+          <div className="flex items-center gap-2.5 min-w-36 sm:min-w-0 flex-1">
+            {sheetStyle !== 'spiral' && (
+              <div
+                className="hidden sm:flex items-center gap-1.5 shrink-0"
+                aria-hidden="true"
+              >
+                {[0, 1, 2].map((hole) => (
+                  <span
+                    key={hole}
+                    className="w-2.5 h-2.5 rounded-full border-[1.5px]"
+                    style={{
+                      backgroundColor: 'var(--surface-page)',
+                      borderColor: 'var(--border-ink)',
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+            {headerStart}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {headerEnd(tapeTokens)}
+          </div>
+        </div>
+
+        <div
+          className={`washi-code-body overflow-hidden ${
+            sheetStyle === 'torn' ? 'rounded-b-[3px]' : 'rounded-b-[12px]'
+          }`}
+        >
+          {children}
+
+          {sheetStyle === 'torn' && (
+            <div
+              className="px-0.5 pb-0.5"
+              style={{ backgroundColor: 'var(--code-header-bg)' }}
+            >
+              <TornBottomEdge borderStroke="var(--code-border-subtle)" />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface WashiCodeCardProps {
   language: string;
@@ -97,15 +213,6 @@ export function WashiCodeCard({
   );
   const langLabel = useMemo(() => getLanguageDisplayLabel(language), [language]);
 
-  const tapePreset = useMemo(() => {
-    const idx =
-      hashSeed(`${language}:${filename ?? ''}:${code.length}`) %
-      WASHI_TAPE_CYCLE.length;
-    return WASHI_TAPE_CYCLE[idx];
-  }, [language, filename, code.length]);
-
-  const tapeTokens = STICKER_TONE_TOKENS[tapePreset.tone];
-
   useEffect(() => {
     return () => {
       if (timerRef.current !== null) {
@@ -153,206 +260,114 @@ export function WashiCodeCard({
   const lineDigits = Math.max(2, String(highlightedLines.length).length);
 
   return (
-    <div
-      className={`my-6 relative group min-w-0 max-w-full ${
-        sheetStyle === 'washi' || sheetStyle === 'index' ? 'pt-2' : ''
-      }`}
-    >
-      {/* Top Washi Tape (`washi` default) */}
-      {sheetStyle === 'washi' && (
-        <div className="pointer-events-none absolute -top-1 left-1/2 -translate-x-1/2 z-10">
-          <WashiTapeOrnament
-            fill={tapeTokens.badgeBg}
-            stroke={tapeTokens.border}
-            pattern={tapePreset.pattern}
-            tiltDeg={tapePreset.tilt}
-          />
-        </div>
-      )}
+    <WashiCodeFrame
+      style={sheetStyle}
+      seedKey={`${language}:${filename ?? ''}:${code.length}`}
+      headerStart={
+        filename ? (
+          <span
+            className="font-hand text-sm sm:text-base font-semibold truncate px-2 py-0.5 rounded-md border border-dashed"
+            style={{
+              color: 'var(--code-fg)',
+              backgroundColor: 'var(--code-bg)',
+              borderColor: 'var(--code-border-subtle)',
+            }}
+          >
+            {filename}
+          </span>
+        ) : (
+          <span
+            aria-hidden="true"
+            className="font-hand text-sm text-ink-muted select-none"
+          >
+            #
+          </span>
+        )
+      }
+      headerEnd={(tokens) => (
+        <>
+          <span
+            className="px-2 py-0.5 rounded font-mono text-xs font-semibold uppercase tracking-wider border border-dashed select-none"
+            style={{
+              backgroundColor: tokens.badgeBg,
+              borderColor: tokens.border,
+              color: tokens.badgeFg,
+              transform: 'rotate(-1deg)',
+            }}
+          >
+            {langLabel}
+          </span>
 
-      {/* Top Paperclip (`index` card) */}
-      {sheetStyle === 'index' && (
-        <div className="pointer-events-none absolute -top-2 end-8 z-10">
-          <PaperclipOrnament stroke="var(--accent-ice-ink)" />
-        </div>
-      )}
-
-      {/* Corner Tape (`torn` draft slip) */}
-      {sheetStyle === 'torn' && (
-        <div className="pointer-events-none absolute -top-2 -start-2 z-10">
-          <WashiTapeOrnament
-            fill={STICKER_TONE_TOKENS.kraft.badgeBg}
-            stroke={STICKER_TONE_TOKENS.kraft.border}
-            pattern="stripe"
-            tiltDeg={-28}
-            compact
-          />
-        </div>
-      )}
-
-      <div
-        data-code-style={sheetStyle}
-        className="washi-code-surface w-full max-w-full min-w-0 overflow-visible"
-      >
-        {/* Spiral Wire Binding (`spiral` ruled sheet) */}
-        {sheetStyle === 'spiral' && <SpiralBindingRings />}
-
-        {/* Stationery Header Bar: Notebook Punch Holes + Handwritten Filename Tab + Stamped Language + Tactile Copy */}
-        <div
-          className={`washi-code-header flex items-center justify-between gap-3 px-3.5 sm:px-4 py-2 ${
-            sheetStyle === 'spiral' ? '' : 'rounded-t-[12px]'
-          }`}
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            {sheetStyle !== 'spiral' && (
-              <div className="hidden sm:flex items-center gap-1.5 shrink-0" aria-hidden="true">
-                <span
-                  className="w-2.5 h-2.5 rounded-full border-[1.5px]"
-                  style={{
-                    backgroundColor: 'var(--surface-page)',
+          <button
+            type="button"
+            onClick={() => void handleCopy()}
+            className="min-h-7 px-2.5 py-1 rounded-lg font-hand text-xs sm:text-sm font-semibold border-[1.5px] inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-transform active:translate-x-px active:translate-y-px"
+            style={
+              copyState === 'copied'
+                ? {
+                    backgroundColor: 'var(--alert-mint-badge-bg)',
+                    borderColor: 'var(--alert-mint-border)',
+                    color: 'var(--alert-mint-badge-fg)',
+                    boxShadow: '1.5px 1.5px 0 0 var(--alert-mint-border)',
+                  }
+                : {
+                    backgroundColor: 'var(--surface-sheet)',
                     borderColor: 'var(--border-ink)',
-                  }}
-                />
-                <span
-                  className="w-2.5 h-2.5 rounded-full border-[1.5px]"
-                  style={{
-                    backgroundColor: 'var(--surface-page)',
-                    borderColor: 'var(--border-ink)',
-                  }}
-                />
-                <span
-                  className="w-2.5 h-2.5 rounded-full border-[1.5px]"
-                  style={{
-                    backgroundColor: 'var(--surface-page)',
-                    borderColor: 'var(--border-ink)',
-                  }}
-                />
-              </div>
-            )}
-
-            {filename ? (
-              <span
-                className="font-hand text-sm sm:text-base font-semibold truncate px-2 py-0.5 rounded-md border border-dashed"
-                style={{
-                  color: 'var(--code-fg)',
-                  backgroundColor: 'var(--code-bg)',
-                  borderColor: 'var(--code-border-subtle)',
-                }}
-              >
-                {filename}
-              </span>
+                    color: 'var(--ink-primary)',
+                    boxShadow: '1.5px 1.5px 0 0 var(--border-ink)',
+                  }
+            }
+          >
+            {copyState === 'copied' ? (
+              <IconCheck className="w-3.5 h-3.5 shrink-0" />
             ) : (
+              <IconCopy className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span>
+              {copyState === 'copied'
+                ? copiedLabel
+                : copyState === 'failed'
+                  ? copyFailedLabel
+                  : copyLabel}
+            </span>
+          </button>
+          <span role="status" className="sr-only">
+            {liveStatus}
+          </span>
+        </>
+      )}
+    >
+      <pre className="washi-code-pre m-0 py-3 w-full max-w-full overflow-x-auto font-mono text-xs sm:text-sm">
+        <code className="block w-max min-w-full">
+          {highlightedLines.map((line, i) => (
+            <div
+              key={i}
+              className={`washi-code-line flex ${
+                line.diffKind === 'added'
+                  ? 'washi-code-line-added'
+                  : line.diffKind === 'removed'
+                    ? 'washi-code-line-removed'
+                    : ''
+              }`}
+            >
               <span
                 aria-hidden="true"
-                className="font-hand text-sm text-ink-muted select-none"
+                className="washi-code-gutter font-hand text-sm shrink-0 ps-3.5 pe-2.5 me-3 text-end select-none tabular-nums"
+                style={{ minWidth: `${lineDigits + 2.6}ch` }}
               >
-                #
+                {i + 1}
               </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Rubber-Stamped Language Tag */}
-            <span
-              className="px-2 py-0.5 rounded font-mono text-xs font-semibold uppercase tracking-wider border border-dashed select-none"
-              style={{
-                backgroundColor: tapeTokens.badgeBg,
-                borderColor: tapeTokens.border,
-                color: tapeTokens.badgeFg,
-                transform: 'rotate(-1deg)',
-              }}
-            >
-              {langLabel}
-            </span>
-
-            {/* Tactile Ink Copy Button */}
-            <button
-              type="button"
-              onClick={() => void handleCopy()}
-              className="min-h-7 px-2.5 py-1 rounded-lg font-hand text-xs sm:text-sm font-semibold border-[1.5px] inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-transform active:translate-x-px active:translate-y-px"
-              style={
-                copyState === 'copied'
-                  ? {
-                      backgroundColor: 'var(--alert-mint-badge-bg)',
-                      borderColor: 'var(--alert-mint-border)',
-                      color: 'var(--alert-mint-badge-fg)',
-                      boxShadow: '1.5px 1.5px 0 0 var(--alert-mint-border)',
-                    }
-                  : {
-                      backgroundColor: 'var(--surface-sheet)',
-                      borderColor: 'var(--border-ink)',
-                      color: 'var(--ink-primary)',
-                      boxShadow: '1.5px 1.5px 0 0 var(--border-ink)',
-                    }
-              }
-            >
-              {copyState === 'copied' ? (
-                <IconCheck className="w-3.5 h-3.5 shrink-0" />
-              ) : (
-                <IconCopy className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span>
-                {copyState === 'copied'
-                  ? copiedLabel
-                  : copyState === 'failed'
-                    ? copyFailedLabel
-                    : copyLabel}
-              </span>
-            </button>
-            <span role="status" className="sr-only">
-              {liveStatus}
-            </span>
-          </div>
-        </div>
-
-        {/* Code Sheet Body (20px Drafting Grid or 24px Spiral Ruled Lines) */}
-        <div
-          className={`washi-code-body overflow-hidden ${
-            sheetStyle === 'torn' ? 'rounded-b-[3px]' : 'rounded-b-[12px]'
-          }`}
-        >
-          <pre className="washi-code-pre m-0 py-3 w-full max-w-full overflow-x-auto font-mono text-xs sm:text-sm">
-            <code className="block w-max min-w-full">
-              {highlightedLines.map((line, i) => (
-                <div
-                  key={i}
-                  className={`washi-code-line flex ${
-                    line.diffKind === 'added'
-                      ? 'washi-code-line-added'
-                      : line.diffKind === 'removed'
-                        ? 'washi-code-line-removed'
-                        : ''
-                  }`}
-                >
-                  <span
-                    aria-hidden="true"
-                    className="washi-code-gutter font-hand text-sm shrink-0 ps-3.5 pe-2.5 me-3 text-end select-none tabular-nums"
-                    style={{ minWidth: `${lineDigits + 2.6}ch` }}
-                  >
-                    {i + 1}
-                  </span>
-                  <span
-                    className="pe-5 whitespace-pre flex-1"
-                    style={{ color: 'var(--code-fg)' }}
-                    dangerouslySetInnerHTML={{
-                      __html: line.html || ' ',
-                    }}
-                  />
-                </div>
-              ))}
-            </code>
-          </pre>
-
-          {sheetStyle === 'torn' && (
-            <div
-              className="px-0.5 pb-0.5"
-              style={{ backgroundColor: 'var(--code-header-bg)' }}
-            >
-              <TornBottomEdge borderStroke="var(--code-border-subtle)" />
+              <span
+                className="pe-5 whitespace-pre flex-1"
+                style={{ color: 'var(--code-fg)' }}
+                dangerouslySetInnerHTML={{
+                  __html: line.html || ' ',
+                }}
+              />
             </div>
-          )}
-        </div>
-      </div>
-    </div>
+          ))}
+        </code>
+      </pre>
+    </WashiCodeFrame>
   );
 }

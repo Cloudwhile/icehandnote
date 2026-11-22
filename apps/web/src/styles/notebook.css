@@ -726,7 +726,7 @@ dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
   padding: 0;
   background: transparent;
   border: 0;
-  overflow: visible;
+  overflow: hidden;
 }
 .swipe-drawer-dialog:modal {
   overscroll-behavior: contain;
@@ -741,10 +741,15 @@ dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
   position: relative;
   display: grid;
   grid-template-columns: var(--drawer-width) 100%;
+  block-size: 100%;
   overflow-x: scroll;
+  overflow-y: hidden;
   overscroll-behavior: none;
   scrollbar-width: none;
   scroll-snap-type: x mandatory;
+}
+.swipe-drawer-scroller::-webkit-scrollbar {
+  display: none;
 }
 @media (prefers-reduced-motion: no-preference) {
   .swipe-drawer-scroller {
@@ -759,7 +764,8 @@ dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
 .swipe-drawer-sheet {
   display: flex;
   flex-direction: column;
-  block-size: 100svh;
+  block-size: 100%;
+  max-block-size: 100dvh;
   background-color: var(--surface-sheet);
   color: var(--ink-primary);
   border-inline-end: 2px solid var(--border-ink);
@@ -952,9 +958,7 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
     border-block-end: 0;
   }
   .responsive-table tbody th {
-    position: sticky;
-    inset-block-start: 0;
-    z-index: 2;
+    position: static;
     background-color: var(--surface-raised);
     border-radius: 8px;
     margin-block-end: 0.5rem;
@@ -1159,6 +1163,22 @@ input[type="checkbox"][switch]:disabled {
   .studio-shell[data-sidebar-collapsed="true"] .studio-sidebar {
     display: none;
   }
+
+  /* Restrict independent .studio-main scroll containment strictly to desktop (>= 1024px),
+     so mobile document-level scrolling is never trapped on non-overflowing flex/grid layouts. */
+  .studio-main {
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+}
+
+/* Thin themed scrollbar utility without overscroll trapping (safe for sticky/horizontal regions) */
+.ink-thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
 /* Independent scroll containers with zero scroll chaining and stable gutter */
@@ -1171,18 +1191,38 @@ input[type="checkbox"][switch]:disabled {
 }
 
 @supports not (scrollbar-color: auto) {
+  @media (min-width: 1024px) {
+    .studio-main {
+      scrollbar-width: auto;
+    }
+    .studio-main::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .studio-main::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 4px;
+    }
+    .studio-main::-webkit-scrollbar-track {
+      background: var(--scrollbar-track);
+    }
+  }
+  .ink-thin-scrollbar,
   .studio-scroll-pane {
     /* Reset scrollbar-width so legacy WebKit pseudo-elements are not suppressed */
     scrollbar-width: auto;
   }
+  .ink-thin-scrollbar::-webkit-scrollbar,
   .studio-scroll-pane::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
+  .ink-thin-scrollbar::-webkit-scrollbar-thumb,
   .studio-scroll-pane::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb);
     border-radius: 4px;
   }
+  .ink-thin-scrollbar::-webkit-scrollbar-track,
   .studio-scroll-pane::-webkit-scrollbar-track {
     background: var(--scrollbar-track);
   }
@@ -1610,18 +1650,22 @@ input[type="checkbox"][switch]:disabled {
   margin: 0;
   padding: 0.375rem;
   min-inline-size: 11.5rem;
-  max-inline-size: min(18rem, calc(100vw - 1.5rem));
+  max-inline-size: min(18rem, calc(100dvw - 1.5rem));
+  max-block-size: calc(100dvh - 3rem);
   border-radius: 12px;
   background-color: var(--surface-sheet);
   color: var(--ink-primary);
   border: 1.5px solid var(--border-ink);
   box-shadow: var(--shadow-floating);
-  overflow: visible;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 @supports (position-area: block-end) {
   .ink-menu-popover[popover] {
     inset: auto;
+    block-size: auto;
+    height: auto;
     margin-block-start: 0.375rem;
     position-area: block-end span-inline-end;
     position-try-fallbacks: flip-inline, flip-block, flip-block flip-inline;
@@ -1809,7 +1853,7 @@ input[type="checkbox"][switch]:disabled {
   border: 0;
   background: transparent;
   overflow: visible;
-  inline-size: min(24rem, calc(100vw - 2rem));
+  inline-size: min(24rem, calc(100dvw - 2rem));
   pointer-events: none;
 }
 
@@ -1832,6 +1876,12 @@ input[type="checkbox"][switch]:disabled {
   flex-direction: column;
   gap: 1rem;
   min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+.studio-editor-workspace > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
 }
 
 .studio-editor-body {
@@ -1839,6 +1889,7 @@ input[type="checkbox"][switch]:disabled {
   flex-direction: column;
   gap: 1.25rem;
   min-inline-size: 0;
+  max-inline-size: 100%;
   align-items: stretch;
 }
 
@@ -1855,6 +1906,10 @@ input[type="checkbox"][switch]:disabled {
     inset-block-start: 1rem;
     max-block-size: calc(100dvh - 5.5rem);
     overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   }
 }
 
@@ -1965,12 +2020,12 @@ input[type="checkbox"][switch]:disabled {
 }
 
 /* Post-interaction validation feedback (`validate-input-after-interaction` + `style-parent-with-has`) */
-.auth-input:is(:user-invalid, .user-invalid-fallback, [aria-invalid="true"]) {
+:is(.auth-input, .ink-field-input):is(:user-invalid, .user-invalid-fallback, [aria-invalid="true"]) {
   border-color: var(--accent-danger-ink);
   background-color: color-mix(in srgb, var(--accent-danger-ink) 7%, var(--surface-raised));
 }
 
-.auth-input:required:is(:user-valid, .user-valid-fallback) {
+:is(.auth-input, .ink-field-input):required:is(:user-valid, .user-valid-fallback) {
   border-color: color-mix(in srgb, var(--accent-success-ink) 65%, var(--border-subtle));
 }
 
@@ -1984,14 +2039,14 @@ input[type="checkbox"][switch]:disabled {
   gap: 0.35rem;
 }
 
-.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) .auth-error-msg,
+.auth-field:has(:is(.auth-input, .ink-field-input):is(:user-invalid, .user-invalid-fallback)) .auth-error-msg,
 .auth-field:has(.otp-native-input:is(:user-invalid, .user-invalid-fallback)) .auth-error-msg,
 .auth-field.has-error-fallback .auth-error-msg {
   display: flex;
 }
 
-.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) > label,
-.auth-field:has(.auth-input:is(:user-invalid, .user-invalid-fallback)) > div > label,
+.auth-field:has(:is(.auth-input, .ink-field-input):is(:user-invalid, .user-invalid-fallback)) > label,
+.auth-field:has(:is(.auth-input, .ink-field-input):is(:user-invalid, .user-invalid-fallback)) > div > label,
 .auth-field:has(.otp-native-input:is(:user-invalid, .user-invalid-fallback)) > label,
 .auth-field.has-error-fallback > label {
   color: var(--accent-danger-ink);
@@ -2193,4 +2248,181 @@ textarea.ink-auto-textarea {
   min-block-size: 3lh;
   max-block-size: 10lh;
   resize: vertical;
+}
+
+/* ============================================================================
+ * Hand-Drawn Stationery Flow Editor (`VisualBlockEditor` & `StudioEditorPanel`)
+ * ============================================================================ */
+
+/* Widen popover cards when hosting button-group / swatch panels (`viewport-aware-dropdowns`) */
+.ink-menu-popover.ink-menu-popover--panel {
+  inline-size: min(22.5rem, calc(100dvw - 1.5rem));
+  max-inline-size: calc(100dvw - 1.5rem);
+  padding: 0.75rem;
+}
+
+/* Borderless auto-growing flow textarea (`form-fields-automatically-fit-contents`) */
+textarea.flow-editor-textarea {
+  display: block;
+  field-sizing: content;
+  height: auto;
+  width: 100%;
+  min-block-size: 1.65lh;
+  resize: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+}
+
+@supports not (field-sizing: content) {
+  textarea.flow-editor-textarea {
+    overflow: hidden;
+  }
+}
+
+textarea.flow-editor-textarea.flow-editor-textarea--code {
+  min-block-size: 4lh;
+  max-block-size: 24rem;
+  overflow-y: auto;
+  line-height: 24px;
+}
+
+.flow-block-row {
+  position: relative;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  scroll-margin-block: 1.5rem;
+}
+
+.flow-gutter-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  transition: opacity 130ms ease-out;
+}
+
+@media (min-width: 768px) and (hover: hover) {
+  .flow-gutter-actions {
+    position: absolute;
+    inset-block-start: 0.2rem;
+    inset-inline-start: -3.25rem;
+    opacity: 0;
+  }
+  .flow-block-row:hover > .flow-gutter-actions,
+  .flow-block-row:focus-within > .flow-gutter-actions,
+  .flow-gutter-actions:has([aria-expanded="true"]) {
+    opacity: 1;
+  }
+
+  .flow-hover-controls {
+    opacity: 0.12;
+    transition: opacity 130ms ease-out;
+  }
+  .flow-block-row:hover .flow-hover-controls,
+  .flow-block-row:focus-within .flow-hover-controls,
+  .flow-block-row:has([aria-expanded="true"]) .flow-hover-controls {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 767px), (hover: none) {
+  .flow-gutter-actions {
+    display: none;
+    margin-block-end: 0.35rem;
+  }
+  .flow-block-row:focus-within > .flow-gutter-actions,
+  .flow-gutter-actions:has([aria-expanded="true"]) {
+    display: inline-flex;
+  }
+}
+
+/* Reorder handle (`modern-web-guidance/drag-and-drop`):
+ * Keep `touch-action: none` strictly on `.flow-drag-handle` so mobile page scrolling works anywhere else */
+.flow-drag-handle {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.flow-drag-handle:active {
+  cursor: grabbing;
+}
+
+.flow-dragging,
+.flow-dragging * {
+  cursor: grabbing !important;
+}
+
+.flow-block-row[data-dragging="true"] {
+  opacity: 0.72;
+  border-radius: 12px;
+  outline: 2px dashed var(--action-bg);
+  outline-offset: 4px;
+}
+
+.flow-drop-line {
+  height: 3px;
+  border-radius: 999px;
+  background-color: var(--action-bg);
+  box-shadow: 0 0 0 2px var(--surface-sheet);
+  pointer-events: none;
+}
+
+@media (forced-colors: active) {
+  .flow-drop-line {
+    background-color: Highlight;
+  }
+}
+
+/* Floating "/" Slash Command Menu & Selection Inline Formatting Toolbar */
+.flow-slash-popover {
+  position: fixed;
+  z-index: 60;
+  margin: 0;
+  padding: 0.375rem;
+  inline-size: min(21rem, calc(100dvw - 2rem));
+  max-block-size: min(20rem, calc(100dvh - 3rem));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 14px;
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-floating);
+}
+
+.flow-inline-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.25rem;
+  border-radius: 12px;
+  background-color: var(--surface-sheet);
+  color: var(--ink-primary);
+  border: 1.5px solid var(--border-ink);
+  box-shadow: var(--shadow-floating);
+}
+
+.flow-inline-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 1.75rem;
+  min-block-size: 1.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.flow-inline-toolbar button:hover {
+  background-color: var(--surface-raised);
+  color: var(--ink-primary);
 }

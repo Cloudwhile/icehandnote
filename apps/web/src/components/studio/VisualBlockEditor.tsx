@@ -1,35 +1,45 @@
 /*
- * Visual Block Editor for IceHandNote Studio.
- * - Orchestrates block list ordering, collapsing, duplication, and insertion,
- *   delegating each block type to decoupled sub-editors in `./blocks/`.
+ * Hand-Drawn Stationery Flow Block Editor (`VisualBlockEditor`) for IceHandNote Studio:
+ * - Zero-frame borderless paper authoring directly matching reader typography & stickers.
+ * - Cross-block keyboard flow (Enter split, Backspace merge, Arrow vertical navigation).
+ * - Slash `/` command palette + Markdown prefix shortcuts.
+ * - Clipboard screenshot `Ctrl+V` paste + OS image drag-and-drop auto-upload + multi-block Markdown paste.
+ * - Single-axis pointer drag-handle reordering (`modern-web-guidance/drag-and-drop`) with `.flow-drop-line`.
  */
 
-import { type ReactNode, useId, useState } from 'react';
-import { UI_COPY } from '../../lib/i18n';
+import {
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from 'react';
+import { api } from '../../lib/api';
+import { EXT_COPY, UI_COPY } from '../../lib/i18n';
+import type { ResolvedTheme } from '../../lib/theme';
 import type { LocaleCode } from '../../lib/types';
 import {
   createDefaultVisualBlock,
   createVisualId,
+  parseMarkdownToVisualBlocks,
   type VisualBlock,
 } from '../../lib/visualBlocks';
+import { FileUploadButton } from '../ui/FileUploadButton';
 import {
   IconAlertCircle,
-  IconArrowDown,
-  IconArrowUp,
   IconCheckSquare,
-  IconChevronDown,
   IconCode,
-  IconCopy,
   IconDiagram,
-  IconFileCode,
-  IconHeading,
   IconImage,
-  IconList,
-  IconParagraph,
-  IconPlus,
-  IconQuote,
-  IconTrash,
 } from '../ui/Icons';
+import { useToast } from '../ui/ToastProvider';
+import {
+  BlockGutterHandle,
+  convertBlockType,
+} from './blocks/BlockFloatingControls';
 import { RoughDiagramBlockBody } from './blocks/RoughDiagramBlockBody';
 import {
   AlertBlockBody,
@@ -38,6 +48,7 @@ import {
   StepsBlockBody,
 } from './blocks/StructuredBlocks';
 import {
+  type FlowBlockHandlers,
   HeadingBlockBody,
   ImageBlockBody,
   ParagraphBlockBody,
@@ -47,6 +58,7 @@ import {
 
 interface VisualBlockEditorProps {
   locale: LocaleCode;
+  theme?: ResolvedTheme;
   blocks: VisualBlock[];
   onChange: (next: VisualBlock[]) => void;
   hideTopInserter?: boolean;
@@ -56,20 +68,9 @@ interface VisualBlockToolStripProps {
   locale: LocaleCode;
   blockCount: number;
   onInsertBlock: (kind: VisualBlock['type']) => void;
-  onInsertSectionTask: () => void;
+  onUploadImageFile: (file: File) => void;
+  uploadingImage?: boolean;
 }
-
-const INSERTABLE_TYPES: readonly VisualBlock['type'][] = [
-  'steps',
-  'heading',
-  'paragraph',
-  'image',
-  'alert',
-  'code_card',
-  'list',
-  'quote',
-  'rough_diagram',
-];
 
 const COMMON_LANGUAGES = [
   'rust',
@@ -85,56 +86,6 @@ const COMMON_LANGUAGES = [
   'yaml',
   'text',
 ];
-
-function blockIcon(type: VisualBlock['type']): ReactNode {
-  switch (type) {
-    case 'heading':
-      return <IconHeading className="w-3.5 h-3.5" />;
-    case 'paragraph':
-      return <IconParagraph className="w-3.5 h-3.5" />;
-    case 'image':
-      return <IconImage className="w-3.5 h-3.5 text-link-ink" />;
-    case 'steps':
-      return <IconCheckSquare className="w-3.5 h-3.5 text-accent-ice" />;
-    case 'alert':
-      return <IconAlertCircle className="w-3.5 h-3.5 text-accent-amber" />;
-    case 'code_card':
-      return <IconCode className="w-3.5 h-3.5" />;
-    case 'list':
-      return <IconList className="w-3.5 h-3.5" />;
-    case 'quote':
-      return <IconQuote className="w-3.5 h-3.5" />;
-    case 'rough_diagram':
-      return <IconDiagram className="w-3.5 h-3.5" />;
-    case 'raw_markdown':
-      return <IconFileCode className="w-3.5 h-3.5" />;
-  }
-}
-
-function blockPreviewSummary(block: VisualBlock): string {
-  switch (block.type) {
-    case 'heading':
-      return `H${block.level} · ${block.text || '…'}`;
-    case 'paragraph':
-      return block.text.slice(0, 48) || '…';
-    case 'image':
-      return block.caption || block.alt || block.src.slice(0, 42) || '…';
-    case 'steps':
-      return `${block.title || 'Steps'} (${block.items.length})`;
-    case 'alert':
-      return `${block.kind.toUpperCase()} · ${block.title || block.body.slice(0, 36) || '…'}`;
-    case 'code_card':
-      return `${block.language}${block.filename ? ` · ${block.filename}` : ''}`;
-    case 'list':
-      return `${block.ordered ? '1.' : '•'} ${block.items.length}`;
-    case 'quote':
-      return block.text.slice(0, 48) || '…';
-    case 'rough_diagram':
-      return `${block.caption || 'Diagram'} (${block.spec.nodes.length}N / ${block.spec.edges.length}E)`;
-    case 'raw_markdown':
-      return block.content.slice(0, 48) || '…';
-  }
-}
 
 function cloneVisualBlock(block: VisualBlock): VisualBlock {
   const id = createVisualId();
@@ -165,40 +116,64 @@ export function VisualBlockToolStrip({
   locale,
   blockCount,
   onInsertBlock,
-  onInsertSectionTask,
+  onUploadImageFile,
+  uploadingImage = false,
 }: VisualBlockToolStripProps) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
+  const extFlow = EXT_COPY[locale].studio.flowEditor;
 
   return (
-    <div className="flex flex-wrap items-center gap-1">
+    <div className="flex flex-wrap items-center gap-1.5">
       <button
         type="button"
-        onClick={onInsertSectionTask}
-        className="ui-press-tactile min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold bg-action-subtle text-link-ink border border-action-bg/40 hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        onClick={() => onInsertBlock('alert')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
-        <IconCheckSquare className="w-3.5 h-3.5 text-link-ink shrink-0" />
-        <span>{copy.taskScopeSection}</span>
+        <IconAlertCircle className="w-3.5 h-3.5 text-accent-amber" />
+        <span>{v.types.alert}</span>
       </button>
 
-      {INSERTABLE_TYPES.map((kind) => {
-        const isSteps = kind === 'steps';
-        return (
-          <button
-            key={kind}
-            type="button"
-            onClick={() => onInsertBlock(kind)}
-            className={`ui-press-tactile min-h-7 px-2 py-0.5 rounded-lg text-xs inline-flex items-center gap-1 cursor-pointer transition-colors ${
-              isSteps
-                ? 'font-semibold bg-surface-raised text-accent-ice border border-border-subtle hover:border-border-ink'
-                : 'bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink'
-            }`}
-          >
-            {blockIcon(kind)}
-            <span>{isSteps ? copy.taskScopeParagraph : v.types[kind]}</span>
-          </button>
-        );
-      })}
+      <button
+        type="button"
+        onClick={() => onInsertBlock('steps')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconCheckSquare className="w-3.5 h-3.5 text-accent-ice" />
+        <span>{copy.taskScopeParagraph}</span>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => onInsertBlock('code_card')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconCode className="w-3.5 h-3.5 text-ink-secondary" />
+        <span>{v.types.code_card}</span>
+      </button>
+
+      <FileUploadButton
+        accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/x-icon,image/svg+xml"
+        uploading={uploadingImage}
+        label={v.types.image}
+        uploadingLabel={v.imageUploading}
+        icon={<IconImage className="w-3.5 h-3.5 text-link-ink" />}
+        buttonClassName="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer disabled:opacity-60 transition-colors"
+        onSelectFile={onUploadImageFile}
+      />
+
+      <button
+        type="button"
+        onClick={() => onInsertBlock('rough_diagram')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconDiagram className="w-3.5 h-3.5 text-ink-secondary" />
+        <span>{v.types.rough_diagram}</span>
+      </button>
+
+      <span className="hidden xl:inline text-xs text-ink-muted ps-1">
+        {extFlow.quickToolbarHint}
+      </span>
 
       <span className="ms-auto text-xs font-mono text-ink-muted tabular-nums ps-1.5 whitespace-nowrap">
         {v.blockCount(blockCount)}
@@ -209,374 +184,701 @@ export function VisualBlockToolStrip({
 
 export function VisualBlockEditor({
   locale,
+  theme = 'light',
   blocks,
   onChange,
   hideTopInserter = false,
 }: VisualBlockEditorProps) {
-  const copy = UI_COPY[locale];
-  const v = copy.studio.visual;
+  const extStudio = EXT_COPY[locale].studio;
+  const extFlow = extStudio.flowEditor;
+  const toast = useToast();
   const langListId = useId();
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
-  const [insertAfterId, setInsertAfterId] = useState<string | null>(null);
 
-  const toggleCollapse = (id: string) => {
-    setCollapsedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const fallbackParaIdRef = useRef<string>(createVisualId());
+  const blocksRef = useRef<VisualBlock[]>(blocks);
+  const pendingFocusRef = useRef<{
+    blockId: string;
+    caret?: number | 'start' | 'end';
+  } | null>(null);
+  const dragMovedRef = useRef(false);
+
+  const [openMarginIds, setOpenMarginIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [freshDiagramIds, setFreshDiagramIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
+  const [dropGapIndex, setDropGapIndex] = useState<number | null>(null);
+  const [uploadingQuickImg, setUploadingQuickImg] = useState(false);
+
+  const displayBlocks: VisualBlock[] =
+    blocks.length > 0
+      ? blocks
+      : [
+          {
+            id: fallbackParaIdRef.current,
+            type: 'paragraph',
+            text: '',
+            marginNote: '',
+          },
+        ];
+  blocksRef.current = displayBlocks;
+
+  const scheduleFocus = useCallback(
+    (blockId: string, caret: number | 'start' | 'end' = 'start') => {
+      pendingFocusRef.current = { blockId, caret };
+    },
+    [],
+  );
+
+  // Commit focus after DOM reconciles newly inserted/merged/converted blocks
+  useEffect(() => {
+    const req = pendingFocusRef.current;
+    if (!req) return;
+    pendingFocusRef.current = null;
+    requestAnimationFrame(() => {
+      const row = containerRef.current?.querySelector<HTMLElement>(
+        `[data-flow-block-id="${req.blockId}"]`,
+      );
+      const input = row?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        '[data-flow-input="primary"]',
+      );
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      if (
+        'setSelectionRange' in input &&
+        typeof input.setSelectionRange === 'function'
+      ) {
+        const len = input.value.length;
+        const pos =
+          req.caret === 'end'
+            ? len
+            : req.caret === 'start' || req.caret === undefined
+              ? 0
+              : Math.max(0, Math.min(req.caret, len));
+        try {
+          input.setSelectionRange(pos, pos);
+        } catch {
+          // ignore controls without text selection support
+        }
+      }
     });
-  };
+  }, [displayBlocks]);
 
-  const updateBlock = (index: number, nextBlock: VisualBlock) => {
-    const next = [...blocks];
-    next[index] = nextBlock;
-    onChange(next);
-  };
+  const commitBlocks = useCallback(
+    (next: VisualBlock[]) => {
+      blocksRef.current = next;
+      onChange(next);
+    },
+    [onChange],
+  );
 
-  const moveBlock = (index: number, delta: -1 | 1) => {
-    const target = index + delta;
-    if (target < 0 || target >= blocks.length) return;
-    const next = [...blocks];
-    const [moved] = next.splice(index, 1);
-    next.splice(target, 0, moved);
-    onChange(next);
-  };
-
-  const duplicateBlock = (index: number) => {
-    const next = [...blocks];
-    next.splice(index + 1, 0, cloneVisualBlock(blocks[index]));
-    onChange(next);
-  };
-
-  const deleteBlock = (index: number) => {
-    const next = blocks.filter((_, idx) => idx !== index);
-    onChange(next);
-  };
-
-  const appendBlock = (kind: VisualBlock['type']) => {
-    onChange([...blocks, createDefaultVisualBlock(kind)]);
-  };
-
-  const appendSectionTaskHeading = () => {
-    onChange([
-      ...blocks,
-      {
+  const uploadAndInsertImage = useCallback(
+    async (file: File, targetIndex: number, replaceEmptyTarget: boolean) => {
+      const alt = file.name.replace(/\.[^.]+$/, '') || 'image';
+      const blobUrl = URL.createObjectURL(file);
+      const imgBlock: VisualBlock = {
         id: createVisualId(),
-        type: 'heading',
-        level: 2,
-        text: '',
-        isTask: true,
-        defaultChecked: false,
-      },
-    ]);
+        type: 'image',
+        src: blobUrl,
+        alt,
+        caption: '',
+        marginNote: '',
+      };
+
+      const cur = [...blocksRef.current];
+      if (replaceEmptyTarget && cur[targetIndex]) {
+        cur[targetIndex] = imgBlock;
+      } else {
+        const insertAt = Math.max(0, Math.min(cur.length, targetIndex + 1));
+        cur.splice(insertAt, 0, imgBlock);
+      }
+      commitBlocks(cur);
+      scheduleFocus(imgBlock.id, 'end');
+
+      try {
+        const uploaded = await api.uploadStudioMedia(file);
+        const latest = blocksRef.current.map((b) =>
+          b.id === imgBlock.id && b.type === 'image'
+            ? { ...b, src: uploaded.url }
+            : b,
+        );
+        commitBlocks(latest);
+        toast.success(extStudio.imageUploadedMsg);
+      } catch (err) {
+        toast.error(err);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    },
+    [commitBlocks, extStudio.imageUploadedMsg, scheduleFocus, toast],
+  );
+
+  const findTargetBlockIndexFromEvent = (target: EventTarget | null): number => {
+    const row = (target as HTMLElement | null)?.closest<HTMLElement>(
+      '[data-flow-block-id]',
+    );
+    if (!row) return displayBlocks.length - 1;
+    const id = row.getAttribute('data-flow-block-id');
+    const idx = displayBlocks.findIndex((b) => b.id === id);
+    return idx >= 0 ? idx : displayBlocks.length - 1;
   };
 
-  const insertBlockAt = (afterIndex: number, kind: VisualBlock['type']) => {
-    const next = [...blocks];
-    next.splice(afterIndex + 1, 0, createDefaultVisualBlock(kind));
-    onChange(next);
-    setInsertAfterId(null);
+  const handleContainerPaste = (e: ReactClipboardEvent<HTMLDivElement>) => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imgItem = items.find(
+      (it) => it.kind === 'file' && it.type.startsWith('image/'),
+    );
+    const file =
+      imgItem?.getAsFile() ??
+      Array.from(e.clipboardData?.files ?? []).find((f) =>
+        f.type.startsWith('image/'),
+      );
+
+    if (file) {
+      e.preventDefault();
+      const idx = findTargetBlockIndexFromEvent(e.target);
+      const targetBlock = displayBlocks[idx];
+      const replaceEmpty =
+        (targetBlock?.type === 'paragraph' && !targetBlock.text.trim()) ||
+        (targetBlock?.type === 'image' && !targetBlock.src.trim());
+      void uploadAndInsertImage(file, idx, replaceEmpty);
+      return;
+    }
+
+    // Smart Markdown multi-block paste inside an empty flow paragraph
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
+    const idx = findTargetBlockIndexFromEvent(e.target);
+    const targetBlock = displayBlocks[idx];
+    if (
+      targetBlock?.type === 'paragraph' &&
+      !targetBlock.text.trim() &&
+      (text.includes('\n') ||
+        /^(#{1,4}\s|-\s\[[ xX]\]\s|:::|```|>\s|!\[)/.test(text.trim()))
+    ) {
+      const parsed = parseMarkdownToVisualBlocks(text);
+      if (parsed.length > 1 || (parsed.length === 1 && parsed[0].type !== 'paragraph')) {
+        e.preventDefault();
+        const next = [...displayBlocks];
+        next.splice(idx, 1, ...parsed);
+        commitBlocks(next);
+        const last = parsed[parsed.length - 1];
+        if (last) scheduleFocus(last.id, 'end');
+      }
+    }
   };
 
-  const insertSectionTaskAt = (afterIndex: number) => {
-    const next = [...blocks];
-    next.splice(afterIndex + 1, 0, {
-      id: createVisualId(),
-      type: 'heading',
-      level: 2,
-      text: '',
-      isTask: true,
-      defaultChecked: false,
-    });
-    onChange(next);
-    setInsertAfterId(null);
+  const handleContainerDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      if (!fileDragOver) setFileDragOver(true);
+    }
   };
+
+  const handleContainerDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer?.files?.length) return;
+    const imageFiles = Array.from(e.dataTransfer.files).filter((f) =>
+      f.type.startsWith('image/'),
+    );
+    setFileDragOver(false);
+    if (imageFiles.length === 0) return;
+
+    e.preventDefault();
+    const idx = findTargetBlockIndexFromEvent(e.target);
+    const targetBlock = displayBlocks[idx];
+    const replaceFirst =
+      (targetBlock?.type === 'paragraph' && !targetBlock.text.trim()) ||
+      (targetBlock?.type === 'image' && !targetBlock.src.trim());
+    void uploadAndInsertImage(imageFiles[0], idx, replaceFirst);
+  };
+
+  // Single-axis vertical pointer drag reorder (`modern-web-guidance/drag-and-drop`)
+  const handleStartBlockDrag = (
+    blockId: string,
+    startEvent: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    if (startEvent.button !== 0) return;
+    const startX = startEvent.clientX;
+    const startY = startEvent.clientY;
+    const handleEl = startEvent.currentTarget;
+    const pointerId = startEvent.pointerId;
+    const sourceIdx = blocksRef.current.findIndex((b) => b.id === blockId);
+    if (sourceIdx === -1) return;
+
+    let started = false;
+    let currentDropGap: number | null = null;
+    dragMovedRef.current = false;
+
+    const computeGapFromClientY = (clientY: number): number => {
+      const root = containerRef.current;
+      if (!root) return sourceIdx;
+      const rows = Array.from(
+        root.querySelectorAll<HTMLElement>('[data-flow-block-id]'),
+      );
+      for (let i = 0; i < rows.length; i += 1) {
+        const rect = rows[i].getBoundingClientRect();
+        const mid = rect.top + rect.height / 2;
+        if (clientY < mid) {
+          return i;
+        }
+      }
+      return rows.length;
+    };
+
+    const cleanup = () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+      document.removeEventListener('pointercancel', onCancelDrag);
+      document.removeEventListener('keydown', onKeyDown);
+      containerRef.current?.classList.remove('flow-dragging');
+      setDraggingBlockId(null);
+      setDropGapIndex(null);
+    };
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      if (moveEv.pointerId !== pointerId) return;
+      if (!started) {
+        const dist = Math.hypot(moveEv.clientX - startX, moveEv.clientY - startY);
+        if (dist < 5) return;
+        started = true;
+        dragMovedRef.current = true;
+        try {
+          handleEl.setPointerCapture(pointerId);
+        } catch {
+          // ignore if capture is unavailable
+        }
+        containerRef.current?.classList.add('flow-dragging');
+        setDraggingBlockId(blockId);
+      }
+      const nextGap = computeGapFromClientY(moveEv.clientY);
+      currentDropGap = nextGap;
+      setDropGapIndex(nextGap);
+    };
+
+    const onPointerUp = (upEv: PointerEvent) => {
+      if (upEv.pointerId !== pointerId) return;
+      if (started && currentDropGap !== null) {
+        const gap = currentDropGap;
+        if (gap !== sourceIdx && gap !== sourceIdx + 1) {
+          const next = [...blocksRef.current];
+          const [moved] = next.splice(sourceIdx, 1);
+          const targetIdx = gap > sourceIdx ? gap - 1 : gap;
+          next.splice(targetIdx, 0, moved);
+          commitBlocks(next);
+          scheduleFocus(moved.id, 'start');
+        }
+      }
+      cleanup();
+    };
+
+    const onCancelDrag = (cancelEv: PointerEvent) => {
+      if (cancelEv.pointerId !== pointerId) return;
+      dragMovedRef.current = false;
+      cleanup();
+    };
+
+    const onKeyDown = (keyEv: KeyboardEvent) => {
+      if (keyEv.key === 'Escape') {
+        dragMovedRef.current = false;
+        cleanup();
+      }
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onCancelDrag);
+    document.addEventListener('keydown', onKeyDown);
+  };
+
+  let runningTaskOffset = 0;
+  let runningSectionNumber = 0;
 
   return (
-    <div className="space-y-4">
+    <div
+      ref={containerRef}
+      onPaste={handleContainerPaste}
+      onDragOver={handleContainerDragOver}
+      onDragLeave={(e) => {
+        if (
+          e.currentTarget === e.target ||
+          !e.currentTarget.contains(e.relatedTarget as Node | null)
+        ) {
+          setFileDragOver(false);
+        }
+      }}
+      onDrop={handleContainerDrop}
+      className={`relative md:ps-11 space-y-2 rounded-xl transition-colors ${
+        fileDragOver ? 'ring-2 ring-dashed ring-action-bg bg-action-subtle/20' : ''
+      }`}
+    >
       <datalist id={langListId}>
         {COMMON_LANGUAGES.map((lang) => (
           <option key={lang} value={lang} />
         ))}
       </datalist>
 
+      {fileDragOver && (
+        <div className="sticky top-16 z-20 flex justify-center pointer-events-none">
+          <span className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-action-bg text-action-fg shadow-md">
+            {extFlow.dropImageHint}
+          </span>
+        </div>
+      )}
+
       {!hideTopInserter && (
-        <div className="rounded-xl p-3 bg-surface-raised border border-border-subtle space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-semibold text-ink-secondary">
-              {v.addBlockLabel}
-            </span>
-          </div>
+        <div className="rounded-xl p-2.5 bg-surface-raised border border-border-subtle mb-4">
           <VisualBlockToolStrip
             locale={locale}
-            blockCount={blocks.length}
-            onInsertBlock={appendBlock}
-            onInsertSectionTask={appendSectionTaskHeading}
+            blockCount={displayBlocks.length}
+            uploadingImage={uploadingQuickImg}
+            onInsertBlock={(kind) => {
+              const created = createDefaultVisualBlock(kind);
+              if (created.type === 'rough_diagram') {
+                setFreshDiagramIds((prev) => new Set(prev).add(created.id));
+              }
+              commitBlocks([...displayBlocks, created]);
+              scheduleFocus(created.id, 'start');
+            }}
+            onUploadImageFile={(file) => {
+              setUploadingQuickImg(true);
+              void uploadAndInsertImage(
+                file,
+                displayBlocks.length - 1,
+                false,
+              ).finally(() => setUploadingQuickImg(false));
+            }}
           />
         </div>
       )}
 
-      {blocks.length === 0 ? (
-        <div className="rounded-xl p-6 bg-surface-raised border border-dashed border-border-subtle text-center space-y-3">
-          <div
-            className="text-base font-semibold text-ink-primary"
-            style={{ fontFamily: 'var(--font-hand)' }}
-          >
-            {v.emptyTitle}
-          </div>
-          <div className="pt-1 flex flex-wrap items-center justify-center gap-2">
-            {(['heading', 'paragraph', 'steps'] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => appendBlock(kind)}
-                className="min-h-8 px-3 py-1.5 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                {blockIcon(kind)}
-                <span>+ {v.types[kind]}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {(() => {
-            let runningTaskOffset = 0;
-            return blocks.map((block, idx) => {
-              const isCollapsed = collapsedIds.has(block.id);
-              const showInsertPicker = insertAfterId === block.id;
-              const taskStartOffset = runningTaskOffset;
-              if (block.type === 'steps') {
-                runningTaskOffset += block.items.length;
+      <div className="space-y-3">
+        {displayBlocks.map((block, idx) => {
+          const taskStartOffset = runningTaskOffset;
+          if (block.type === 'steps') {
+            runningTaskOffset += block.items.length;
+          }
+          if (block.type === 'heading') {
+            runningSectionNumber += 1;
+          }
+          const curSectionNum = runningSectionNumber;
+
+          const marginOpen =
+            ('marginNote' in block && Boolean(block.marginNote.trim())) ||
+            openMarginIds.has(block.id);
+
+          const flowHandlers: FlowBlockHandlers = {
+            onCommitAndInsertAfter: (updatedCurrent, newAfter, caret = 'start') => {
+              const next = [...displayBlocks];
+              next[idx] = updatedCurrent;
+              next.splice(idx + 1, 0, newAfter);
+              if (newAfter.type === 'rough_diagram') {
+                setFreshDiagramIds((prev) => new Set(prev).add(newAfter.id));
               }
-              const isSectionTaskHead =
-                block.type === 'heading' && Boolean(block.isTask);
-
-              return (
-                <div key={block.id} className="ui-panel-enter space-y-2">
-                  <div className="rounded-xl border border-border-subtle focus-within:border-border-ink bg-surface-raised/60 overflow-hidden transition-colors">
-                    {/* Block Card Header */}
-                    <div className="px-3 py-2 bg-surface-sheet border-b border-border-subtle flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <span className="font-mono text-xs text-ink-muted tabular-nums shrink-0">
-                          {String(idx + 1).padStart(2, '0')}
-                        </span>
-                        <span
-                          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-xs font-semibold shrink-0 ${
-                            isSectionTaskHead
-                              ? 'bg-action-subtle border-border-ink text-link-ink'
-                              : 'bg-surface-raised border-border-subtle text-ink-primary'
-                          }`}
-                        >
-                          {isSectionTaskHead ? (
-                            <IconCheckSquare className="w-3.5 h-3.5 text-link-ink" />
-                          ) : (
-                            blockIcon(block.type)
-                          )}
-                          <span>
-                            {isSectionTaskHead
-                              ? copy.taskScopeSection
-                              : block.type === 'steps'
-                                ? copy.taskScopeParagraph
-                                : v.types[block.type]}
-                          </span>
-                        </span>
-                        {isCollapsed && (
-                          <span className="text-xs text-ink-muted studio-ellipsis">
-                            {blockPreviewSummary(block)}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          disabled={idx === 0}
-                          onClick={() => moveBlock(idx, -1)}
-                          aria-label={v.moveUp}
-                          title={v.moveUp}
-                          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
-                        >
-                          <IconArrowUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          disabled={idx === blocks.length - 1}
-                          onClick={() => moveBlock(idx, 1)}
-                          aria-label={v.moveDown}
-                          title={v.moveDown}
-                          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
-                        >
-                          <IconArrowDown className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => duplicateBlock(idx)}
-                          aria-label={v.duplicate}
-                          title={v.duplicate}
-                          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer"
-                        >
-                          <IconCopy className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setInsertAfterId((cur) =>
-                              cur === block.id ? null : block.id,
-                            )
-                          }
-                          aria-label={v.insertBelow}
-                          title={v.insertBelow}
-                          aria-expanded={showInsertPicker}
-                          className={`w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer ${
-                            showInsertPicker
-                              ? 'bg-action-subtle text-link-ink'
-                              : 'text-ink-muted hover:text-ink-primary hover:bg-surface-raised'
-                          }`}
-                        >
-                          <IconPlus className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => toggleCollapse(block.id)}
-                          aria-label={isCollapsed ? v.expand : v.collapse}
-                          title={isCollapsed ? v.expand : v.collapse}
-                          aria-expanded={!isCollapsed}
-                          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer"
-                        >
-                          <IconChevronDown
-                            className={`w-3.5 h-3.5 transition-transform ${
-                              isCollapsed ? '-rotate-90' : ''
-                            }`}
-                          />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => deleteBlock(idx)}
-                          aria-label={v.deleteBlock}
-                          title={v.deleteBlock}
-                          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger hover:bg-surface-raised cursor-pointer"
-                        >
-                          <IconTrash className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Block Card Body */}
-                    {!isCollapsed && (
-                      <div className="p-3.5 space-y-3">
-                        {block.type === 'heading' && (
-                          <HeadingBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'paragraph' && (
-                          <ParagraphBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'steps' && (
-                          <StepsBlockBody
-                            block={block}
-                            locale={locale}
-                            taskStartOffset={taskStartOffset}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'alert' && (
-                          <AlertBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'code_card' && (
-                          <CodeCardBlockBody
-                            block={block}
-                            locale={locale}
-                            langListId={langListId}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'list' && (
-                          <ListBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'quote' && (
-                          <QuoteBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'rough_diagram' && (
-                          <RoughDiagramBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'image' && (
-                          <ImageBlockBody
-                            block={block}
-                            locale={locale}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                        {block.type === 'raw_markdown' && (
-                          <RawMarkdownBlockBody
-                            block={block}
-                            onUpdate={(next) => updateBlock(idx, next)}
-                          />
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {showInsertPicker && (
-                    <div className="ui-popover-enter origin-top rounded-xl p-2.5 bg-surface-sheet border border-dashed border-border-ink flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs font-semibold text-ink-muted me-1">
-                        {v.insertBelow}:
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => insertSectionTaskAt(idx)}
-                        className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold bg-action-subtle text-link-ink border border-border-ink inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <IconCheckSquare className="w-3.5 h-3.5 text-link-ink" />
-                        <span>{copy.taskScopeSection}</span>
-                      </button>
-                      {INSERTABLE_TYPES.map((kind) => (
-                        <button
-                          key={kind}
-                          type="button"
-                          onClick={() => insertBlockAt(idx, kind)}
-                          className="min-h-7 px-2 py-0.5 rounded-lg text-xs bg-surface-raised hover:bg-action-subtle text-ink-primary border border-border-subtle inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          {blockIcon(kind)}
-                          <span>
-                            {kind === 'steps'
-                              ? copy.taskScopeParagraph
-                              : v.types[kind]}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+              commitBlocks(next);
+              scheduleFocus(newAfter.id, caret);
+            },
+            onReplaceBlock: (nextBlock, focus) => {
+              const next = [...displayBlocks];
+              next[idx] = nextBlock;
+              if (nextBlock.type === 'rough_diagram') {
+                setFreshDiagramIds((prev) => new Set(prev).add(nextBlock.id));
+              }
+              commitBlocks(next);
+              scheduleFocus(nextBlock.id, focus?.caret ?? 'start');
+            },
+            onBackspaceAtStart: (remainingText) => {
+              if (idx === 0) return;
+              const prev = displayBlocks[idx - 1];
+              if (prev.type === 'paragraph') {
+                const caretPos = prev.text.length;
+                const next = displayBlocks.filter((_, i) => i !== idx);
+                next[idx - 1] = { ...prev, text: `${prev.text}${remainingText}` };
+                commitBlocks(next);
+                scheduleFocus(prev.id, caretPos);
+                return;
+              }
+              if (prev.type === 'heading') {
+                const caretPos = prev.text.length;
+                const next = displayBlocks.filter((_, i) => i !== idx);
+                next[idx - 1] = {
+                  ...prev,
+                  text: `${prev.text}${remainingText.replace(/\n+/g, ' ')}`,
+                };
+                commitBlocks(next);
+                scheduleFocus(prev.id, caretPos);
+                return;
+              }
+              if (!remainingText.trim()) {
+                const next = displayBlocks.filter((_, i) => i !== idx);
+                commitBlocks(next);
+                scheduleFocus(prev.id, 'end');
+              } else {
+                scheduleFocus(prev.id, 'end');
+              }
+            },
+            onMoveFocusVertical: (direction) => {
+              const targetIdx = idx + direction;
+              if (targetIdx < 0 || targetIdx >= displayBlocks.length) return;
+              scheduleFocus(
+                displayBlocks[targetIdx].id,
+                direction < 0 ? 'end' : 'start',
               );
-            });
-          })()}
-        </div>
-      )}
+            },
+            marginNoteOpen: marginOpen,
+            onOpenMarginNote: () => {
+              setOpenMarginIds((prev) => new Set(prev).add(block.id));
+            },
+            onCloseMarginNote: () => {
+              setOpenMarginIds((prev) => {
+                const next = new Set(prev);
+                next.delete(block.id);
+                return next;
+              });
+            },
+          };
+
+          const updateCurrent = (nextBlock: VisualBlock) => {
+            const next = [...displayBlocks];
+            next[idx] = nextBlock;
+            commitBlocks(next);
+          };
+
+          const insertEmptyParaBelow = () => {
+            const nextPara: VisualBlock = {
+              id: createVisualId(),
+              type: 'paragraph',
+              text: '',
+              marginNote: '',
+            };
+            const next = [...displayBlocks];
+            next.splice(idx + 1, 0, nextPara);
+            commitBlocks(next);
+            scheduleFocus(nextPara.id, 0);
+          };
+
+          const isDropBefore =
+            draggingBlockId !== null &&
+            dropGapIndex === idx &&
+            idx !== displayBlocks.findIndex((b) => b.id === draggingBlockId) &&
+            idx !== displayBlocks.findIndex((b) => b.id === draggingBlockId) + 1;
+
+          const showDropAtEnd =
+            draggingBlockId !== null &&
+            idx === displayBlocks.length - 1 &&
+            dropGapIndex === displayBlocks.length &&
+            idx !== displayBlocks.findIndex((b) => b.id === draggingBlockId);
+
+          const supportsMarginToggle =
+            block.type === 'paragraph' ||
+            block.type === 'code_card' ||
+            block.type === 'image';
+
+          return (
+            <div key={block.id} className="space-y-2">
+              {isDropBefore && <div className="flow-drop-line" aria-hidden="true" />}
+
+              <div
+                data-flow-block-id={block.id}
+                data-dragging={draggingBlockId === block.id ? 'true' : undefined}
+                className="flow-block-row"
+              >
+                <BlockGutterHandle
+                  index={idx}
+                  total={displayBlocks.length}
+                  block={block}
+                  locale={locale}
+                  hasMarginNoteOpen={marginOpen}
+                  dragMovedRef={dragMovedRef}
+                  onInsertBelow={insertEmptyParaBelow}
+                  onDragPointerDown={(ev) => handleStartBlockDrag(block.id, ev)}
+                  onMoveUp={() => {
+                    if (idx === 0) return;
+                    const next = [...displayBlocks];
+                    const [m] = next.splice(idx, 1);
+                    next.splice(idx - 1, 0, m);
+                    commitBlocks(next);
+                  }}
+                  onMoveDown={() => {
+                    if (idx >= displayBlocks.length - 1) return;
+                    const next = [...displayBlocks];
+                    const [m] = next.splice(idx, 1);
+                    next.splice(idx + 1, 0, m);
+                    commitBlocks(next);
+                  }}
+                  onDuplicate={() => {
+                    const cloned = cloneVisualBlock(block);
+                    const next = [...displayBlocks];
+                    next.splice(idx + 1, 0, cloned);
+                    commitBlocks(next);
+                    scheduleFocus(cloned.id, 'end');
+                  }}
+                  onDelete={() => {
+                    if (displayBlocks.length <= 1) {
+                      const reset: VisualBlock = {
+                        id: block.id,
+                        type: 'paragraph',
+                        text: '',
+                        marginNote: '',
+                      };
+                      commitBlocks([reset]);
+                      scheduleFocus(reset.id, 0);
+                    } else {
+                      const prevTarget =
+                        displayBlocks[Math.max(0, idx - 1)]?.id ??
+                        displayBlocks[1]?.id;
+                      commitBlocks(displayBlocks.filter((_, i) => i !== idx));
+                      if (prevTarget) scheduleFocus(prevTarget, 'end');
+                    }
+                  }}
+                  onTurnInto={(target) => {
+                    const converted = convertBlockType(block, target);
+                    updateCurrent(converted);
+                    scheduleFocus(converted.id, 'end');
+                  }}
+                  onToggleMarginNote={
+                    supportsMarginToggle
+                      ? () => {
+                          if (marginOpen) {
+                            setOpenMarginIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(block.id);
+                              return next;
+                            });
+                            if ('marginNote' in block && block.marginNote) {
+                              updateCurrent({ ...block, marginNote: '' });
+                            }
+                          } else {
+                            setOpenMarginIds((prev) =>
+                              new Set(prev).add(block.id),
+                            );
+                          }
+                        }
+                      : undefined
+                  }
+                />
+
+                {block.type === 'paragraph' && (
+                  <ParagraphBlockBody
+                    block={block}
+                    locale={locale}
+                    index={idx}
+                    totalBlocks={displayBlocks.length}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'heading' && (
+                  <HeadingBlockBody
+                    block={block}
+                    locale={locale}
+                    sectionNumber={curSectionNum}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'steps' && (
+                  <StepsBlockBody
+                    block={block}
+                    locale={locale}
+                    taskStartOffset={taskStartOffset}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'alert' && (
+                  <AlertBlockBody
+                    block={block}
+                    locale={locale}
+                    onUpdate={(next) => updateCurrent(next)}
+                  />
+                )}
+                {block.type === 'code_card' && (
+                  <CodeCardBlockBody
+                    block={block}
+                    locale={locale}
+                    langListId={langListId}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'list' && (
+                  <ListBlockBody
+                    block={block}
+                    locale={locale}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'quote' && (
+                  <QuoteBlockBody
+                    block={block}
+                    locale={locale}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'rough_diagram' && (
+                  <RoughDiagramBlockBody
+                    block={block}
+                    locale={locale}
+                    theme={theme}
+                    initiallyExpanded={freshDiagramIds.has(block.id)}
+                    onUpdate={(next) => updateCurrent(next)}
+                  />
+                )}
+                {block.type === 'image' && (
+                  <ImageBlockBody
+                    block={block}
+                    locale={locale}
+                    onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
+                  />
+                )}
+                {block.type === 'raw_markdown' && (
+                  <RawMarkdownBlockBody
+                    block={block}
+                    onUpdate={(next) => updateCurrent(next)}
+                  />
+                )}
+              </div>
+
+              {showDropAtEnd && (
+                <div className="flow-drop-line" aria-hidden="true" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Notion-style bottom click pad: focuses trailing blank paragraph or appends one */}
+      <div
+        onClick={() => {
+          const last = displayBlocks[displayBlocks.length - 1];
+          if (last && last.type === 'paragraph' && !last.text.trim()) {
+            scheduleFocus(last.id, 0);
+            const row = containerRef.current?.querySelector<HTMLElement>(
+              `[data-flow-block-id="${last.id}"]`,
+            );
+            row
+              ?.querySelector<HTMLTextAreaElement>('[data-flow-input="primary"]')
+              ?.focus({ preventScroll: true });
+            return;
+          }
+          const created: VisualBlock = {
+            id: createVisualId(),
+            type: 'paragraph',
+            text: '',
+            marginNote: '',
+          };
+          commitBlocks([...displayBlocks, created]);
+          scheduleFocus(created.id, 0);
+        }}
+        className="min-h-20 cursor-text"
+      />
     </div>
   );
 }
