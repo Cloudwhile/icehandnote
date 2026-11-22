@@ -1,30 +1,35 @@
 use crate::{
     content_loader::{deterministic_uuid, ContentBundle},
+    domain_err, if_match_satisfies, note_quota_for_owner, precondition_failed_err,
+    revision_conflict_err,
     studio_auth::{default_seeded_blog_users, generate_raw_session_token},
-    domain_err, TutorialRepository,
+    TutorialRepository, NOTE_UNDO_GRACE_MINUTES,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
-        constant_time_str_eq, extract_body_without_frontmatter,
-        format_step_markdown_file_with_author, generate_action_token,
-        generate_email_verification_code, hash_action_token, hash_email_verification_code,
-        hash_password, hash_session_token, normalize_avatar_source, parse_user_agent_device,
-        verify_password, ArticleAuthorDto, BlogSsoClaims,
-        CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, SaveStudioStepInput,
-        SiteSettingsDto, StudioChapterDto, StudioLocaleBadgeDto, StudioStepEditorDto,
-        StudioStepRowDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto, UserProfileDto,
-        UserRole, UserSessionDto,
+        compute_step_content_sha256, compute_step_etag, constant_time_str_eq,
+        extract_body_without_frontmatter, format_step_markdown_file_with_meta,
+        generate_action_token, generate_email_verification_code, hash_action_token,
+        hash_email_verification_code, hash_password, hash_session_token, mask_email_address,
+        normalize_avatar_source, normalize_collaborator_role, normalize_locale_scope,
+        parse_user_agent_device, verify_password, ArticleAuthorDto, BlogSsoClaims,
+        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
+        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioChapterDto,
+        StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto, StudioTrackDto,
+        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
     },
     build_highlighted_snippet, compile_notebook_markdown,
     error::{DomainError, ErrorCode},
-    reading_time::estimate_reading_minutes, sanitize_user_note,
+    normalize_note_motivation, normalize_note_visuals,
+    reading_time::estimate_reading_minutes, sanitize_user_note, validate_user_note_content,
     webauthn::StoredPasskeyCredential,
-    ArticleTaskChecksDto,
-    ChapterNavDto, CreateMarginNoteInput, LearnerProgressDto, NotebookBlock, SearchHitDto,
-    StepDetailDto, StepNavItemDto, StepNeighborDto, TocItem, TrackSummaryDto, UserMarginNoteDto,
+    AnnotationTarget, ArticleTaskChecksDto, ChapterNavDto, CreateMarginNoteInput,
+    LearnerProgressDto, ListMarginNotesFilter, NotebookBlock, SearchHitDto, StepDetailDto,
+    StepNavItemDto, StepNeighborDto, TocItem, TrackSummaryDto, UpdateMarginNoteInput,
+    UserMarginNoteDto,
 };
 use sqlx::{postgres::PgRow, PgPool, Row};
 use std::{collections::HashSet, fs, path::Path};
@@ -34,6 +39,7 @@ const USER_SELECT_COLS: &str = "id, wp_user_id, username, display_name, email, a
     avatar_source, oauth_avatar_url, uploaded_avatar_url, oauth_provider, bio, role, \
     auth_source, is_banned, ban_reason, last_login_at, \
     (password_hash IS NOT NULL AND password_hash <> '') AS has_password, \
+    (EXISTS (SELECT 1 FROM step_collaborators sc WHERE sc.user_id = users.id) OR EXISTS (SELECT 1 FROM steps s WHERE s.owner_user_id = users.id)) AS has_collaborations, \
     ARRAY(SELECT provider FROM user_oauth_bindings uob WHERE uob.user_id = users.id ORDER BY uob.bound_at ASC) AS oauth_bindings";
 
 pub struct PostgresRepository {
@@ -60,6 +66,9 @@ impl PostgresRepository {
             include_str!("../migrations/0009_email_verification_codes.sql"),
             include_str!("../migrations/0010_sessions_and_login_otp.sql"),
             include_str!("../migrations/0011_multi_oauth_and_passkeys.sql"),
+            include_str!("../migrations/0012_step_published_at.sql"),
+            include_str!("../migrations/0013_annotations_and_notes.sql"),
+            include_str!("../migrations/0014_collaboration_rfc.sql"),
         ] {
             sqlx::raw_sql(sql).execute(&pool).await?;
         }
@@ -141,6 +150,7 @@ impl PostgresRepository {
             has_password,
             bio: r.try_get("bio").unwrap_or_default(),
             role: UserRole::from_db(&role_str),
+            has_collaborations: r.try_get("has_collaborations").unwrap_or(false),
             auth_source: r.try_get("auth_source")?,
             is_banned: r.try_get("is_banned").unwrap_or(false),
             ban_reason: r.try_get("ban_reason").unwrap_or_default(),
@@ -191,18 +201,19 @@ impl PostgresRepository {
                     display_name: dto.display_name,
                     avatar_url: dto.avatar_url,
                     is_owner: true,
+                    role: "owner".to_string(),
+                    locale_scope: Vec::new(),
                 });
             }
         }
 
-        let collab_q = format!(
-            "SELECT u.id, u.wp_user_id, u.username, u.display_name, u.email, u.avatar_url, \
+        let collab_q = "SELECT u.id, u.wp_user_id, u.username, u.display_name, u.email, u.avatar_url, \
              u.avatar_source, u.oauth_avatar_url, u.uploaded_avatar_url, u.oauth_provider, u.bio, \
-             u.role, u.auth_source, u.is_banned, u.ban_reason, u.last_login_at \
+             u.role, u.auth_source, u.is_banned, u.ban_reason, u.last_login_at, \
+             sc.role AS collab_role, sc.locale_scope AS collab_locale_scope \
              FROM step_collaborators sc JOIN users u ON u.id = sc.user_id \
-             WHERE sc.step_id = $1 ORDER BY sc.added_at ASC"
-        );
-        let crows = sqlx::query(&collab_q)
+             WHERE sc.step_id = $1 ORDER BY sc.added_at ASC";
+        let crows = sqlx::query(collab_q)
             .bind(step_id)
             .fetch_all(&self.pool)
             .await?;
@@ -211,12 +222,18 @@ impl PostgresRepository {
             if authors.iter().any(|a| a.user_id == Some(dto.id)) {
                 continue;
             }
+            let c_role: String = cr
+                .try_get::<String, _>("collab_role")
+                .unwrap_or_else(|_| "editor".to_string());
+            let c_scope: Vec<String> = cr.try_get("collab_locale_scope").unwrap_or_default();
             authors.push(ArticleAuthorDto {
                 user_id: Some(dto.id),
                 username: dto.username,
                 display_name: dto.display_name,
                 avatar_url: dto.avatar_url,
                 is_owner: false,
+                role: normalize_collaborator_role(Some(&c_role)),
+                locale_scope: c_scope,
             });
         }
 
@@ -228,38 +245,119 @@ impl PostgresRepository {
                 display_name: clean_fb.to_string(),
                 avatar_url: String::new(),
                 is_owner: true,
+                role: "owner".to_string(),
+                locale_scope: Vec::new(),
             });
         }
 
         Ok(authors)
     }
 
-    async fn can_edit_step(&self, actor: &UserProfileDto, step_id: Uuid) -> Result<bool> {
+    async fn resolve_viewer_step_role(
+        &self,
+        actor: &UserProfileDto,
+        step_id: Uuid,
+        owner_opt: Option<Uuid>,
+    ) -> Result<(String, Vec<String>)> {
         if actor.role.is_admin() {
-            return Ok(true);
+            return Ok(("admin".to_string(), Vec::new()));
         }
-        if !actor.role.can_author() {
-            return Ok(false);
+        if owner_opt == Some(actor.id) {
+            return Ok(("owner".to_string(), Vec::new()));
         }
-        let owner_opt: Option<Option<Uuid>> =
-            sqlx::query_scalar("SELECT owner_user_id FROM steps WHERE id = $1")
-                .bind(step_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        match owner_opt {
-            None => Ok(true),
-            Some(None) => Ok(true),
-            Some(Some(oid)) if oid == actor.id => Ok(true),
-            Some(Some(_)) => {
-                let is_collab: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM step_collaborators WHERE step_id = $1 AND user_id = $2)",
-                )
-                .bind(step_id)
-                .bind(actor.id)
-                .fetch_one(&self.pool)
-                .await?;
-                Ok(is_collab)
+        let collab = sqlx::query(
+            "SELECT role, locale_scope FROM step_collaborators WHERE step_id = $1 AND user_id = $2",
+        )
+        .bind(step_id)
+        .bind(actor.id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = collab {
+            let role: String = row
+                .try_get::<String, _>("role")
+                .unwrap_or_else(|_| "editor".to_string());
+            let scope: Vec<String> = row.try_get("locale_scope").unwrap_or_default();
+            return Ok((normalize_collaborator_role(Some(&role)), scope));
+        }
+        Ok(("none".to_string(), Vec::new()))
+    }
+
+    fn check_role_can_edit_locale(role: &str, scope: &[String], locale: &str) -> Result<()> {
+        match role {
+            "admin" | "owner" | "editor" => Ok(()),
+            "translator" => {
+                if scope.is_empty() || scope.iter().any(|l| l == locale) {
+                    Ok(())
+                } else {
+                    Err(domain_err(
+                        ErrorCode::CollaboratorRoleForbidden,
+                        format!(
+                            "Your translator role is scoped to [{}] and cannot edit locale '{locale}'.",
+                            scope.join(", ")
+                        ),
+                    ))
+                }
             }
+            "reviewer" => Err(domain_err(
+                ErrorCode::CollaboratorRoleForbidden,
+                "Reviewers have read-only access and cannot overwrite article content.",
+            )),
+            _ => Err(domain_err(
+                ErrorCode::StepEditForbidden,
+                "You do not have permission to edit this article.",
+            )),
+        }
+    }
+
+    async fn record_audit_log(
+        &self,
+        step_id: Uuid,
+        actor: &UserProfileDto,
+        action: &str,
+        detail: &str,
+    ) {
+        let _ = sqlx::query(
+            "INSERT INTO collaboration_audit_logs (id, step_id, actor_user_id, actor_name, action, detail, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(step_id)
+        .bind(actor.id)
+        .bind(&actor.display_name)
+        .bind(action)
+        .bind(detail)
+        .execute(&self.pool)
+        .await;
+    }
+
+    async fn lookup_step_id_and_owner(
+        &self,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Option<(Uuid, String, Option<Uuid>)>> {
+        let row_opt = sqlx::query(
+            r#"
+            SELECT s.id, c.slug AS chapter_slug, s.owner_user_id
+            FROM steps s
+            JOIN chapters c ON c.id = s.chapter_id
+            JOIN tracks t ON t.id = c.track_id AND t.slug = $1
+            WHERE s.slug = $3
+            ORDER BY CASE WHEN c.slug = $2 THEN 0 ELSE 1 END, c.chapter_number ASC, s.step_number ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(track_slug)
+        .bind(chapter_slug)
+        .bind(step_slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row_opt {
+            Some(r) => Ok(Some((
+                r.try_get("id")?,
+                r.try_get("chapter_slug")?,
+                r.try_get("owner_user_id").ok().flatten(),
+            ))),
+            None => Ok(None),
         }
     }
 
@@ -411,6 +509,7 @@ impl TutorialRepository for PostgresRepository {
                 t.id AS track_id,
                 COALESCE(tt_req.title, tt_def.title, t.slug) AS track_title,
                 c.id AS chapter_id,
+                c.slug AS chapter_slug,
                 COALESCE(ct_req.title, ct_def.title, c.slug) AS chapter_title,
                 s.id AS step_id,
                 s.step_number,
@@ -422,13 +521,15 @@ impl TutorialRepository for PostgresRepository {
                 s.author_name AS step_author_name,
                 s.takedown_reason
             FROM tracks t
-            JOIN chapters c ON c.track_id = t.id AND c.slug = $2
+            JOIN chapters c ON c.track_id = t.id
             JOIN steps s ON s.chapter_id = c.id AND s.slug = $3
             LEFT JOIN track_translations tt_req ON tt_req.track_id = t.id AND tt_req.locale_code = $1
             LEFT JOIN track_translations tt_def ON tt_def.track_id = t.id AND tt_def.locale_code = 'zh-CN'
             LEFT JOIN chapter_translations ct_req ON ct_req.chapter_id = c.id AND ct_req.locale_code = $1
             LEFT JOIN chapter_translations ct_def ON ct_def.chapter_id = c.id AND ct_def.locale_code = 'zh-CN'
             WHERE t.slug = $4 AND s.takedown_reason IS NULL
+            ORDER BY CASE WHEN c.slug = $2 THEN 0 ELSE 1 END, c.chapter_number ASC, s.step_number ASC
+            LIMIT 1
             "#,
         )
         .bind(locale)
@@ -443,6 +544,8 @@ impl TutorialRepository for PostgresRepository {
         };
 
         let track_id: Uuid = sr.try_get("track_id")?;
+        let resolved_chapter_slug: String = sr.try_get("chapter_slug")?;
+        let track_title_resolved: String = sr.try_get("track_title")?;
         let step_id: Uuid = sr.try_get("step_id")?;
         let default_locale: String = sr.try_get("default_locale")?;
         let canonical_revision: i32 = sr.try_get::<i32, _>("canonical_revision")?.max(1);
@@ -462,7 +565,7 @@ impl TutorialRepository for PostgresRepository {
 
         let tr_row = sqlx::query(
             r#"
-            SELECT locale_code, title, summary, license, author_name, tags, compiled_blocks, toc_tree, synced_revision, updated_at
+            SELECT locale_code, title, summary, license, author_name, tags, compiled_blocks, toc_tree, synced_revision, published_at, updated_at
             FROM step_translations
             WHERE step_id = $1 AND status = 'published'
             ORDER BY CASE WHEN locale_code = $2 THEN 0 WHEN locale_code = $3 THEN 1 ELSE 2 END, locale_code
@@ -497,7 +600,8 @@ impl TutorialRepository for PostgresRepository {
                 s.step_number,
                 s.estimated_minutes,
                 COALESCE(st_req.title, st_def.title, s.slug) AS step_title,
-                (st_req.id IS NOT NULL) AS has_req
+                (st_req.id IS NOT NULL) AS has_req,
+                (st_req.id IS NOT NULL AND GREATEST(st_req.synced_revision, 1) < GREATEST(s.canonical_revision, 1)) AS has_drift
             FROM chapters c
             JOIN steps s ON s.chapter_id = c.id
             LEFT JOIN chapter_translations ct_req ON ct_req.chapter_id = c.id AND ct_req.locale_code = $2
@@ -515,42 +619,41 @@ impl TutorialRepository for PostgresRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut chapters: Vec<ChapterNavDto> = Vec::new();
+        let mut all_nav_steps: Vec<StepNavItemDto> = Vec::new();
         let mut flat_steps: Vec<(String, String, String, Uuid)> = Vec::new();
+        let mut first_nav_ch_slug: Option<String> = None;
 
         for nr in nav_rows {
             let c_slug: String = nr.try_get("chapter_slug")?;
-            let c_num: i32 = nr.try_get("chapter_number")?;
-            let c_title: String = nr.try_get("chapter_title")?;
             let s_id: Uuid = nr.try_get("step_id")?;
             let s_slug: String = nr.try_get("step_slug")?;
             let s_num: i32 = nr.try_get("step_number")?;
             let s_mins: i32 = nr.try_get("estimated_minutes")?;
             let s_title: String = nr.try_get("step_title")?;
             let has_req: bool = nr.try_get("has_req")?;
+            let has_drift: bool = nr.try_get("has_drift").unwrap_or(false);
 
-            flat_steps.push((c_slug.clone(), s_slug.clone(), s_title.clone(), s_id));
-
-            if chapters.last().map(|c| c.slug.as_str()) != Some(c_slug.as_str()) {
-                chapters.push(ChapterNavDto {
-                    slug: c_slug,
-                    number: c_num,
-                    title: c_title,
-                    steps: Vec::new(),
-                });
+            if first_nav_ch_slug.is_none() {
+                first_nav_ch_slug = Some(c_slug.clone());
             }
-            if let Some(last_ch) = chapters.last_mut() {
-                last_ch.steps.push(StepNavItemDto {
-                    id: s_id,
-                    slug: s_slug,
-                    step_number: s_num,
-                    title: s_title,
-                    estimated_minutes: s_mins,
-                    has_requested_locale: has_req,
-                    has_revision_drift: false,
-                });
-            }
+            flat_steps.push((c_slug, s_slug.clone(), s_title.clone(), s_id));
+            all_nav_steps.push(StepNavItemDto {
+                id: s_id,
+                slug: s_slug,
+                step_number: s_num,
+                title: s_title,
+                estimated_minutes: s_mins,
+                has_requested_locale: has_req,
+                has_revision_drift: has_drift,
+            });
         }
+
+        let chapters = vec![ChapterNavDto {
+            slug: first_nav_ch_slug.unwrap_or_else(|| resolved_chapter_slug.clone()),
+            number: 1,
+            title: track_title_resolved.clone(),
+            steps: all_nav_steps,
+        }];
 
         let current_idx = flat_steps.iter().position(|(_, _, _, id)| *id == step_id);
         let prev_step = current_idx
@@ -583,24 +686,27 @@ impl TutorialRepository for PostgresRepository {
             .first()
             .map(|a| a.display_name.clone())
             .unwrap_or_default();
+        let updated_at: DateTime<Utc> = tr.try_get("updated_at")?;
+        let published_at: DateTime<Utc> = tr.try_get("published_at").unwrap_or(updated_at);
 
+        let is_fallback = resolved_locale != locale;
         Ok(Some(StepDetailDto {
             step_id,
             track_slug: track_slug.to_string(),
-            track_title: sr.try_get("track_title")?,
-            chapter_slug: chapter_slug.to_string(),
+            track_title: track_title_resolved,
+            chapter_slug: resolved_chapter_slug,
             chapter_title: sr.try_get("chapter_title")?,
             step_slug: step_slug.to_string(),
             step_number: sr.try_get("step_number")?,
             total_steps_in_track: flat_steps.len(),
             requested_locale: locale.to_string(),
-            resolved_locale: resolved_locale.clone(),
-            is_fallback: resolved_locale != locale,
+            resolved_locale,
+            is_fallback,
             available_locales,
             canonical_revision,
             synced_revision,
             version: synced_revision,
-            has_revision_drift: false,
+            has_revision_drift: !is_fallback && synced_revision < canonical_revision,
             estimated_minutes: sr.try_get("estimated_minutes")?,
             title: tr.try_get("title")?,
             summary: tr.try_get("summary")?,
@@ -616,7 +722,8 @@ impl TutorialRepository for PostgresRepository {
             prev_step,
             next_step,
             likes_count: sr.try_get("likes_count")?,
-            updated_at: tr.try_get("updated_at")?,
+            published_at,
+            updated_at,
         }))
     }
 
@@ -803,44 +910,185 @@ impl TutorialRepository for PostgresRepository {
         step_id: Uuid,
         learner_id: &str,
     ) -> Result<Vec<UserMarginNoteDto>> {
-        let rows = sqlx::query(
+        let (items, _) = self
+            .list_margin_notes_filtered(
+                learner_id,
+                &ListMarginNotesFilter {
+                    step_id: Some(step_id),
+                    limit: 500,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(items)
+    }
+
+    async fn list_margin_notes_filtered(
+        &self,
+        learner_id: &str,
+        filter: &ListMarginNotesFilter,
+    ) -> Result<(Vec<UserMarginNoteDto>, usize)> {
+        let limit = filter.limit.clamp(1, 500) as i64;
+        let offset = filter.offset as i64;
+        let locale_opt = filter
+            .locale_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let tag_opt = filter
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "all");
+        let q_pattern = filter
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+
+        let total: i64 = sqlx::query_scalar(
             r#"
-            SELECT id, learner_id, step_id, locale_code, block_anchor_id, note_color, content_html, raw_content, created_at
-            FROM user_margin_notes
-            WHERE step_id = $1 AND learner_id = $2
-            ORDER BY created_at ASC
+            SELECT COUNT(*)
+            FROM user_margin_notes n
+            WHERE n.learner_id = $1
+              AND n.deleted_at IS NULL
+              AND ($2::uuid IS NULL OR n.step_id = $2)
+              AND ($3::text IS NULL OR n.locale_code = $3)
+              AND ($4::text IS NULL OR n.tag = $4)
+              AND ($5::text IS NULL OR n.raw_content ILIKE $5)
             "#,
         )
-        .bind(step_id)
         .bind(learner_id)
-        .fetch_all(&self.pool)
+        .bind(filter.step_id)
+        .bind(locale_opt)
+        .bind(tag_opt)
+        .bind(&q_pattern)
+        .fetch_one(&self.pool)
         .await?;
+
+        let order_sql = if filter.step_id.is_some() {
+            "ORDER BY n.created_at ASC"
+        } else {
+            "ORDER BY n.updated_at DESC, n.created_at DESC"
+        };
+
+        let sql = format!(
+            r#"
+            SELECT n.id, n.learner_id, n.step_id, n.locale_code, n.block_anchor_id,
+                   n.note_color, n.tone, n.style, n.tag, n.motivation, n.target, n.body_format,
+                   n.content_html, n.raw_content, n.version, n.created_at, n.updated_at, n.deleted_at,
+                   t.slug AS track_slug, c.slug AS chapter_slug, s.slug AS step_slug,
+                   COALESCE(st_loc.title, st_def.title, s.slug) AS step_title
+            FROM user_margin_notes n
+            JOIN steps s ON s.id = n.step_id
+            JOIN chapters c ON c.id = s.chapter_id
+            JOIN tracks t ON t.id = c.track_id
+            LEFT JOIN step_translations st_loc ON st_loc.step_id = s.id AND st_loc.locale_code = n.locale_code
+            LEFT JOIN step_translations st_def ON st_def.step_id = s.id AND st_def.locale_code = s.default_locale
+            WHERE n.learner_id = $1
+              AND n.deleted_at IS NULL
+              AND ($2::uuid IS NULL OR n.step_id = $2)
+              AND ($3::text IS NULL OR n.locale_code = $3)
+              AND ($4::text IS NULL OR n.tag = $4)
+              AND ($5::text IS NULL OR n.raw_content ILIKE $5)
+            {order_sql}
+            LIMIT $6 OFFSET $7
+            "#
+        );
+
+        let rows = sqlx::query(&sql)
+            .bind(learner_id)
+            .bind(filter.step_id)
+            .bind(locale_opt)
+            .bind(tag_opt)
+            .bind(&q_pattern)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut notes = Vec::with_capacity(rows.len());
         for r in rows {
-            notes.push(UserMarginNoteDto {
+            let target: Option<AnnotationTarget> = r
+                .try_get::<Option<serde_json::Value>, _>("target")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_value(v).ok());
+            let mut dto = UserMarginNoteDto {
                 id: r.try_get("id")?,
                 learner_id: r.try_get("learner_id")?,
                 step_id: r.try_get("step_id")?,
                 locale_code: r.try_get("locale_code")?,
                 block_anchor_id: r.try_get("block_anchor_id")?,
                 note_color: r.try_get("note_color")?,
+                tone: r.try_get("tone")?,
+                style: r.try_get("style")?,
+                tag: r.try_get("tag")?,
+                motivation: r.try_get("motivation")?,
+                target,
+                body_format: r.try_get("body_format")?,
                 content_html: r.try_get("content_html")?,
                 raw_content: r.try_get("raw_content")?,
+                version: r.try_get("version")?,
                 created_at: r.try_get("created_at")?,
-            });
+                updated_at: r.try_get("updated_at")?,
+                deleted_at: r.try_get("deleted_at")?,
+                track_slug: r.try_get("track_slug").ok(),
+                chapter_slug: r.try_get("chapter_slug").ok(),
+                step_slug: r.try_get("step_slug").ok(),
+                step_title: r.try_get("step_title").ok(),
+            };
+            dto.hydrate_legacy_fields();
+            notes.push(dto);
         }
-        Ok(notes)
+        Ok((notes, total.max(0) as usize))
     }
 
     async fn create_margin_note(&self, input: CreateMarginNoteInput) -> Result<UserMarginNoteDto> {
-        let content_html = sanitize_user_note(&input.content);
+        let clean_content = validate_user_note_content(&input.content)?;
+        let quota = note_quota_for_owner(&input.learner_id);
+        let existing_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_margin_notes WHERE learner_id = $1 AND step_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(&input.learner_id)
+        .bind(input.step_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if existing_count as usize >= quota {
+            return Err(DomainError::new(
+                ErrorCode::NoteQuotaExceeded,
+                format!("Reached the maximum of {quota} notes for this article."),
+            )
+            .with_meta(serde_json::json!({ "quota": quota }))
+            .into());
+        }
+
+        let (tone, style, tag) = normalize_note_visuals(
+            input.tone.as_deref(),
+            input.style.as_deref(),
+            input.tag.as_deref(),
+            Some(&input.note_color),
+        );
+        let note_color = format!("{tone}:{style}:{tag}");
+        let motivation = normalize_note_motivation(input.motivation.as_deref(), &tag);
+        let content_html = sanitize_user_note(&clean_content);
+        let target_json = input
+            .target
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok());
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let body_format = "text/markdown".to_string();
+
         sqlx::query(
             r#"
-            INSERT INTO user_margin_notes (id, learner_id, step_id, locale_code, block_anchor_id, note_color, raw_content, content_html, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO user_margin_notes (
+                id, learner_id, step_id, locale_code, block_anchor_id,
+                note_color, tone, style, tag, motivation, target, body_format,
+                raw_content, content_html, version, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 1, $15, $15)
             "#,
         )
         .bind(id)
@@ -848,8 +1096,14 @@ impl TutorialRepository for PostgresRepository {
         .bind(input.step_id)
         .bind(&input.locale_code)
         .bind(&input.block_anchor_id)
-        .bind(&input.note_color)
-        .bind(&input.content)
+        .bind(&note_color)
+        .bind(&tone)
+        .bind(&style)
+        .bind(&tag)
+        .bind(&motivation)
+        .bind(&target_json)
+        .bind(&body_format)
+        .bind(&clean_content)
         .bind(&content_html)
         .bind(now)
         .execute(&self.pool)
@@ -861,20 +1115,310 @@ impl TutorialRepository for PostgresRepository {
             step_id: input.step_id,
             locale_code: input.locale_code,
             block_anchor_id: input.block_anchor_id,
-            note_color: input.note_color,
+            note_color,
+            tone,
+            style,
+            tag,
+            motivation,
+            target: input.target,
+            body_format,
             content_html,
-            raw_content: input.content,
+            raw_content: clean_content,
+            version: 1,
             created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            track_slug: None,
+            chapter_slug: None,
+            step_slug: None,
+            step_title: None,
         })
     }
 
-    async fn delete_margin_note(&self, note_id: Uuid, learner_id: &str) -> Result<bool> {
-        let res = sqlx::query("DELETE FROM user_margin_notes WHERE id = $1 AND learner_id = $2")
-            .bind(note_id)
-            .bind(learner_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected() > 0)
+    async fn update_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        input: UpdateMarginNoteInput,
+        expected_etag: Option<&str>,
+    ) -> Result<UserMarginNoteDto> {
+        let row_opt = sqlx::query(
+            r#"
+            SELECT id, learner_id, step_id, locale_code, block_anchor_id,
+                   note_color, tone, style, tag, motivation, target, body_format,
+                   content_html, raw_content, version, created_at, updated_at, deleted_at
+            FROM user_margin_notes
+            WHERE id = $1 AND learner_id = $2 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(note_id)
+        .bind(learner_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(r) = row_opt else {
+            return Err(domain_err(ErrorCode::NoteNotFound, "Note not found."));
+        };
+
+        let existing_target: Option<AnnotationTarget> = r
+            .try_get::<Option<serde_json::Value>, _>("target")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok());
+        let mut current = UserMarginNoteDto {
+            id: r.try_get("id")?,
+            learner_id: r.try_get("learner_id")?,
+            step_id: r.try_get("step_id")?,
+            locale_code: r.try_get("locale_code")?,
+            block_anchor_id: r.try_get("block_anchor_id")?,
+            note_color: r.try_get("note_color")?,
+            tone: r.try_get("tone")?,
+            style: r.try_get("style")?,
+            tag: r.try_get("tag")?,
+            motivation: r.try_get("motivation")?,
+            target: existing_target,
+            body_format: r.try_get("body_format")?,
+            content_html: r.try_get("content_html")?,
+            raw_content: r.try_get("raw_content")?,
+            version: r.try_get("version")?,
+            created_at: r.try_get("created_at")?,
+            updated_at: r.try_get("updated_at")?,
+            deleted_at: r.try_get("deleted_at")?,
+            track_slug: None,
+            chapter_slug: None,
+            step_slug: None,
+            step_title: None,
+        };
+        current.hydrate_legacy_fields();
+
+        if let Some(if_match) = expected_etag {
+            if !if_match_satisfies(if_match, &current.etag()) {
+                return Err(precondition_failed_err(if_match, &current));
+            }
+        }
+
+        let (next_raw, next_html) = if let Some(ref c) = input.content {
+            let validated = validate_user_note_content(c)?;
+            let rendered = sanitize_user_note(&validated);
+            (validated, rendered)
+        } else {
+            (current.raw_content.clone(), current.content_html.clone())
+        };
+
+        let (next_tone, next_style, next_tag) = normalize_note_visuals(
+            input.tone.as_deref().or(Some(&current.tone)),
+            input.style.as_deref().or(Some(&current.style)),
+            input.tag.as_deref().or(Some(&current.tag)),
+            input.note_color.as_deref(),
+        );
+        let next_note_color = format!("{next_tone}:{next_style}:{next_tag}");
+        let next_motivation = normalize_note_motivation(
+            input.motivation.as_deref().or(Some(&current.motivation)),
+            &next_tag,
+        );
+        let next_anchor = input
+            .block_anchor_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| current.block_anchor_id.clone());
+        let next_target = input.target.or(current.target.clone());
+        let next_target_json = next_target
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok());
+        let next_version = current.version.max(1) + 1;
+        let now = Utc::now();
+
+        let res = sqlx::query(
+            r#"
+            UPDATE user_margin_notes
+            SET block_anchor_id = $3,
+                note_color = $4,
+                tone = $5,
+                style = $6,
+                tag = $7,
+                motivation = $8,
+                target = $9,
+                raw_content = $10,
+                content_html = $11,
+                version = $12,
+                updated_at = $13
+            WHERE id = $1 AND learner_id = $2 AND version = $14 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(note_id)
+        .bind(learner_id)
+        .bind(&next_anchor)
+        .bind(&next_note_color)
+        .bind(&next_tone)
+        .bind(&next_style)
+        .bind(&next_tag)
+        .bind(&next_motivation)
+        .bind(&next_target_json)
+        .bind(&next_raw)
+        .bind(&next_html)
+        .bind(next_version)
+        .bind(now)
+        .bind(current.version)
+        .execute(&self.pool)
+        .await?;
+
+        if res.rows_affected() == 0 {
+            return Err(precondition_failed_err(
+                expected_etag.unwrap_or(""),
+                &current,
+            ));
+        }
+
+        Ok(UserMarginNoteDto {
+            id: current.id,
+            learner_id: current.learner_id,
+            step_id: current.step_id,
+            locale_code: current.locale_code,
+            block_anchor_id: next_anchor,
+            note_color: next_note_color,
+            tone: next_tone,
+            style: next_style,
+            tag: next_tag,
+            motivation: next_motivation,
+            target: next_target,
+            body_format: current.body_format,
+            content_html: next_html,
+            raw_content: next_raw,
+            version: next_version,
+            created_at: current.created_at,
+            updated_at: now,
+            deleted_at: None,
+            track_slug: None,
+            chapter_slug: None,
+            step_slug: None,
+            step_title: None,
+        })
+    }
+
+    async fn delete_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        expected_etag: Option<&str>,
+    ) -> Result<Option<DateTime<Utc>>> {
+        // Purge expired soft-deleted tombstones lazily
+        let _ = sqlx::query(
+            "DELETE FROM user_margin_notes WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - INTERVAL '15 minutes'",
+        )
+        .execute(&self.pool)
+        .await;
+
+        let row_opt = sqlx::query(
+            "SELECT version, updated_at FROM user_margin_notes WHERE id = $1 AND learner_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .bind(learner_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row_opt else {
+            return Ok(None);
+        };
+        let cur_ver: i32 = row.try_get("version").unwrap_or(1);
+        let cur_upd: DateTime<Utc> = row.try_get("updated_at").unwrap_or_else(|_| Utc::now());
+        let cur_etag = format!("\"ann-{}-v{}\"", note_id.simple(), cur_ver.max(1));
+        if let Some(if_match) = expected_etag {
+            if !if_match_satisfies(if_match, &cur_etag) {
+                return Err(DomainError::new(
+                    ErrorCode::PreconditionFailed,
+                    "This note was modified elsewhere. Refresh before deleting.",
+                )
+                .with_meta(serde_json::json!({
+                    "expected_etag": if_match,
+                    "current_etag": cur_etag,
+                    "current_version": cur_ver,
+                    "updated_at": cur_upd.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                }))
+                .into());
+            }
+        }
+
+        let now = Utc::now();
+        let res = sqlx::query(
+            "UPDATE user_margin_notes SET deleted_at = $3, updated_at = $3 WHERE id = $1 AND learner_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(note_id)
+        .bind(learner_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        if res.rows_affected() > 0 {
+            Ok(Some(now + Duration::minutes(NOTE_UNDO_GRACE_MINUTES)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn restore_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+    ) -> Result<UserMarginNoteDto> {
+        let now = Utc::now();
+        let cutoff = now - Duration::minutes(NOTE_UNDO_GRACE_MINUTES);
+        let row_opt = sqlx::query(
+            r#"
+            UPDATE user_margin_notes
+            SET deleted_at = NULL, version = version + 1, updated_at = $3
+            WHERE id = $1 AND learner_id = $2 AND deleted_at IS NOT NULL AND deleted_at >= $4
+            RETURNING id, learner_id, step_id, locale_code, block_anchor_id,
+                      note_color, tone, style, tag, motivation, target, body_format,
+                      content_html, raw_content, version, created_at, updated_at, deleted_at
+            "#,
+        )
+        .bind(note_id)
+        .bind(learner_id)
+        .bind(now)
+        .bind(cutoff)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(r) = row_opt else {
+            return Err(domain_err(
+                ErrorCode::NoteNotFound,
+                "Deleted note could not be restored or the undo window has expired.",
+            ));
+        };
+
+        let target: Option<AnnotationTarget> = r
+            .try_get::<Option<serde_json::Value>, _>("target")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok());
+        let mut dto = UserMarginNoteDto {
+            id: r.try_get("id")?,
+            learner_id: r.try_get("learner_id")?,
+            step_id: r.try_get("step_id")?,
+            locale_code: r.try_get("locale_code")?,
+            block_anchor_id: r.try_get("block_anchor_id")?,
+            note_color: r.try_get("note_color")?,
+            tone: r.try_get("tone")?,
+            style: r.try_get("style")?,
+            tag: r.try_get("tag")?,
+            motivation: r.try_get("motivation")?,
+            target,
+            body_format: r.try_get("body_format")?,
+            content_html: r.try_get("content_html")?,
+            raw_content: r.try_get("raw_content")?,
+            version: r.try_get("version")?,
+            created_at: r.try_get("created_at")?,
+            updated_at: r.try_get("updated_at")?,
+            deleted_at: r.try_get("deleted_at")?,
+            track_slug: None,
+            chapter_slug: None,
+            step_slug: None,
+            step_title: None,
+        };
+        dto.hydrate_legacy_fields();
+        Ok(dto)
     }
 
     async fn sync_bundle(&self, bundle: &ContentBundle) -> Result<usize> {
@@ -989,9 +1533,9 @@ impl TutorialRepository for PostgresRepository {
                             r#"
                             INSERT INTO step_translations (
                                 step_id, locale_code, title, summary, license, author_name, tags, raw_markdown,
-                                compiled_blocks, toc_tree, plain_text, synced_revision, status, updated_at
+                                compiled_blocks, toc_tree, plain_text, synced_revision, status, published_at, updated_at
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                             ON CONFLICT (step_id, locale_code) DO UPDATE
                             SET title = EXCLUDED.title,
                                 summary = EXCLUDED.summary,
@@ -1004,6 +1548,7 @@ impl TutorialRepository for PostgresRepository {
                                 plain_text = EXCLUDED.plain_text,
                                 synced_revision = EXCLUDED.synced_revision,
                                 status = EXCLUDED.status,
+                                published_at = EXCLUDED.published_at,
                                 updated_at = EXCLUDED.updated_at
                             "#,
                         )
@@ -1020,6 +1565,7 @@ impl TutorialRepository for PostgresRepository {
                         .bind(&tr.compiled.plain_text)
                         .bind(tr.compiled.frontmatter.synced_revision)
                         .bind(status_val)
+                        .bind(tr.published_at)
                         .bind(tr.updated_at)
                         .execute(&mut *tx)
                         .await?;
@@ -2834,7 +3380,11 @@ impl TutorialRepository for PostgresRepository {
     }
 
     async fn merge_anonymous_learner(&self, anon_id: &str, user_learner_id: &str) -> Result<()> {
-        if anon_id.trim().is_empty() || anon_id == user_learner_id {
+        let clean_anon = anon_id.trim();
+        if clean_anon.is_empty()
+            || clean_anon == user_learner_id
+            || clean_anon.starts_with("user:")
+        {
             return Ok(());
         }
         sqlx::query(
@@ -2871,8 +3421,13 @@ impl TutorialRepository for PostgresRepository {
         Ok(())
     }
 
-    async fn studio_list_tracks(&self, locale: &str) -> Result<Vec<StudioTrackDto>> {
+    async fn studio_list_tracks(
+        &self,
+        viewer: &UserProfileDto,
+        locale: &str,
+    ) -> Result<Vec<StudioTrackDto>> {
         let grav = self.fetch_gravatar_base().await;
+        let is_reader_only = !viewer.role.can_author();
         let t_rows = sqlx::query(
             r#"
             SELECT t.id, t.slug, t.difficulty, t.icon_kind, t.is_published,
@@ -2934,6 +3489,14 @@ impl TutorialRepository for PostgresRepository {
                     let tr_author: String = sr.try_get("tr_author").unwrap_or_default();
                     let crev: i32 = sr.try_get::<i32, _>("canonical_revision")?.max(1);
 
+                    let (viewer_role, _) = self
+                        .resolve_viewer_step_role(viewer, s_id, owner_id)
+                        .await?;
+                    let can_see_drafts = viewer_role != "none";
+                    if is_reader_only && !can_see_drafts {
+                        continue;
+                    }
+
                     let b_rows = sqlx::query(
                         "SELECT locale_code, status, synced_revision, updated_at FROM step_translations WHERE step_id = $1 ORDER BY locale_code ASC",
                     )
@@ -2941,17 +3504,25 @@ impl TutorialRepository for PostgresRepository {
                     .fetch_all(&self.pool)
                     .await?;
 
-                    let translations = b_rows
+                    let translations: Vec<StudioLocaleBadgeDto> = b_rows
                         .into_iter()
                         .filter_map(|br| {
+                            let status: String = br.try_get("status").ok()?;
+                            if !can_see_drafts && status == "draft" {
+                                return None;
+                            }
                             Some(StudioLocaleBadgeDto {
                                 locale: br.try_get("locale_code").ok()?,
-                                status: br.try_get("status").ok()?,
+                                status,
                                 synced_revision: br.try_get("synced_revision").ok()?,
                                 updated_at: br.try_get("updated_at").ok()?,
                             })
                         })
                         .collect();
+
+                    if translations.is_empty() && !can_see_drafts {
+                        continue;
+                    }
 
                     let authors = self
                         .load_step_authors(s_id, owner_id, &tr_author, &grav)
@@ -2973,6 +3544,10 @@ impl TutorialRepository for PostgresRepository {
                     });
                 }
 
+                if is_reader_only && steps.is_empty() {
+                    continue;
+                }
+
                 chapters.push(StudioChapterDto {
                     chapter_id: ch_id,
                     slug: cr.try_get("slug")?,
@@ -2980,6 +3555,10 @@ impl TutorialRepository for PostgresRepository {
                     title: cr.try_get("title")?,
                     steps,
                 });
+            }
+
+            if is_reader_only && chapters.is_empty() {
+                continue;
             }
 
             out.push(StudioTrackDto {
@@ -3005,12 +3584,14 @@ impl TutorialRepository for PostgresRepository {
     ) -> Result<StudioStepEditorDto> {
         let step_row = sqlx::query(
             r#"
-            SELECT s.id, s.step_number, s.estimated_minutes, s.canonical_revision, s.default_locale,
+            SELECT s.id, c.slug AS chapter_slug, s.step_number, s.estimated_minutes, s.canonical_revision, s.default_locale,
                    s.owner_user_id, s.author_name, s.takedown_reason, s.takedown_at, s.takedown_by
             FROM steps s
-            JOIN chapters c ON c.id = s.chapter_id AND c.slug = $2
+            JOIN chapters c ON c.id = s.chapter_id
             JOIN tracks t ON t.id = c.track_id AND t.slug = $1
             WHERE s.slug = $3
+            ORDER BY CASE WHEN c.slug = $2 THEN 0 ELSE 1 END, c.chapter_number ASC, s.step_number ASC
+            LIMIT 1
             "#,
         )
         .bind(track_slug)
@@ -3019,7 +3600,14 @@ impl TutorialRepository for PostgresRepository {
         .fetch_optional(&self.pool)
         .await?;
 
+        let now_utc = Utc::now();
         let Some(sr) = step_row else {
+            if !viewer.role.can_author() {
+                return Err(domain_err(
+                    ErrorCode::StepEditForbidden,
+                    "Only authors or administrators can create new articles.",
+                ));
+            }
             return Ok(StudioStepEditorDto {
                 track_slug: track_slug.to_string(),
                 chapter_slug: chapter_slug.to_string(),
@@ -3033,7 +3621,9 @@ impl TutorialRepository for PostgresRepository {
                 synced_revision: 1,
                 canonical_revision: 1,
                 version: 1,
-                status: "published".to_string(),
+                edit_seq: 0,
+                etag: String::new(),
+                status: "draft".to_string(),
                 license: String::new(),
                 tags: Vec::new(),
                 body_markdown: String::new(),
@@ -3044,15 +3634,27 @@ impl TutorialRepository for PostgresRepository {
                     display_name: viewer.display_name.clone(),
                     avatar_url: viewer.avatar_url.clone(),
                     is_owner: true,
+                    role: "owner".to_string(),
+                    locale_scope: Vec::new(),
                 }],
                 pending_invites: Vec::new(),
+                can_edit: true,
                 can_manage_collaborators: false,
+                can_leave: false,
+                viewer_role: if viewer.role.is_admin() {
+                    "admin".to_string()
+                } else {
+                    "owner".to_string()
+                },
                 takedown_reason: None,
                 takedown_at: None,
                 takedown_by: None,
+                published_at: now_utc,
+                updated_at: now_utc,
             });
         };
 
+        let resolved_chapter_slug: String = sr.try_get("chapter_slug")?;
         let step_id: Uuid = sr.try_get("id")?;
         let step_number: i32 = sr.try_get("step_number")?;
         let estimated_minutes: i32 = sr.try_get("estimated_minutes")?;
@@ -3064,13 +3666,21 @@ impl TutorialRepository for PostgresRepository {
         let takedown_at: Option<DateTime<Utc>> = sr.try_get("takedown_at").ok().flatten();
         let takedown_by: Option<String> = sr.try_get("takedown_by").ok().flatten();
 
-        let can_manage_collaborators = viewer.role.is_admin()
-            || owner_user_id.is_none()
-            || owner_user_id == Some(viewer.id);
+        let (viewer_role, viewer_scope) = self
+            .resolve_viewer_step_role(viewer, step_id, owner_user_id)
+            .await?;
+        let can_read_drafts = viewer_role != "none";
+        let can_edit =
+            Self::check_role_can_edit_locale(&viewer_role, &viewer_scope, locale).is_ok();
+        // C-03: Only owner or admin can manage collaborators (never unowned takeover)
+        let can_manage_collaborators =
+            viewer.role.is_admin() || owner_user_id == Some(viewer.id);
+        let can_leave = owner_user_id != Some(viewer.id)
+            && matches!(viewer_role.as_str(), "editor" | "translator" | "reviewer");
 
         let inv_rows = if can_manage_collaborators {
             sqlx::query(
-                "SELECT id, email, created_at, expires_at FROM collaboration_invites WHERE step_id = $1 AND expires_at > NOW() ORDER BY created_at DESC",
+                "SELECT id, email, role, locale_scope, created_at, expires_at FROM collaboration_invites WHERE step_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > NOW() ORDER BY created_at DESC",
             )
             .bind(step_id)
             .fetch_all(&self.pool)
@@ -3084,6 +3694,8 @@ impl TutorialRepository for PostgresRepository {
                 Some(CollaboratorInviteDto {
                     id: ir.try_get("id").ok()?,
                     email: ir.try_get("email").ok()?,
+                    role: normalize_collaborator_role(ir.try_get::<String, _>("role").ok().as_deref()),
+                    locale_scope: ir.try_get("locale_scope").unwrap_or_default(),
                     created_at: ir.try_get("created_at").ok()?,
                     expires_at: ir.try_get("expires_at").ok()?,
                 })
@@ -3093,7 +3705,7 @@ impl TutorialRepository for PostgresRepository {
         let grav = self.fetch_gravatar_base().await;
 
         let tr_opt = sqlx::query(
-            "SELECT title, summary, license, author_name, tags, raw_markdown, synced_revision, status FROM step_translations WHERE step_id = $1 AND locale_code = $2",
+            "SELECT title, summary, license, author_name, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2",
         )
         .bind(step_id)
         .bind(locale)
@@ -3101,8 +3713,16 @@ impl TutorialRepository for PostgresRepository {
         .await?;
 
         if let Some(tr) = tr_opt {
+            let status: String = tr.try_get("status")?;
+            if status == "draft" && !can_read_drafts {
+                return Err(domain_err(
+                    ErrorCode::DraftAccessForbidden,
+                    "You do not have permission to view this unpublished draft.",
+                ));
+            }
             let raw: String = tr.try_get("raw_markdown")?;
             let raw_lic: String = tr.try_get("license").unwrap_or_default();
+            let clean_lic = icehandnote_core::normalize_license_code(&raw_lic);
             let tr_auth: String = tr.try_get("author_name").unwrap_or_default();
             let fb_auth = if !tr_auth.trim().is_empty() {
                 tr_auth
@@ -3110,58 +3730,100 @@ impl TutorialRepository for PostgresRepository {
                 step_author_name
             };
             let synced_rev: i32 = tr.try_get::<i32, _>("synced_revision")?.max(1);
+            let title: String = tr.try_get("title")?;
+            let summary: String = tr.try_get("summary")?;
+            let tags: Vec<String> = tr.try_get("tags")?;
+            let body_markdown = extract_body_without_frontmatter(&raw);
+            let edit_seq: i64 = tr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
+            let stored_sha: String = tr.try_get("content_sha256").unwrap_or_default();
+            let eff_sha = if stored_sha.is_empty() {
+                compute_step_content_sha256(&title, &summary, &status, &clean_lic, &tags, &body_markdown)
+            } else {
+                stored_sha
+            };
+            let etag = compute_step_etag(edit_seq, &eff_sha);
+
             let authors = self
                 .load_step_authors(step_id, owner_user_id, &fb_auth, &grav)
                 .await?;
+            let updated_at: DateTime<Utc> = tr.try_get("updated_at").unwrap_or(now_utc);
+            let published_at: DateTime<Utc> = tr.try_get("published_at").unwrap_or(updated_at);
             return Ok(StudioStepEditorDto {
                 track_slug: track_slug.to_string(),
-                chapter_slug: chapter_slug.to_string(),
+                chapter_slug: resolved_chapter_slug,
                 step_slug: step_slug.to_string(),
                 locale: locale.to_string(),
                 exists: true,
-                title: tr.try_get("title")?,
-                summary: tr.try_get("summary")?,
+                title,
+                summary,
                 step_number,
                 estimated_minutes,
                 synced_revision: synced_rev,
                 canonical_revision,
                 version: synced_rev,
-                status: tr.try_get("status")?,
-                license: icehandnote_core::normalize_license_code(&raw_lic),
-                tags: tr.try_get("tags")?,
-                body_markdown: extract_body_without_frontmatter(&raw),
+                edit_seq,
+                etag,
+                status,
+                license: clean_lic,
+                tags,
+                body_markdown,
                 owner_user_id,
                 authors,
                 pending_invites,
+                can_edit,
                 can_manage_collaborators,
+                can_leave,
+                viewer_role,
                 takedown_reason,
                 takedown_at,
                 takedown_by,
+                published_at,
+                updated_at,
             });
         }
 
         let fallback_tr = sqlx::query(
-            "SELECT license, author_name, tags, raw_markdown FROM step_translations WHERE step_id = $1 ORDER BY CASE WHEN locale_code = $2 THEN 0 ELSE 1 END, locale_code LIMIT 1",
+            "SELECT license, author_name, tags, raw_markdown, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND ($3 OR status <> 'draft') ORDER BY CASE WHEN locale_code = $2 THEN 0 ELSE 1 END, locale_code LIMIT 1",
         )
         .bind(step_id)
         .bind(&default_locale)
+        .bind(can_read_drafts)
         .fetch_optional(&self.pool)
         .await?;
 
-        let (prefill_license, prefill_tags, prefill_body, fb_auth) = if let Some(fb) = fallback_tr {
-            let lic: String = fb.try_get("license").unwrap_or_default();
-            let tgs: Vec<String> = fb.try_get("tags").unwrap_or_default();
-            let raw: String = fb.try_get("raw_markdown").unwrap_or_default();
-            let au: String = fb.try_get("author_name").unwrap_or_default();
-            (
-                icehandnote_core::normalize_license_code(&lic),
-                tgs,
-                extract_body_without_frontmatter(&raw),
-                au,
-            )
-        } else {
-            (String::new(), Vec::new(), String::new(), step_author_name)
-        };
+        if fallback_tr.is_none() && !can_read_drafts {
+            return Err(domain_err(
+                ErrorCode::DraftAccessForbidden,
+                "You do not have permission to view this unpublished draft.",
+            ));
+        }
+
+        let (prefill_license, prefill_tags, prefill_body, fb_auth, fb_pub, fb_upd) =
+            if let Some(fb) = fallback_tr {
+                let lic: String = fb.try_get("license").unwrap_or_default();
+                let tgs: Vec<String> = fb.try_get("tags").unwrap_or_default();
+                let raw: String = fb.try_get("raw_markdown").unwrap_or_default();
+                let au: String = fb.try_get("author_name").unwrap_or_default();
+                let upd: DateTime<Utc> = fb.try_get("updated_at").unwrap_or(now_utc);
+                let pub_at: DateTime<Utc> = fb.try_get("published_at").unwrap_or(upd);
+                (
+                    icehandnote_core::normalize_license_code(&lic),
+                    tgs,
+                    extract_body_without_frontmatter(&raw),
+                    au,
+                    pub_at,
+                    upd,
+                )
+            } else {
+                (
+                    String::new(),
+                    Vec::new(),
+                    String::new(),
+                    step_author_name,
+                    now_utc,
+                    now_utc,
+                )
+            };
 
         let authors = self
             .load_step_authors(step_id, owner_user_id, &fb_auth, &grav)
@@ -3169,7 +3831,7 @@ impl TutorialRepository for PostgresRepository {
 
         Ok(StudioStepEditorDto {
             track_slug: track_slug.to_string(),
-            chapter_slug: chapter_slug.to_string(),
+            chapter_slug: resolved_chapter_slug,
             step_slug: step_slug.to_string(),
             locale: locale.to_string(),
             exists: false,
@@ -3180,6 +3842,8 @@ impl TutorialRepository for PostgresRepository {
             synced_revision: canonical_revision,
             canonical_revision,
             version: canonical_revision,
+            edit_seq: 0,
+            etag: String::new(),
             status: "draft".to_string(),
             license: prefill_license,
             tags: prefill_tags,
@@ -3187,10 +3851,15 @@ impl TutorialRepository for PostgresRepository {
             owner_user_id,
             authors,
             pending_invites,
+            can_edit,
             can_manage_collaborators,
+            can_leave,
+            viewer_role,
             takedown_reason,
             takedown_at,
             takedown_by,
+            published_at: fb_pub,
+            updated_at: fb_upd,
         })
     }
 
@@ -3199,12 +3868,89 @@ impl TutorialRepository for PostgresRepository {
         author: &UserProfileDto,
         input: SaveStudioStepInput,
         content_dir: &Path,
+        require_if_match: bool,
     ) -> Result<StudioStepEditorDto> {
+        let target_slug = input.step_slug.trim();
+        if !crate::studio_auth::is_valid_step_slug_segment(target_slug) {
+            return Err(domain_err(
+                ErrorCode::InvalidSlug,
+                "Invalid article URL slug.",
+            ));
+        }
+        let prev_slug_opt = input
+            .previous_step_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != target_slug);
+        if let Some(prev_slug) = prev_slug_opt {
+            if !crate::studio_auth::is_valid_step_slug_segment(prev_slug) {
+                return Err(domain_err(
+                    ErrorCode::InvalidSlug,
+                    "Invalid previous article URL slug.",
+                ));
+            }
+        }
+        let lookup_slug = prev_slug_opt.unwrap_or(target_slug);
+
+        let mut resolved_ch_slug = input.chapter_slug.trim().to_string();
+        if resolved_ch_slug.is_empty() || resolved_ch_slug == "-" {
+            let owner_ch: Option<String> = sqlx::query_scalar(
+                "SELECT c.slug FROM chapters c JOIN tracks t ON t.id = c.track_id JOIN steps s ON s.chapter_id = c.id WHERE t.slug = $1 AND s.slug = $2 LIMIT 1",
+            )
+            .bind(&input.track_slug)
+            .bind(lookup_slug)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(cs) = owner_ch {
+                resolved_ch_slug = cs;
+            } else {
+                let first_ch: Option<String> = sqlx::query_scalar(
+                    "SELECT c.slug FROM chapters c JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 ORDER BY c.chapter_number ASC LIMIT 1",
+                )
+                .bind(&input.track_slug)
+                .fetch_optional(&self.pool)
+                .await?;
+                if let Some(cs) = first_ch {
+                    resolved_ch_slug = cs;
+                } else {
+                    self.studio_create_chapter(
+                        CreateChapterInput {
+                            track_slug: input.track_slug.clone(),
+                            slug: "chapters".to_string(),
+                            number: 1,
+                            title_zh_tw: input.track_slug.clone(),
+                        },
+                        content_dir,
+                    )
+                    .await?;
+                    resolved_ch_slug = "chapters".to_string();
+                }
+            }
+        }
+
+        if prev_slug_opt.is_some() {
+            let conflict_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT s.id FROM steps s JOIN chapters c ON c.id = s.chapter_id JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 AND s.slug = $2 LIMIT 1",
+            )
+            .bind(&input.track_slug)
+            .bind(target_slug)
+            .fetch_optional(&self.pool)
+            .await?;
+            if conflict_id.is_some() {
+                return Err(domain_err(
+                    ErrorCode::Conflict,
+                    format!(
+                        "An article with URL slug '{target_slug}' already exists in this series."
+                    ),
+                ));
+            }
+        }
+
         let ch_row = sqlx::query(
             "SELECT c.id FROM chapters c JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 AND c.slug = $2",
         )
         .bind(&input.track_slug)
-        .bind(&input.chapter_slug)
+        .bind(&resolved_ch_slug)
         .fetch_one(&self.pool)
         .await?;
         let ch_id: Uuid = ch_row.try_get("id")?;
@@ -3213,9 +3959,16 @@ impl TutorialRepository for PostgresRepository {
             "SELECT id, canonical_revision, owner_user_id, takedown_reason FROM steps WHERE chapter_id = $1 AND slug = $2",
         )
         .bind(ch_id)
-        .bind(&input.step_slug)
+        .bind(lookup_slug)
         .fetch_optional(&self.pool)
         .await?;
+
+        if prev_slug_opt.is_some() && existing_step.is_none() {
+            return Err(domain_err(
+                ErrorCode::StepNotFound,
+                format!("Article not found: {lookup_slug}"),
+            ));
+        }
 
         let clean_status = if input.status == "draft" {
             "draft"
@@ -3223,15 +3976,16 @@ impl TutorialRepository for PostgresRepository {
             "published"
         };
         let predicted_minutes = estimate_reading_minutes(&input.body_markdown);
+        let now_utc = Utc::now();
 
-        let (step_id, next_version) = if let Some(sr) = existing_step {
+        let (step_id, next_version, next_edit_seq, resolved_published_at) = if let Some(sr) = existing_step {
             let sid: Uuid = sr.try_get("id")?;
-            if !self.can_edit_step(author, sid).await? {
-                return Err(domain_err(
-                    ErrorCode::StepEditForbidden,
-                    "You do not have permission to edit this article.",
-                ));
-            }
+            let owner_opt: Option<Uuid> = sr.try_get("owner_user_id").ok().flatten();
+            let (viewer_role, viewer_scope) = self
+                .resolve_viewer_step_role(author, sid, owner_opt)
+                .await?;
+            Self::check_role_can_edit_locale(&viewer_role, &viewer_scope, &input.locale)?;
+
             let td_reason: Option<String> = sr.try_get("takedown_reason").ok().flatten();
             if td_reason.is_some() && clean_status == "published" && !author.role.is_admin() {
                 return Err(domain_err(
@@ -3239,8 +3993,8 @@ impl TutorialRepository for PostgresRepository {
                     "This article has been taken down by an administrator. Save as draft and contact an administrator to restore it.",
                 ));
             }
-            let prev_ver: Option<i32> = sqlx::query_scalar(
-                "SELECT synced_revision FROM step_translations WHERE step_id = $1 AND locale_code = $2",
+            let prev_row = sqlx::query(
+                "SELECT title, summary, license, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, author_name, last_editor_name, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2",
             )
             .bind(sid)
             .bind(&input.locale)
@@ -3248,36 +4002,116 @@ impl TutorialRepository for PostgresRepository {
             .await?;
 
             let crev: i32 = sr.try_get::<i32, _>("canonical_revision")?.max(1);
-            let next_v = match prev_ver {
-                Some(pv) if clean_status == "published" => pv.max(1) + 1,
-                Some(pv) => pv.max(1),
-                None => 1,
+            let (next_v, next_seq, pub_at) = if let Some(pr) = prev_row {
+                let pv: i32 = pr.try_get("synced_revision").unwrap_or(1);
+                let prev_status: String = pr.try_get("status").unwrap_or_default();
+                let prev_pub: DateTime<Utc> = pr.try_get("published_at").unwrap_or(now_utc);
+                let cur_seq: i64 = pr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
+                let prev_title: String = pr.try_get("title").unwrap_or_default();
+                let prev_summary: String = pr.try_get("summary").unwrap_or_default();
+                let prev_lic: String = icehandnote_core::normalize_license_code(
+                    &pr.try_get::<String, _>("license").unwrap_or_default(),
+                );
+                let prev_tags: Vec<String> = pr.try_get("tags").unwrap_or_default();
+                let prev_raw: String = pr.try_get("raw_markdown").unwrap_or_default();
+                let prev_body = extract_body_without_frontmatter(&prev_raw);
+                let stored_sha: String = pr.try_get("content_sha256").unwrap_or_default();
+                let cur_sha = if stored_sha.is_empty() {
+                    compute_step_content_sha256(
+                        &prev_title,
+                        &prev_summary,
+                        &prev_status,
+                        &prev_lic,
+                        &prev_tags,
+                        &prev_body,
+                    )
+                } else {
+                    stored_sha
+                };
+                let cur_etag = compute_step_etag(cur_seq, &cur_sha);
+
+                match input
+                    .expected_etag
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(expected) => {
+                        if !if_match_satisfies(expected, &cur_etag) {
+                            let last_ed: String = pr.try_get("last_editor_name").unwrap_or_default();
+                            let auth_name: String = pr.try_get("author_name").unwrap_or_default();
+                            let updated_by = if !last_ed.is_empty() { last_ed } else { auth_name };
+                            let prev_upd: DateTime<Utc> =
+                                pr.try_get("updated_at").unwrap_or(now_utc);
+                            return Err(revision_conflict_err(
+                                expected,
+                                &cur_etag,
+                                cur_seq,
+                                &updated_by,
+                                prev_upd,
+                                &prev_title,
+                                &prev_summary,
+                                &prev_body,
+                            ));
+                        }
+                    }
+                    None if require_if_match => {
+                        return Err(domain_err(
+                            ErrorCode::PreconditionRequired,
+                            "An If-Match header with the current article ETag is required before saving.",
+                        ));
+                    }
+                    None => {}
+                }
+
+                let nv = if clean_status == "published" {
+                    pv.max(1) + 1
+                } else {
+                    pv.max(1)
+                };
+                let p_at = if prev_status == "draft" && clean_status == "published" {
+                    now_utc
+                } else {
+                    prev_pub
+                };
+                (nv, cur_seq + 1, p_at)
+            } else {
+                (1, 1, now_utc)
             };
             let next_c = crev.max(next_v);
             sqlx::query(
                 r#"
                 UPDATE steps
-                SET step_number = $2,
-                    estimated_minutes = $3,
-                    canonical_revision = $4,
-                    owner_user_id = COALESCE(owner_user_id, $5),
-                    author_name = CASE WHEN author_name = '' THEN $6 ELSE author_name END
+                SET slug = $2,
+                    step_number = $3,
+                    estimated_minutes = $4,
+                    canonical_revision = $5,
+                    owner_user_id = CASE WHEN owner_user_id IS NULL AND $8 THEN $6 ELSE owner_user_id END,
+                    author_name = CASE WHEN author_name = '' THEN $7 ELSE author_name END
                 WHERE id = $1
                 "#,
             )
             .bind(sid)
+            .bind(target_slug)
             .bind(input.step_number)
             .bind(predicted_minutes)
             .bind(next_c)
             .bind(author.id)
             .bind(&author.display_name)
+            .bind(author.role.is_admin())
             .execute(&self.pool)
             .await?;
-            (sid, next_v)
+            (sid, next_v, next_seq, pub_at)
         } else {
+            if !author.role.can_author() {
+                return Err(domain_err(
+                    ErrorCode::StepEditForbidden,
+                    "Only authors or administrators can create new articles.",
+                ));
+            }
             let sid = deterministic_uuid(&format!(
-                "step:{}:{}:{}",
-                input.track_slug, input.chapter_slug, input.step_slug
+                "step:{}:{resolved_ch_slug}:{target_slug}",
+                input.track_slug
             ));
             sqlx::query(
                 r#"
@@ -3287,7 +4121,7 @@ impl TutorialRepository for PostgresRepository {
             )
             .bind(sid)
             .bind(ch_id)
-            .bind(&input.step_slug)
+            .bind(target_slug)
             .bind(input.step_number)
             .bind(&input.locale)
             .bind(predicted_minutes)
@@ -3295,11 +4129,13 @@ impl TutorialRepository for PostgresRepository {
             .bind(&author.display_name)
             .execute(&self.pool)
             .await?;
-            (sid, 1)
+            (sid, 1, 1, now_utc)
         };
 
         let clean_license = icehandnote_core::normalize_license_code(&input.license);
-        let raw_md = format_step_markdown_file_with_author(
+        let pub_iso = resolved_published_at.to_rfc3339();
+        let upd_iso = now_utc.to_rfc3339();
+        let raw_md = format_step_markdown_file_with_meta(
             &input.title,
             &input.summary,
             input.step_number,
@@ -3309,20 +4145,31 @@ impl TutorialRepository for PostgresRepository {
             clean_status,
             &clean_license,
             &author.display_name,
+            Some(&pub_iso),
+            Some(&upd_iso),
             &input.tags,
             &input.body_markdown,
         );
         let compiled = compile_notebook_markdown(&raw_md);
         let blocks_json = serde_json::to_value(&compiled.blocks)?;
         let toc_json = serde_json::to_value(&compiled.toc)?;
+        let new_sha256 = compute_step_content_sha256(
+            &compiled.frontmatter.title,
+            &compiled.frontmatter.summary,
+            clean_status,
+            &clean_license,
+            &input.tags,
+            &input.body_markdown,
+        );
 
         sqlx::query(
             r#"
             INSERT INTO step_translations (
                 step_id, locale_code, title, summary, license, tags, raw_markdown,
-                compiled_blocks, toc_tree, plain_text, synced_revision, status, author_id, author_name, updated_at
+                compiled_blocks, toc_tree, plain_text, synced_revision, edit_seq, content_sha256,
+                last_editor_name, status, author_id, author_name, published_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             ON CONFLICT (step_id, locale_code) DO UPDATE
             SET title = EXCLUDED.title,
                 summary = EXCLUDED.summary,
@@ -3333,10 +4180,14 @@ impl TutorialRepository for PostgresRepository {
                 toc_tree = EXCLUDED.toc_tree,
                 plain_text = EXCLUDED.plain_text,
                 synced_revision = EXCLUDED.synced_revision,
+                edit_seq = EXCLUDED.edit_seq,
+                content_sha256 = EXCLUDED.content_sha256,
+                last_editor_name = EXCLUDED.last_editor_name,
                 status = EXCLUDED.status,
                 author_id = EXCLUDED.author_id,
                 author_name = EXCLUDED.author_name,
-                updated_at = NOW()
+                published_at = EXCLUDED.published_at,
+                updated_at = EXCLUDED.updated_at
             "#,
         )
         .bind(step_id)
@@ -3350,17 +4201,71 @@ impl TutorialRepository for PostgresRepository {
         .bind(toc_json)
         .bind(&compiled.plain_text)
         .bind(next_version)
+        .bind(next_edit_seq)
+        .bind(&new_sha256)
+        .bind(&author.display_name)
         .bind(clean_status)
         .bind(author.id)
         .bind(&author.display_name)
+        .bind(resolved_published_at)
+        .bind(now_utc)
         .execute(&self.pool)
         .await?;
 
+        let change_note: String = input
+            .change_note
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .chars()
+            .take(240)
+            .collect();
+
+        sqlx::query(
+            r#"
+            INSERT INTO step_revisions (
+                id, step_id, locale_code, edit_seq, synced_revision, status,
+                title, summary, body_markdown, content_sha256, author_user_id, author_name, change_note, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(step_id)
+        .bind(&input.locale)
+        .bind(next_edit_seq)
+        .bind(next_version)
+        .bind(clean_status)
+        .bind(&compiled.frontmatter.title)
+        .bind(&compiled.frontmatter.summary)
+        .bind(&input.body_markdown)
+        .bind(&new_sha256)
+        .bind(author.id)
+        .bind(&author.display_name)
+        .bind(&change_note)
+        .bind(now_utc)
+        .execute(&self.pool)
+        .await?;
+
+        let audit_detail = if change_note.is_empty() {
+            format!("{} #{} ({clean_status})", input.locale, next_edit_seq)
+        } else {
+            format!(
+                "{} #{} ({clean_status}) · {change_note}",
+                input.locale, next_edit_seq
+            )
+        };
+        self.record_audit_log(step_id, author, "revision_saved", &audit_detail)
+            .await;
+
         if input.write_to_content_dir {
-            let ch_dir = content_dir.join(&input.track_slug).join(&input.chapter_slug);
+            let ch_dir = content_dir.join(&input.track_slug).join(&resolved_ch_slug);
             let _ = fs::create_dir_all(&ch_dir);
+            if let Some(prev_slug) = prev_slug_opt {
+                crate::studio_auth::rename_step_markdown_files(&ch_dir, prev_slug, target_slug);
+            }
             let _ = fs::write(
-                ch_dir.join(format!("{}.{}.md", input.step_slug, input.locale)),
+                ch_dir.join(format!("{target_slug}.{}.md", input.locale)),
                 &raw_md,
             );
         }
@@ -3368,8 +4273,8 @@ impl TutorialRepository for PostgresRepository {
         self.studio_get_step_editor(
             author,
             &input.track_slug,
-            &input.chapter_slug,
-            &input.step_slug,
+            &resolved_ch_slug,
+            target_slug,
             &input.locale,
         )
         .await
@@ -3410,22 +4315,28 @@ impl TutorialRepository for PostgresRepository {
         }
 
         let ch_slug = if input.first_chapter_slug.trim().is_empty() {
-            "01-getting-started".to_string()
+            "chapters".to_string()
         } else {
-            input.first_chapter_slug.clone()
+            input.first_chapter_slug.trim().to_ascii_lowercase()
+        };
+        let ch_title = if input.first_chapter_title.trim().is_empty() {
+            clean_title.clone()
+        } else {
+            input.first_chapter_title
         };
         self.studio_create_chapter(
             CreateChapterInput {
                 track_slug: input.slug.clone(),
                 slug: ch_slug,
                 number: 1,
-                title_zh_tw: input.first_chapter_title,
+                title_zh_tw: ch_title,
             },
             content_dir,
         )
         .await?;
 
-        let all = self.studio_list_tracks("zh-CN").await?;
+        let sys_admin = default_seeded_blog_users().into_iter().next().unwrap().profile;
+        let all = self.studio_list_tracks(&sys_admin, "zh-CN").await?;
         Ok(all
             .into_iter()
             .find(|t| t.slug == input.slug)
@@ -3533,8 +4444,8 @@ impl TutorialRepository for PostgresRepository {
             .bind(step_slug)
             .fetch_optional(&self.pool)
             .await?;
-            if let Some(Some(oid)) = owner_opt {
-                if oid != actor.id {
+            if let Some(owner_val) = owner_opt {
+                if owner_val != Some(actor.id) {
                     return Err(domain_err(
                         ErrorCode::StepDeleteForbidden,
                         "Only the article owner or an administrator can delete this article.",
@@ -3579,6 +4490,8 @@ impl TutorialRepository for PostgresRepository {
         chapter_slug: &str,
         step_slug: &str,
         email: &str,
+        role: &str,
+        locale_scope: &[String],
     ) -> Result<(CollaboratorInviteDto, String, String)> {
         let Some(clean_email) = icehandnote_core::auth::validate_and_normalize_email(email) else {
             return Err(domain_err(
@@ -3587,6 +4500,13 @@ impl TutorialRepository for PostgresRepository {
             ));
         };
         let clean_email = clean_email.as_str();
+        let norm_role = normalize_collaborator_role(Some(role));
+        let norm_scope = if norm_role == "translator" {
+            normalize_locale_scope(locale_scope)
+        } else {
+            Vec::new()
+        };
+
         let srow_opt = sqlx::query(
             r#"
             SELECT s.id, s.owner_user_id,
@@ -3612,23 +4532,43 @@ impl TutorialRepository for PostgresRepository {
         let owner_opt: Option<Uuid> = srow.try_get("owner_user_id").ok().flatten();
         let step_title: String = srow.try_get("title")?;
 
-        if !actor.role.is_admin() && owner_opt.is_some() && owner_opt != Some(actor.id) {
+        // C-03: Never allow non-admin authors to hijack unowned articles
+        if !actor.role.is_admin() && owner_opt != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::InviteForbidden,
                 "Only the article owner or an administrator can send collaboration invites.",
             ));
         }
-        if owner_opt.is_none() {
-            sqlx::query("UPDATE steps SET owner_user_id = $2 WHERE id = $1 AND owner_user_id IS NULL")
-                .bind(step_id)
-                .bind(actor.id)
-                .execute(&self.pool)
-                .await?;
+
+        let already_member: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM users u
+                WHERE LOWER(u.email) = LOWER($2)
+                  AND (u.id = $3 OR EXISTS (SELECT 1 FROM step_collaborators sc WHERE sc.step_id = $1 AND sc.user_id = u.id))
+            )
+            "#,
+        )
+        .bind(step_id)
+        .bind(clean_email)
+        .bind(owner_opt)
+        .fetch_one(&self.pool)
+        .await?;
+        if already_member {
+            return Err(domain_err(
+                ErrorCode::InviteAlreadyMember,
+                "This user is already a collaborator on this article.",
+            ));
         }
 
-        let _ = sqlx::query("DELETE FROM collaboration_invites WHERE expires_at <= NOW()")
-            .execute(&self.pool)
-            .await;
+        // Supersede any existing active invite for (step_id, lower(email))
+        sqlx::query(
+            "UPDATE collaboration_invites SET revoked_at = NOW() WHERE step_id = $1 AND LOWER(email) = LOWER($2) AND consumed_at IS NULL AND revoked_at IS NULL",
+        )
+        .bind(step_id)
+        .bind(clean_email)
+        .execute(&self.pool)
+        .await?;
 
         let (raw_token, token_hash) = generate_action_token("ihn_inv", "collab_invite_v1");
         let id = Uuid::new_v4();
@@ -3637,24 +4577,36 @@ impl TutorialRepository for PostgresRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO collaboration_invites (id, step_id, email, token_hash, invited_by, expires_at, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO collaboration_invites (id, step_id, email, token_hash, role, locale_scope, invited_by, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(id)
         .bind(step_id)
         .bind(clean_email)
         .bind(&token_hash)
+        .bind(&norm_role)
+        .bind(&norm_scope)
         .bind(actor.id)
         .bind(expires_at)
         .bind(now)
         .execute(&self.pool)
         .await?;
 
+        self.record_audit_log(
+            step_id,
+            actor,
+            "invite_created",
+            &format!("{} ({norm_role})", mask_email_address(clean_email)),
+        )
+        .await;
+
         Ok((
             CollaboratorInviteDto {
                 id,
                 email: clean_email.to_string(),
+                role: norm_role,
+                locale_scope: norm_scope,
                 created_at: now,
                 expires_at,
             },
@@ -3663,13 +4615,93 @@ impl TutorialRepository for PostgresRepository {
         ))
     }
 
+    async fn preview_collaborator_invite(
+        &self,
+        viewer: Option<&UserProfileDto>,
+        raw_token: &str,
+    ) -> Result<InvitePreviewDto> {
+        let token_hash = hash_action_token("collab_invite_v1", raw_token.trim());
+        let row_opt = sqlx::query(
+            r#"
+            SELECT ci.id, ci.step_id, ci.email, ci.role, ci.locale_scope, ci.expires_at,
+                   ci.consumed_at, ci.revoked_at,
+                   COALESCE(u.display_name, 'Author') AS invited_by_name
+            FROM collaboration_invites ci
+            LEFT JOIN users u ON u.id = ci.invited_by
+            WHERE ci.token_hash = $1
+            "#,
+        )
+        .bind(&token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row_opt else {
+            return Err(domain_err(
+                ErrorCode::InviteNotFound,
+                "Collaboration invitation was not found.",
+            ));
+        };
+        let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
+        let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").ok().flatten();
+        let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at").ok().flatten();
+        if consumed_at.is_some() || revoked_at.is_some() || expires_at <= Utc::now() {
+            return Err(domain_err(
+                ErrorCode::InviteExpired,
+                "This collaboration invitation has expired, been revoked, or already been used.",
+            ));
+        }
+
+        let step_id: Uuid = row.try_get("step_id")?;
+        let loc_opt = sqlx::query(
+            r#"
+            SELECT t.slug AS track_slug, c.slug AS chapter_slug, s.slug AS step_slug,
+                   COALESCE((SELECT title FROM step_translations st WHERE st.step_id = s.id ORDER BY CASE WHEN st.locale_code = s.default_locale THEN 0 ELSE 1 END LIMIT 1), s.slug) AS article_title
+            FROM steps s
+            JOIN chapters c ON c.id = s.chapter_id
+            JOIN tracks t ON t.id = c.track_id
+            WHERE s.id = $1
+            "#,
+        )
+        .bind(step_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(loc) = loc_opt else {
+            return Err(domain_err(
+                ErrorCode::InviteTargetDeleted,
+                "The invited article no longer exists.",
+            ));
+        };
+
+        let inv_email: String = row.try_get("email")?;
+        let inv_role: String = row
+            .try_get::<String, _>("role")
+            .unwrap_or_else(|_| "editor".to_string());
+        let inv_scope: Vec<String> = row.try_get("locale_scope").unwrap_or_default();
+        let invited_by_name: String = row.try_get("invited_by_name").unwrap_or_default();
+        let email_matches_viewer = viewer.map(|v| v.email.trim().eq_ignore_ascii_case(&inv_email));
+
+        Ok(InvitePreviewDto {
+            invite_id: row.try_get("id")?,
+            masked_email: mask_email_address(&inv_email),
+            role: normalize_collaborator_role(Some(&inv_role)),
+            locale_scope: inv_scope,
+            track_slug: loc.try_get("track_slug")?,
+            chapter_slug: loc.try_get("chapter_slug")?,
+            step_slug: loc.try_get("step_slug")?,
+            article_title: loc.try_get("article_title")?,
+            invited_by_name,
+            expires_at,
+            email_matches_viewer,
+        })
+    }
+
     async fn revoke_collaborator_invite(
         &self,
         actor: &UserProfileDto,
         invite_id: Uuid,
     ) -> Result<bool> {
         let row_opt = sqlx::query(
-            "SELECT ci.step_id, s.owner_user_id FROM collaboration_invites ci JOIN steps s ON s.id = ci.step_id WHERE ci.id = $1",
+            "SELECT ci.step_id, ci.email, s.owner_user_id FROM collaboration_invites ci JOIN steps s ON s.id = ci.step_id WHERE ci.id = $1 AND ci.consumed_at IS NULL AND ci.revoked_at IS NULL",
         )
         .bind(invite_id)
         .fetch_optional(&self.pool)
@@ -3677,18 +4709,32 @@ impl TutorialRepository for PostgresRepository {
         let Some(row) = row_opt else {
             return Ok(false);
         };
+        let step_id: Uuid = row.try_get("step_id")?;
+        let inv_email: String = row.try_get("email")?;
         let owner: Option<Uuid> = row.try_get("owner_user_id").ok().flatten();
-        if !actor.role.is_admin() && owner.is_some() && owner != Some(actor.id) {
+        if !actor.role.is_admin() && owner != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::InviteForbidden,
                 "You do not have permission to revoke this invitation.",
             ));
         }
-        let res = sqlx::query("DELETE FROM collaboration_invites WHERE id = $1")
-            .bind(invite_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected() > 0)
+        let res = sqlx::query(
+            "UPDATE collaboration_invites SET revoked_at = NOW() WHERE id = $1 AND consumed_at IS NULL AND revoked_at IS NULL",
+        )
+        .bind(invite_id)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() > 0 {
+            self.record_audit_log(
+                step_id,
+                actor,
+                "invite_revoked",
+                &mask_email_address(&inv_email),
+            )
+            .await;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     async fn accept_collaborator_invite(
@@ -3696,28 +4742,53 @@ impl TutorialRepository for PostgresRepository {
         user: &UserProfileDto,
         raw_token: &str,
     ) -> Result<(String, String, String)> {
-        let token_hash = hash_action_token("collab_invite_v1", raw_token);
+        let token_hash = hash_action_token("collab_invite_v1", raw_token.trim());
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM collaboration_invites WHERE expires_at <= NOW()")
-            .execute(&mut *tx)
-            .await?;
 
-        let step_id_opt: Option<Uuid> = sqlx::query_scalar(
-            "DELETE FROM collaboration_invites WHERE token_hash = $1 RETURNING step_id",
+        let inv_opt = sqlx::query(
+            "SELECT id, step_id, email, role, locale_scope, expires_at, consumed_at, revoked_at FROM collaboration_invites WHERE token_hash = $1 FOR UPDATE",
         )
         .bind(&token_hash)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(step_id) = step_id_opt else {
+
+        let Some(inv_row) = inv_opt else {
             return Err(domain_err(
-                ErrorCode::InviteInvalid,
-                "Collaboration invitation link is invalid or has expired.",
+                ErrorCode::InviteNotFound,
+                "Collaboration invitation was not found.",
             ));
         };
+        let inv_id: Uuid = inv_row.try_get("id")?;
+        let step_id: Uuid = inv_row.try_get("step_id")?;
+        let inv_email: String = inv_row.try_get("email")?;
+        let inv_role = normalize_collaborator_role(
+            inv_row.try_get::<String, _>("role").ok().as_deref(),
+        );
+        let inv_scope: Vec<String> = inv_row.try_get("locale_scope").unwrap_or_default();
+        let expires_at: DateTime<Utc> = inv_row.try_get("expires_at")?;
+        let consumed_at: Option<DateTime<Utc>> = inv_row.try_get("consumed_at").ok().flatten();
+        let revoked_at: Option<DateTime<Utc>> = inv_row.try_get("revoked_at").ok().flatten();
+
+        if consumed_at.is_some() || revoked_at.is_some() || expires_at <= Utc::now() {
+            return Err(domain_err(
+                ErrorCode::InviteExpired,
+                "This collaboration invitation has expired, been revoked, or already been used.",
+            ));
+        }
+
+        // C-02: Strict email binding BEFORE consuming token
+        if !user.email.trim().eq_ignore_ascii_case(&inv_email) {
+            return Err(DomainError::new(
+                ErrorCode::InviteEmailMismatch,
+                "This invitation was issued for a different email address. Sign in with the invited account.",
+            )
+            .with_meta(serde_json::json!({ "expected_email": mask_email_address(&inv_email) }))
+            .into());
+        }
 
         let loc_opt = sqlx::query(
             r#"
-            SELECT t.slug AS track_slug, c.slug AS chapter_slug, s.slug AS step_slug
+            SELECT t.slug AS track_slug, c.slug AS chapter_slug, s.slug AS step_slug, s.owner_user_id
             FROM steps s
             JOIN chapters c ON c.id = s.chapter_id
             JOIN tracks t ON t.id = c.track_id
@@ -3733,20 +4804,53 @@ impl TutorialRepository for PostgresRepository {
                 "The invited article no longer exists.",
             ));
         };
-
-        sqlx::query(
-            "INSERT INTO step_collaborators (step_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        let owner_opt: Option<Uuid> = loc.try_get("owner_user_id").ok().flatten();
+        let already_collab: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM step_collaborators WHERE step_id = $1 AND user_id = $2)",
         )
         .bind(step_id)
         .bind(user.id)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        if owner_opt == Some(user.id) || already_collab {
+            return Err(domain_err(
+                ErrorCode::InviteAlreadyMember,
+                "You are already a collaborator on this article.",
+            ));
+        }
 
-        sqlx::query("UPDATE users SET role = 'author' WHERE id = $1 AND role = 'reader'")
-            .bind(user.id)
+        sqlx::query("UPDATE collaboration_invites SET consumed_at = NOW() WHERE id = $1")
+            .bind(inv_id)
             .execute(&mut *tx)
             .await?;
 
+        sqlx::query(
+            r#"
+            INSERT INTO step_collaborators (step_id, user_id, role, locale_scope)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (step_id, user_id) DO UPDATE SET role = EXCLUDED.role, locale_scope = EXCLUDED.locale_scope
+            "#,
+        )
+        .bind(step_id)
+        .bind(user.id)
+        .bind(&inv_role)
+        .bind(&inv_scope)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO collaboration_audit_logs (id, step_id, actor_user_id, actor_name, action, detail, created_at) VALUES ($1, $2, $3, $4, 'invite_accepted', $5, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(step_id)
+        .bind(user.id)
+        .bind(&user.display_name)
+        .bind(format!("{} ({inv_role})", user.display_name))
+        .execute(&mut *tx)
+        .await?;
+
+        // Note (C-02): Intentionally do NOT globally escalate `reader` -> `author`.
+        // Scoped Studio access is granted via `UserProfileDto::has_collaborations`.
         tx.commit().await?;
         Ok((
             loc.try_get("track_slug")?,
@@ -3763,31 +4867,23 @@ impl TutorialRepository for PostgresRepository {
         step_slug: &str,
         target_user_id: Uuid,
     ) -> Result<bool> {
-        let srow_opt = sqlx::query(
-            r#"
-            SELECT s.id, s.owner_user_id
-            FROM steps s
-            JOIN chapters c ON c.id = s.chapter_id
-            JOIN tracks t ON t.id = c.track_id
-            WHERE t.slug = $1 AND c.slug = $2 AND s.slug = $3
-            "#,
-        )
-        .bind(track_slug)
-        .bind(chapter_slug)
-        .bind(step_slug)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(srow) = srow_opt else {
+        let Some((step_id, _, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
             return Ok(false);
         };
-        let step_id: Uuid = srow.try_get("id")?;
-        let owner: Option<Uuid> = srow.try_get("owner_user_id").ok().flatten();
         if !actor.role.is_admin() && owner != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::CollaboratorForbidden,
                 "Only the article owner or an administrator can remove collaborators.",
             ));
         }
+        let target_name: String = sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+            .bind(target_user_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or_else(|| target_user_id.to_string());
         let res = sqlx::query(
             "DELETE FROM step_collaborators WHERE step_id = $1 AND user_id = $2",
         )
@@ -3795,7 +4891,370 @@ impl TutorialRepository for PostgresRepository {
         .bind(target_user_id)
         .execute(&self.pool)
         .await?;
-        Ok(res.rows_affected() > 0)
+        if res.rows_affected() > 0 {
+            self.record_audit_log(step_id, actor, "collaborator_removed", &target_name)
+                .await;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn update_step_collaborator_role(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+        role: &str,
+        locale_scope: &[String],
+    ) -> Result<bool> {
+        let Some((step_id, _, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !actor.role.is_admin() && owner != Some(actor.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Only the article owner or an administrator can update collaborator roles.",
+            ));
+        }
+        let norm_role = normalize_collaborator_role(Some(role));
+        let norm_scope = if norm_role == "translator" {
+            normalize_locale_scope(locale_scope)
+        } else {
+            Vec::new()
+        };
+        let res = sqlx::query(
+            "UPDATE step_collaborators SET role = $3, locale_scope = $4 WHERE step_id = $1 AND user_id = $2",
+        )
+        .bind(step_id)
+        .bind(target_user_id)
+        .bind(&norm_role)
+        .bind(&norm_scope)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() > 0 {
+            let target_name: String =
+                sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+                    .bind(target_user_id)
+                    .fetch_optional(&self.pool)
+                    .await?
+                    .unwrap_or_else(|| target_user_id.to_string());
+            self.record_audit_log(
+                step_id,
+                actor,
+                "role_updated",
+                &format!("{target_name} -> {norm_role}"),
+            )
+            .await;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn leave_step_collaboration(
+        &self,
+        user: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<bool> {
+        let Some((step_id, _, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if owner == Some(user.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Article owners must transfer ownership before leaving.",
+            ));
+        }
+        let res = sqlx::query(
+            "DELETE FROM step_collaborators WHERE step_id = $1 AND user_id = $2",
+        )
+        .bind(step_id)
+        .bind(user.id)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() > 0 {
+            self.record_audit_log(step_id, user, "collaborator_left", &user.display_name)
+                .await;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn transfer_step_ownership(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+    ) -> Result<bool> {
+        let Some((step_id, _, prev_owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !actor.role.is_admin() && prev_owner != Some(actor.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Only the article owner or an administrator can transfer ownership.",
+            ));
+        }
+        let target_name_opt: Option<String> = sqlx::query_scalar(
+            "SELECT display_name FROM users WHERE id = $1 AND is_banned = FALSE",
+        )
+        .bind(target_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(target_name) = target_name_opt else {
+            return Err(domain_err(
+                ErrorCode::UserNotFound,
+                "Target user not found.",
+            ));
+        };
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE steps SET owner_user_id = $2, author_name = $3 WHERE id = $1")
+            .bind(step_id)
+            .bind(target_user_id)
+            .bind(&target_name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM step_collaborators WHERE step_id = $1 AND user_id = $2")
+            .bind(step_id)
+            .bind(target_user_id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(old_oid) = prev_owner {
+            if old_oid != target_user_id {
+                sqlx::query(
+                    "INSERT INTO step_collaborators (step_id, user_id, role, locale_scope) VALUES ($1, $2, 'editor', '{}') ON CONFLICT (step_id, user_id) DO UPDATE SET role = 'editor', locale_scope = '{}'",
+                )
+                .bind(step_id)
+                .bind(old_oid)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        self.record_audit_log(
+            step_id,
+            actor,
+            "owner_transferred",
+            &format!("-> {target_name}"),
+        )
+        .await;
+        Ok(true)
+    }
+
+    async fn list_step_revisions(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+    ) -> Result<Vec<StepRevisionDto>> {
+        let Some((step_id, _, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        let (viewer_role, _) = self
+            .resolve_viewer_step_role(viewer, step_id, owner)
+            .await?;
+        let can_read_drafts = viewer_role != "none";
+        if !can_read_drafts {
+            let has_pub: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM step_translations WHERE step_id = $1 AND locale_code = $2 AND status <> 'draft')",
+            )
+            .bind(step_id)
+            .bind(locale)
+            .fetch_one(&self.pool)
+            .await?;
+            if !has_pub {
+                return Err(domain_err(
+                    ErrorCode::DraftAccessForbidden,
+                    "You do not have permission to view this article's revision history.",
+                ));
+            }
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id, step_id, locale_code, edit_seq, synced_revision, status,
+                   title, summary, body_markdown, content_sha256, author_user_id, author_name, change_note, created_at
+            FROM step_revisions
+            WHERE step_id = $1 AND locale_code = $2 AND ($3 OR status <> 'draft')
+            ORDER BY edit_seq DESC, created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(step_id)
+        .bind(locale)
+        .bind(can_read_drafts)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                Some(StepRevisionDto {
+                    id: r.try_get("id").ok()?,
+                    step_id: r.try_get("step_id").ok()?,
+                    locale_code: r.try_get("locale_code").ok()?,
+                    edit_seq: r.try_get("edit_seq").ok()?,
+                    synced_revision: r.try_get("synced_revision").ok()?,
+                    status: r.try_get("status").ok()?,
+                    title: r.try_get("title").ok()?,
+                    summary: r.try_get("summary").unwrap_or_default(),
+                    body_markdown: r.try_get("body_markdown").ok()?,
+                    content_sha256: r.try_get("content_sha256").unwrap_or_default(),
+                    author_user_id: r.try_get("author_user_id").ok().flatten(),
+                    author_name: r.try_get("author_name").unwrap_or_default(),
+                    change_note: r.try_get("change_note").unwrap_or_default(),
+                    created_at: r.try_get("created_at").ok()?,
+                })
+            })
+            .collect())
+    }
+
+    async fn restore_step_revision(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+        revision_id: Uuid,
+        expected_etag: Option<&str>,
+        content_dir: &Path,
+    ) -> Result<StudioStepEditorDto> {
+        let Some((step_id, resolved_ch_slug, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Err(domain_err(ErrorCode::StepNotFound, "Article not found."));
+        };
+        let (viewer_role, viewer_scope) = self
+            .resolve_viewer_step_role(actor, step_id, owner)
+            .await?;
+        Self::check_role_can_edit_locale(&viewer_role, &viewer_scope, locale)?;
+
+        let rev_opt = sqlx::query(
+            "SELECT edit_seq, synced_revision, title, summary, body_markdown FROM step_revisions WHERE id = $1 AND step_id = $2 AND locale_code = $3",
+        )
+        .bind(revision_id)
+        .bind(step_id)
+        .bind(locale)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(rev) = rev_opt else {
+            return Err(domain_err(
+                ErrorCode::RevisionNotFound,
+                "Revision snapshot not found.",
+            ));
+        };
+
+        let meta_row = sqlx::query(
+            r#"
+            SELECT s.step_number, COALESCE(st.status, 'draft') AS status,
+                   COALESCE(st.license, '') AS license, COALESCE(st.tags, '{}') AS tags
+            FROM steps s
+            LEFT JOIN step_translations st ON st.step_id = s.id AND st.locale_code = $2
+            WHERE s.id = $1
+            "#,
+        )
+        .bind(step_id)
+        .bind(locale)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let rev_seq: i64 = rev.try_get("edit_seq")?;
+        let input = SaveStudioStepInput {
+            track_slug: track_slug.to_string(),
+            chapter_slug: resolved_ch_slug,
+            step_slug: step_slug.to_string(),
+            previous_step_slug: None,
+            locale: locale.to_string(),
+            title: rev.try_get("title")?,
+            summary: rev.try_get("summary").unwrap_or_default(),
+            step_number: meta_row.try_get("step_number")?,
+            estimated_minutes: 1,
+            synced_revision: rev.try_get("synced_revision").unwrap_or(1),
+            bump_canonical: false,
+            status: meta_row.try_get("status")?,
+            license: meta_row.try_get("license").unwrap_or_default(),
+            tags: meta_row.try_get("tags").unwrap_or_default(),
+            body_markdown: rev.try_get("body_markdown")?,
+            write_to_content_dir: true,
+            expected_etag: expected_etag.map(ToString::to_string),
+            change_note: Some(format!("Restored from #{rev_seq}")),
+        };
+        let saved = self
+            .studio_save_step(actor, input, content_dir, true)
+            .await?;
+        self.record_audit_log(
+            step_id,
+            actor,
+            "revision_restored",
+            &format!("{locale} <- #{rev_seq}"),
+        )
+        .await;
+        Ok(saved)
+    }
+
+    async fn list_step_audit_logs(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Vec<CollaborationAuditLogDto>> {
+        let Some((step_id, _, owner)) = self
+            .lookup_step_id_and_owner(track_slug, chapter_slug, step_slug)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        let (viewer_role, _) = self
+            .resolve_viewer_step_role(viewer, step_id, owner)
+            .await?;
+        if viewer_role == "none" {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "You do not have permission to view this article's collaboration audit log.",
+            ));
+        }
+        let rows = sqlx::query(
+            "SELECT id, step_id, actor_user_id, actor_name, action, detail, created_at FROM collaboration_audit_logs WHERE step_id = $1 ORDER BY created_at DESC LIMIT 50",
+        )
+        .bind(step_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                Some(CollaborationAuditLogDto {
+                    id: r.try_get("id").ok()?,
+                    step_id: r.try_get("step_id").ok()?,
+                    actor_user_id: r.try_get("actor_user_id").ok().flatten(),
+                    actor_name: r.try_get("actor_name").unwrap_or_default(),
+                    action: r.try_get("action").ok()?,
+                    detail: r.try_get("detail").unwrap_or_default(),
+                    created_at: r.try_get("created_at").ok()?,
+                })
+            })
+            .collect())
     }
 
     async fn admin_takedown_step(

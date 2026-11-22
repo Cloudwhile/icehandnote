@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use pulldown_cmark::{html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub const SUPPORTED_LOCALES: &[(&str, &str)] = &[
@@ -115,11 +115,17 @@ pub enum NotebookBlock {
         is_task: bool,
         #[serde(default)]
         default_checked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<String>,
     },
     Paragraph {
         block_id: String,
         html: String,
         margin_note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
     },
     Alert {
         block_id: String,
@@ -134,6 +140,10 @@ pub enum NotebookBlock {
         tone: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         badge: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
     },
     CodeCard {
         block_id: String,
@@ -164,6 +174,10 @@ pub enum NotebookBlock {
     Quote {
         block_id: String,
         html: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
     },
     Image {
         block_id: String,
@@ -173,6 +187,34 @@ pub enum NotebookBlock {
         caption: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         margin_note: Option<String>,
+    },
+    /// Embedded die-cut pixel-art sticker illustration inside article content
+    #[serde(rename = "pixel_sticker")]
+    PixelSticker {
+        block_id: String,
+        sprite: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotate: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flip: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
     },
 }
 
@@ -205,7 +247,28 @@ pub struct StepFrontmatter {
     #[serde(default)]
     pub author: String,
     #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// Parse an RFC 3339 timestamp or `YYYY-MM-DD` calendar date string into UTC `DateTime<Utc>`.
+pub fn parse_flexible_utc(raw: &str) -> Option<DateTime<Utc>> {
+    let clean = raw.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(clean) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(clean, "%Y-%m-%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc));
+    }
+    None
 }
 
 /// Normalize Creative Commons / copyright license identifiers into canonical slugs.
@@ -340,6 +403,8 @@ pub struct StepDetailDto {
     pub prev_step: Option<StepNeighborDto>,
     pub next_step: Option<StepNeighborDto>,
     pub likes_count: i64,
+    #[serde(default = "Utc::now")]
+    pub published_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -355,6 +420,70 @@ pub struct SearchHitDto {
     pub tags: Vec<String>,
 }
 
+pub const MAX_NOTE_CHARS: usize = 2000;
+
+/// W3C Web Annotation Data Model (`REC-annotation-model-20170223`) Selector variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AnnotationSelector {
+    FragmentSelector {
+        #[serde(rename = "conformsTo", default = "default_fragment_conforms_to")]
+        conforms_to: String,
+        value: String,
+    },
+    TextQuoteSelector {
+        exact: String,
+        #[serde(default)]
+        prefix: String,
+        #[serde(default)]
+        suffix: String,
+    },
+    TextPositionSelector {
+        start: usize,
+        end: usize,
+    },
+}
+
+fn default_fragment_conforms_to() -> String {
+    "https://icehandnote.dev/spec/block-id".to_string()
+}
+
+/// W3C Web Annotation SpecificResource target binding a note to both a stable block anchor
+/// and fuzzy text quote context so notes survive upstream edits without disappearing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AnnotationTarget {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub source_revision: i32,
+    #[serde(default)]
+    pub selector: Vec<AnnotationSelector>,
+}
+
+fn default_note_tone() -> String {
+    "amber".to_string()
+}
+
+fn default_note_style() -> String {
+    "tape".to_string()
+}
+
+fn default_note_tag() -> String {
+    "note".to_string()
+}
+
+fn default_note_motivation() -> String {
+    "commenting".to_string()
+}
+
+fn default_note_body_format() -> String {
+    "text/markdown".to_string()
+}
+
+fn default_note_version() -> i32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMarginNoteDto {
     pub id: Uuid,
@@ -362,20 +491,210 @@ pub struct UserMarginNoteDto {
     pub step_id: Uuid,
     pub locale_code: String,
     pub block_anchor_id: String,
+    /// Legacy combined `"<tone>:<style>:<tag>"` string kept synchronized for backwards compatibility.
     pub note_color: String,
+    #[serde(default = "default_note_tone")]
+    pub tone: String,
+    #[serde(default = "default_note_style")]
+    pub style: String,
+    #[serde(default = "default_note_tag")]
+    pub tag: String,
+    #[serde(default = "default_note_motivation")]
+    pub motivation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AnnotationTarget>,
+    #[serde(default = "default_note_body_format")]
+    pub body_format: String,
     pub content_html: String,
     pub raw_content: String,
+    #[serde(default = "default_note_version")]
+    pub version: i32,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "Utc::now")]
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
+    // Cross-article navigation metadata populated for "My Notes" global queries & export
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_title: Option<String>,
+}
+
+impl UserMarginNoteDto {
+    /// Strong RFC 9110 ETag tied to note identity and monotonically increasing version.
+    pub fn etag(&self) -> String {
+        format!("\"ann-{}-v{}\"", self.id.simple(), self.version.max(1))
+    }
+
+    /// Backfill orthogonal `tone`/`style`/`tag` and `updated_at` when loading legacy records.
+    pub fn hydrate_legacy_fields(&mut self) {
+        let (ltone, lstyle, ltag) = normalize_note_visuals(
+            Some(&self.tone),
+            Some(&self.style),
+            Some(&self.tag),
+            Some(&self.note_color),
+        );
+        self.tone = ltone;
+        self.style = lstyle;
+        self.tag = ltag;
+        self.note_color = format!("{}:{}:{}", self.tone, self.style, self.tag);
+        if self.version < 1 {
+            self.version = 1;
+        }
+        if self.motivation.trim().is_empty() {
+            self.motivation = default_note_motivation();
+        }
+        if self.body_format.trim().is_empty() {
+            self.body_format = default_note_body_format();
+        }
+    }
+}
+
+pub fn normalize_note_tone(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "amber" | "yellow" => Some("amber"),
+        "violet" | "purple" => Some("violet"),
+        "ice" | "blue" => Some("ice"),
+        "mint" | "green" => Some("mint"),
+        "coral" | "pink" | "rose" => Some("coral"),
+        "paper" | "neutral" | "gray" => Some("paper"),
+        _ => None,
+    }
+}
+
+pub fn normalize_note_style(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tape" => Some("tape"),
+        "pin" => Some("pin"),
+        "torn" => Some("torn"),
+        "clip" => Some("clip"),
+        "stamp" => Some("stamp"),
+        "tag" => Some("tag"),
+        "looseleaf" => Some("looseleaf"),
+        _ => None,
+    }
+}
+
+pub fn normalize_note_tag(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "note" => Some("note"),
+        "idea" => Some("idea"),
+        "ask" => Some("ask"),
+        "star" => Some("star"),
+        "todo" => Some("todo"),
+        _ => None,
+    }
+}
+
+pub fn normalize_note_motivation(raw: Option<&str>, tag: &str) -> String {
+    if let Some(m) = raw {
+        match m.trim().to_ascii_lowercase().as_str() {
+            "commenting" => return "commenting".to_string(),
+            "highlighting" => return "highlighting".to_string(),
+            "questioning" => return "questioning".to_string(),
+            "bookmarking" => return "bookmarking".to_string(),
+            _ => {}
+        }
+    }
+    match tag {
+        "ask" => "questioning".to_string(),
+        "star" => "bookmarking".to_string(),
+        _ => "commenting".to_string(),
+    }
+}
+
+/// Normalize `(tone, style, tag)` from explicit fields or legacy `"<tone>:<style>:<tag>"` encoding.
+pub fn normalize_note_visuals(
+    tone: Option<&str>,
+    style: Option<&str>,
+    tag: Option<&str>,
+    legacy_color: Option<&str>,
+) -> (String, String, String) {
+    let mut legacy_parts = legacy_color
+        .unwrap_or("")
+        .split(':')
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let l_tone = legacy_parts.next().and_then(normalize_note_tone);
+    let l_style = legacy_parts.next().and_then(normalize_note_style);
+    let l_tag = legacy_parts.next().and_then(normalize_note_tag);
+
+    let resolved_tone = tone
+        .and_then(normalize_note_tone)
+        .or(l_tone)
+        .unwrap_or("amber");
+    let resolved_style = style
+        .and_then(normalize_note_style)
+        .or(l_style)
+        .unwrap_or("tape");
+    let resolved_tag = tag
+        .and_then(normalize_note_tag)
+        .or(l_tag)
+        .unwrap_or("note");
+
+    (
+        resolved_tone.to_string(),
+        resolved_style.to_string(),
+        resolved_tag.to_string(),
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateMarginNoteInput {
+    #[serde(default)]
     pub learner_id: String,
     pub step_id: Uuid,
     pub locale_code: String,
     pub block_anchor_id: String,
+    #[serde(default)]
     pub note_color: String,
+    #[serde(default)]
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub motivation: Option<String>,
+    #[serde(default)]
+    pub target: Option<AnnotationTarget>,
     pub content: String,
+}
+
+/// RFC 7396 JSON Merge Patch payload for partial updates to an existing annotation/note.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateMarginNoteInput {
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub note_color: Option<String>,
+    #[serde(default)]
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub motivation: Option<String>,
+    #[serde(default)]
+    pub block_anchor_id: Option<String>,
+    #[serde(default)]
+    pub target: Option<AnnotationTarget>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListMarginNotesFilter {
+    pub step_id: Option<Uuid>,
+    pub locale_code: Option<String>,
+    pub tag: Option<String>,
+    pub q: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,30 +710,210 @@ pub struct ArticleTaskChecksDto {
     pub checked_item_ids: Vec<String>,
 }
 
-/// Sanitize user-submitted note/comment text into safe inline HTML (`ammonia` defense-in-depth).
+/// Validate user note length against `MAX_NOTE_CHARS`, returning trimmed text or `DomainError`.
+pub fn validate_user_note_content(raw: &str) -> Result<String, error::DomainError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(error::DomainError::new(
+            error::ErrorCode::NoteContentEmpty,
+            "Margin note content cannot be empty.",
+        ));
+    }
+    let char_count = trimmed.chars().count();
+    if char_count > MAX_NOTE_CHARS {
+        return Err(error::DomainError::new(
+            error::ErrorCode::NoteTooLong,
+            format!("Margin note exceeds the {MAX_NOTE_CHARS}-character limit ({char_count} characters)."),
+        )
+        .with_meta(serde_json::json!({
+            "max_chars": MAX_NOTE_CHARS,
+            "actual_chars": char_count,
+        })));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Compile user-submitted Markdown note text into safe inline/simple-block HTML.
+/// Drops raw HTML events at the Markdown AST layer and enforces a strict `ammonia` whitelist
+/// (defense-in-depth against XSS while genuinely supporting `**bold**`, `*italic*`, `` `code` ``,
+/// `~~strikethrough~~`, and short lists).
 pub fn sanitize_user_note(raw: &str) -> String {
-    let escaped = raw
-        .trim()
-        .chars()
-        .take(800)
-        .collect::<String>()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\n', "<br>");
+    let trimmed: String = raw.trim().chars().take(MAX_NOTE_CHARS).collect();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+
+    // Strip any raw HTML tags (and `<script>`/`<style>` payloads) while preserving surrounding plain text
+    // even when CommonMark parses a line starting with `<script>` as an HTML block.
+    let mut strip_only = HtmlSanitizer::new();
+    strip_only.tags(HashSet::new());
+    let mut rendered = String::new();
+    let mut safe_events: Vec<Event<'_>> = Vec::new();
+    for ev in Parser::new_ext(&trimmed, opts) {
+        match ev {
+            Event::Html(raw_html) | Event::InlineHtml(raw_html) => {
+                let text_only = strip_only.clean(&raw_html).to_string();
+                if !text_only.is_empty() {
+                    let parts: Vec<&str> = text_only.split('\n').collect();
+                    for (idx, part) in parts.iter().enumerate() {
+                        if !part.is_empty() {
+                            safe_events.push(Event::Text((*part).to_string().into()));
+                        }
+                        if idx + 1 < parts.len() {
+                            safe_events.push(Event::HardBreak);
+                        }
+                    }
+                }
+            }
+            Event::SoftBreak => safe_events.push(Event::HardBreak),
+            other => safe_events.push(other),
+        }
+    }
+    html::push_html(&mut rendered, safe_events.into_iter());
 
     let mut allowed_tags = HashSet::new();
-    allowed_tags.insert("b");
-    allowed_tags.insert("strong");
-    allowed_tags.insert("em");
-    allowed_tags.insert("code");
-    allowed_tags.insert("br");
-    allowed_tags.insert("mark");
+    for tag in [
+        "p", "br", "strong", "b", "em", "i", "code", "del", "s", "ul", "ol", "li", "mark",
+    ] {
+        allowed_tags.insert(tag);
+    }
 
-    HtmlSanitizer::new()
+    let cleaned = HtmlSanitizer::new()
         .tags(allowed_tags)
-        .clean(&escaped)
-        .to_string()
+        .generic_attributes(HashSet::new())
+        .clean(&rendered)
+        .to_string();
+
+    // Unwrap single-paragraph `<p>...</p>` for clean inline rendering inside compact sticker cards
+    let c = cleaned.trim();
+    if c.starts_with("<p>") && c.ends_with("</p>") && c.matches("<p>").count() == 1 {
+        c[3..c.len() - 4].trim().to_string()
+    } else {
+        c.to_string()
+    }
+}
+
+/// Export notes as RFC 7763 `text/markdown; charset=utf-8` document.
+pub fn export_notes_as_markdown(notes: &[UserMarginNoteDto], site_name: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {} — Reading Notes\n\n", site_name.trim()));
+    out.push_str(&format!(
+        "_Exported at {} (UTC) · {} note(s)_\n\n",
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        notes.len()
+    ));
+
+    let mut current_group = String::new();
+    for note in notes {
+        let heading = note
+            .step_title
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(reading_time::strip_html_tags)
+            .unwrap_or_else(|| note.step_id.to_string());
+        let group_key = format!("{}::{}", note.step_id, note.locale_code);
+        if group_key != current_group {
+            current_group = group_key;
+            out.push_str(&format!("## {heading} (`{}`)\n\n", note.locale_code));
+        }
+
+        let quote_exact = note.target.as_ref().and_then(|t| {
+            t.selector.iter().find_map(|s| match s {
+                AnnotationSelector::TextQuoteSelector { exact, .. } if !exact.trim().is_empty() => {
+                    Some(exact.trim())
+                }
+                _ => None,
+            })
+        });
+        if let Some(q) = quote_exact {
+            out.push_str(&format!("> {q}\n>\n"));
+        }
+
+        out.push_str(&format!(
+            "- **[{}]** ({}, v{}, `{}`)\n\n",
+            note.tag,
+            note.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            note.version,
+            note.block_anchor_id
+        ));
+        for line in note.raw_content.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Export notes as a W3C Web Annotation Data Model (`REC-annotation-model-20170223`) JSON-LD
+/// `AnnotationCollection` (`application/ld+json; profile="http://www.w3.org/ns/anno.jsonld"`).
+pub fn export_notes_as_w3c_jsonld(
+    notes: &[UserMarginNoteDto],
+    origin: &str,
+) -> serde_json::Value {
+    let base = origin.trim_end_matches('/');
+    let items: Vec<serde_json::Value> = notes
+        .iter()
+        .map(|n| {
+            let source_url = match (&n.track_slug, &n.step_slug) {
+                (Some(track), Some(step)) => {
+                    format!("{base}/{}/series/{track}/{step}", n.locale_code)
+                }
+                _ => format!("urn:icehandnote:step:{}:locale:{}", n.step_id, n.locale_code),
+            };
+            let selectors = n
+                .target
+                .as_ref()
+                .filter(|t| !t.selector.is_empty())
+                .map(|t| serde_json::to_value(&t.selector).unwrap_or_else(|_| serde_json::json!([])))
+                .unwrap_or_else(|| {
+                    serde_json::json!([{
+                        "type": "FragmentSelector",
+                        "conformsTo": "https://icehandnote.dev/spec/block-id",
+                        "value": n.block_anchor_id,
+                    }])
+                });
+            serde_json::json!({
+                "id": format!("{base}/api/v1/me/notes/{}", n.id),
+                "type": "Annotation",
+                "motivation": n.motivation,
+                "created": n.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "modified": n.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "body": {
+                    "type": "TextualBody",
+                    "value": n.raw_content,
+                    "format": n.body_format,
+                    "language": n.locale_code,
+                    "purpose": n.motivation,
+                },
+                "target": {
+                    "type": "SpecificResource",
+                    "source": source_url,
+                    "selector": selectors,
+                },
+                "icehandnote:meta": {
+                    "step_id": n.step_id,
+                    "step_title": n.step_title,
+                    "tone": n.tone,
+                    "style": n.style,
+                    "tag": n.tag,
+                    "version": n.version,
+                }
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "@context": "http://www.w3.org/ns/anno.jsonld",
+        "id": format!("{base}/api/v1/me/notes"),
+        "type": "AnnotationCollection",
+        "total": items.len(),
+        "items": items,
+    })
 }
 
 pub fn is_safe_image_src(src: &str) -> bool {
@@ -529,6 +1028,36 @@ pub fn stable_block_id(prefix: &str, ordinal: usize, seed: &str) -> String {
     hasher.update(snippet.as_bytes());
     let digest = hex::encode(hasher.finalize());
     format!("{}-{}", prefix, &digest[..8])
+}
+
+/// Content-addressed stable block identifier decoupled from global document ordinal.
+/// Inserting or deleting blocks elsewhere in the document never shifts untouched block IDs;
+/// identical duplicate blocks within the same document are disambiguated by occurrence index (`-2`, `-3`, ...).
+pub fn content_stable_block_id(
+    prefix: &str,
+    seed: &str,
+    seen: &mut HashMap<String, usize>,
+) -> String {
+    let normalized: String = seed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(64)
+        .collect();
+    let mut hasher = Sha256::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(b":");
+    hasher.update(normalized.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    let base = format!("{prefix}-{}", &digest[..8]);
+    let entry = seen.entry(base.clone()).or_insert(0);
+    *entry += 1;
+    if *entry == 1 {
+        base
+    } else {
+        format!("{base}-{}", *entry)
+    }
 }
 
 fn render_inline_markdown(src: &str) -> String {
@@ -651,9 +1180,76 @@ fn parse_directive_header(rest: &str) -> (&str, String, String) {
     }
 }
 
+fn sanitize_pixel_sprite(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cat" | "cat-bookmark" => "cat",
+        "quill" | "ink-quill" => "quill",
+        "coffee" | "coffee-mug" => "coffee",
+        "crystal" | "ice-crystal" | "ice" => "crystal",
+        "sprout" | "sprout-pot" => "sprout",
+        "compass" => "compass",
+        "floppy" | "floppy-disk" => "floppy",
+        "hourglass" => "hourglass",
+        "star" | "star-stamp" => "star",
+        "plane" | "paper-plane" => "plane",
+        "lightbulb" | "bulb" | "idea" => "lightbulb",
+        "heart" | "heart-memo" | "love" => "heart",
+        _ => "cat",
+    }
+}
+
+fn normalize_pixel_align(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "left" => "left",
+        "right" => "right",
+        _ => "center",
+    }
+}
+
+fn normalize_pixel_size(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sm" | "small" => "sm",
+        "lg" | "large" => "lg",
+        _ => "md",
+    }
+}
+
+fn normalize_text_align(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "left" | "start" => Some("left"),
+        "center" => Some("center"),
+        "right" | "end" => Some("right"),
+        _ => None,
+    }
+}
+
+fn normalize_text_size(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sm" | "small" => Some("sm"),
+        "lg" | "large" => Some("lg"),
+        "xl" => Some("xl"),
+        "2xl" | "xxl" => Some("2xl"),
+        _ => None,
+    }
+}
+
+fn parse_clamped_f32(raw: Option<String>, min: f32, max: f32) -> Option<f32> {
+    raw.and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(min, max))
+}
+
+fn parse_bool_flag(raw: Option<String>) -> Option<bool> {
+    match raw.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("true" | "1" | "yes") => Some(true),
+        Some("false" | "0" | "no") => Some(false),
+        _ => None,
+    }
+}
+
 /// Pre-process custom notebook directives (`:::tip[...] ... :::`, `:::steps[...] ... :::`,
-/// and `:::margin[...]`) before Markdown parsing, converting them into fenced markers that
-/// preserve block ordering cleanly.
+/// `:::pixel[...]{...}`, `:::format{...}`, and `:::margin[...]`) before Markdown parsing, converting them into
+/// fenced markers that preserve block ordering cleanly.
 fn preprocess_notebook_directives(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len() + 128);
     let mut lines = markdown.lines().peekable();
@@ -666,6 +1262,86 @@ fn preprocess_notebook_directives(markdown: &str) -> String {
             if let Some(note) = after.strip_suffix(']') {
                 out.push_str("\n```__icehandnote_margin\n");
                 out.push_str(note.trim());
+                out.push_str("\n```\n");
+                continue;
+            }
+        }
+
+        // Single-line :::format{align="..." size="..."} directive
+        if let Some(rest_fmt) = trimmed.strip_prefix(":::format") {
+            let after_kw = rest_fmt.trim_start();
+            if after_kw.is_empty() || after_kw.starts_with('[') || after_kw.starts_with('{') {
+                let (_, _, attrs_raw) =
+                    parse_directive_header(trimmed.strip_prefix(":::").unwrap_or("format"));
+                if lines.peek().is_some_and(|next| next.trim() == ":::") {
+                    lines.next();
+                }
+                let align = extract_attr(&attrs_raw, "align").and_then(|v| normalize_text_align(&v));
+                let size = extract_attr(&attrs_raw, "size").and_then(|v| normalize_text_size(&v));
+                if align.is_some() || size.is_some() {
+                    let payload = serde_json::json!({
+                        "align": align,
+                        "size": size,
+                    });
+                    out.push_str("\n```__icehandnote_format\n");
+                    out.push_str(&payload.to_string());
+                    out.push_str("\n```\n");
+                }
+                continue;
+            }
+        }
+
+        // Single-line (or accidentally closed) :::pixel[sprite]{...} directive
+        if let Some(rest_pixel) = trimmed.strip_prefix(":::pixel") {
+            let after_kw = rest_pixel.trim_start();
+            if after_kw.is_empty() || after_kw.starts_with('[') || after_kw.starts_with('{') {
+                let (_, sprite_raw, attrs_raw) =
+                    parse_directive_header(trimmed.strip_prefix(":::").unwrap_or("pixel"));
+                if lines.peek().is_some_and(|next| next.trim() == ":::") {
+                    lines.next();
+                }
+                let sprite = sanitize_pixel_sprite(&sprite_raw);
+                let align = extract_attr(&attrs_raw, "align").map(|v| normalize_pixel_align(&v));
+                let size = extract_attr(&attrs_raw, "size").map(|v| normalize_pixel_size(&v));
+                let x = parse_clamped_f32(extract_attr(&attrs_raw, "x"), -25.0, 125.0);
+                let y = parse_clamped_f32(extract_attr(&attrs_raw, "y"), -60.0, 160.0);
+                let rotate = parse_clamped_f32(extract_attr(&attrs_raw, "rotate"), -180.0, 180.0);
+                let scale = parse_clamped_f32(extract_attr(&attrs_raw, "scale"), 0.35, 3.5);
+                let flip = parse_bool_flag(extract_attr(&attrs_raw, "flip"));
+                let locked = parse_bool_flag(extract_attr(&attrs_raw, "locked"));
+                let layer = extract_attr(&attrs_raw, "layer").and_then(|v| {
+                    match v.trim().to_ascii_lowercase().as_str() {
+                        "behind" | "back" => Some("behind"),
+                        "front" => Some("front"),
+                        _ => None,
+                    }
+                });
+                let anchor = extract_attr(&attrs_raw, "anchor")
+                    .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+                        "block" => Some("block"),
+                        "inline" => Some("inline"),
+                        _ => None,
+                    })
+                    .or_else(|| if x.is_some() || y.is_some() { Some("block") } else { None });
+                let caption = extract_attr(&attrs_raw, "caption")
+                    .map(|v| sanitize_custom_html(v.trim(), 240))
+                    .filter(|v| !v.is_empty());
+                let payload = serde_json::json!({
+                    "sprite": sprite,
+                    "align": align,
+                    "size": size,
+                    "anchor": anchor,
+                    "x": x,
+                    "y": y,
+                    "rotate": rotate,
+                    "scale": scale,
+                    "flip": flip,
+                    "locked": locked,
+                    "layer": layer,
+                    "caption": caption,
+                });
+                out.push_str("\n```__icehandnote_pixel\n");
+                out.push_str(&payload.to_string());
                 out.push_str("\n```\n");
                 continue;
             }
@@ -730,6 +1406,8 @@ fn preprocess_notebook_directives(markdown: &str) -> String {
                     let style_attr = extract_attr(&attrs_raw, "style");
                     let tone_attr = extract_attr(&attrs_raw, "tone");
                     let badge_attr = extract_attr(&attrs_raw, "badge");
+                    let align_attr = extract_attr(&attrs_raw, "align").and_then(|v| normalize_text_align(&v));
+                    let size_attr = extract_attr(&attrs_raw, "size").and_then(|v| normalize_text_size(&v));
 
                     let payload = serde_json::json!({
                         "kind": kind_raw.to_ascii_lowercase(),
@@ -740,6 +1418,8 @@ fn preprocess_notebook_directives(markdown: &str) -> String {
                         "style": style_attr,
                         "tone": tone_attr,
                         "badge": badge_attr,
+                        "align": align_attr,
+                        "size": size_attr,
                     });
 
                     out.push_str("\n```__icehandnote_alert\n");
@@ -805,7 +1485,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
     }
 
     let mut h_counts = [0usize; 4]; // H1..H4 hierarchical outline numbering ("1", "1.1", "2")
-    let mut ordinal = 0usize;
+    let mut seen_block_ids: HashMap<String, usize> = HashMap::new();
     let mut pending_margin_note: Option<String> = None;
 
     let mut events_iter = parser.peekable();
@@ -818,23 +1498,17 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                     HeadingLevel::H3 => 3,
                     _ => 4,
                 };
-                let mut raw_text = String::new();
+                let mut heading_events = Vec::new();
                 for ev in events_iter.by_ref() {
                     match ev {
                         Event::End(TagEnd::Heading(_)) => break,
-                        Event::Text(t) | Event::InlineHtml(t) | Event::Html(t) => {
-                            raw_text.push_str(&t)
-                        }
-                        Event::Code(t) => {
-                            raw_text.push_str("<code>");
-                            raw_text.push_str(&t);
-                            raw_text.push_str("</code>");
-                        }
-                        _ => {}
+                        other => heading_events.push(other),
                     }
                 }
+                let mut raw_text = String::new();
+                html::push_html(&mut raw_text, heading_events.into_iter());
                 let (is_task, default_checked, parsed_head) = parse_heading_task_prefix(&raw_text);
-                let text = sanitize_custom_html(&parsed_head, 320);
+                let text = sanitize_custom_html(&parsed_head, 640);
                 let plain_heading = reading_time::strip_html_tags(&text);
                 let idx = (lvl as usize).saturating_sub(1).min(3);
                 h_counts[idx] += 1;
@@ -858,8 +1532,8 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         .join(".")
                 };
 
-                ordinal += 1;
-                let block_id = stable_block_id("sec", ordinal, &plain_heading);
+                let block_id =
+                    content_stable_block_id("sec", &plain_heading, &mut seen_block_ids);
                 plain_chunks.push(plain_heading.clone());
                 toc.push(TocItem {
                     id: block_id.clone(),
@@ -875,6 +1549,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                     text,
                     is_task,
                     default_checked,
+                    align: None,
                 });
             }
 
@@ -925,8 +1600,11 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         } else {
                             Some(title.trim().to_string())
                         };
-                        ordinal += 1;
-                        let block_id = stable_block_id("img", ordinal, &format!("{src_str}:{alt_str}"));
+                        let block_id = content_stable_block_id(
+                            "img",
+                            &format!("{src_str}:{alt_str}"),
+                            &mut seen_block_ids,
+                        );
                         if !alt_str.is_empty() {
                             plain_chunks.push(alt_str.clone());
                         }
@@ -948,13 +1626,14 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 html::push_html(&mut html_buf, inner_events.into_iter());
                 let clean = sanitize_rich_fragment(&html_buf);
                 if !clean.trim().is_empty() {
-                    ordinal += 1;
-                    let block_id = stable_block_id("p", ordinal, &plain);
+                    let block_id = content_stable_block_id("p", &plain, &mut seen_block_ids);
                     plain_chunks.push(plain);
                     blocks.push(NotebookBlock::Paragraph {
                         block_id,
                         html: clean,
                         margin_note: pending_margin_note.take(),
+                        align: None,
+                        size: None,
                     });
                 }
             }
@@ -977,10 +1656,18 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 if trimmed_info == "__icehandnote_margin" {
                     let note = raw_code.trim().to_string();
                     if !note.is_empty() {
-                        // Attach to previous Paragraph/CodeCard if present, else hold for next
+                        // Attach to previous non-overlay Paragraph/CodeCard/Image if present, else hold for next
                         let mut attached = false;
-                        if let Some(last) = blocks.last_mut() {
-                            match last {
+                        if let Some(target_block) = blocks.iter_mut().rev().find(|b| {
+                            !matches!(
+                                b,
+                                NotebookBlock::PixelSticker {
+                                    anchor: Some(a),
+                                    ..
+                                } if a == "block"
+                            )
+                        }) {
+                            match target_block {
                                 NotebookBlock::Paragraph { margin_note, .. }
                                 | NotebookBlock::CodeCard { margin_note, .. }
                                 | NotebookBlock::Image { margin_note, .. }
@@ -994,6 +1681,50 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         }
                         if !attached {
                             pending_margin_note = Some(note);
+                        }
+                    }
+                    continue;
+                }
+
+                if trimmed_info == "__icehandnote_format" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_code) {
+                        let align_v = val
+                            .get("align")
+                            .and_then(|v| v.as_str())
+                            .and_then(normalize_text_align)
+                            .map(|s| s.to_string());
+                        let size_v = val
+                            .get("size")
+                            .and_then(|v| v.as_str())
+                            .and_then(normalize_text_size)
+                            .map(|s| s.to_string());
+                        if let Some(target_block) = blocks.iter_mut().rev().find(|b| {
+                            !matches!(
+                                b,
+                                NotebookBlock::PixelSticker {
+                                    anchor: Some(a),
+                                    ..
+                                } if a == "block"
+                            )
+                        }) {
+                            match target_block {
+                                NotebookBlock::Paragraph { align, size, .. }
+                                | NotebookBlock::Quote { align, size, .. }
+                                | NotebookBlock::Alert { align, size, .. } => {
+                                    if align_v.is_some() {
+                                        *align = align_v;
+                                    }
+                                    if size_v.is_some() {
+                                        *size = size_v;
+                                    }
+                                }
+                                NotebookBlock::Heading { align, .. } => {
+                                    if align_v.is_some() {
+                                        *align = align_v;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     continue;
@@ -1017,13 +1748,15 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                             .unwrap_or_default();
 
                         if !raw_items.is_empty() {
-                            ordinal += 1;
                             let seed_title = raw_items
                                 .first()
                                 .and_then(|it| it.get("title").and_then(|v| v.as_str()))
                                 .unwrap_or("");
-                            let block_id =
-                                stable_block_id("steps", ordinal, &format!("{title}:{seed_title}"));
+                            let block_id = content_stable_block_id(
+                                "steps",
+                                &format!("{title}:{seed_title}"),
+                                &mut seen_block_ids,
+                            );
 
                             if !title.is_empty() {
                                 plain_chunks.push(title.clone());
@@ -1117,9 +1850,22 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim().chars().take(24).collect::<String>())
                             .filter(|s| !s.is_empty());
+                        let align = val
+                            .get("align")
+                            .and_then(|v| v.as_str())
+                            .and_then(normalize_text_align)
+                            .map(|s| s.to_string());
+                        let size = val
+                            .get("size")
+                            .and_then(|v| v.as_str())
+                            .and_then(normalize_text_size)
+                            .map(|s| s.to_string());
 
-                        ordinal += 1;
-                        let block_id = stable_block_id("alert", ordinal, &format!("{title}:{body_raw}"));
+                        let block_id = content_stable_block_id(
+                            "alert",
+                            &format!("{title}:{body_raw}"),
+                            &mut seen_block_ids,
+                        );
                         plain_chunks.push(format!("{title} {body_raw}"));
                         blocks.push(NotebookBlock::Alert {
                             block_id,
@@ -1131,6 +1877,93 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                             style,
                             tone,
                             badge,
+                            align,
+                            size,
+                        });
+                    }
+                    continue;
+                }
+
+                if trimmed_info == "__icehandnote_pixel" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_code) {
+                        let sprite = sanitize_pixel_sprite(
+                            val.get("sprite").and_then(|v| v.as_str()).unwrap_or("cat"),
+                        )
+                        .to_string();
+                        let align = val
+                            .get("align")
+                            .and_then(|v| v.as_str())
+                            .map(|s| normalize_pixel_align(s).to_string());
+                        let size = val
+                            .get("size")
+                            .and_then(|v| v.as_str())
+                            .map(|s| normalize_pixel_size(s).to_string());
+                        let x = val
+                            .get("x")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| (v as f32).clamp(-25.0, 125.0));
+                        let y = val
+                            .get("y")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| (v as f32).clamp(-60.0, 160.0));
+                        let rotate = val
+                            .get("rotate")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| (v as f32).clamp(-180.0, 180.0));
+                        let scale = val
+                            .get("scale")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| (v as f32).clamp(0.35, 3.5));
+                        let flip = val.get("flip").and_then(|v| v.as_bool()).filter(|&b| b);
+                        let locked = val.get("locked").and_then(|v| v.as_bool()).filter(|&b| b);
+                        let layer = val
+                            .get("layer")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| *s == "behind" || *s == "front")
+                            .map(|s| s.to_string());
+                        let anchor = val
+                            .get("anchor")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| *s == "block" || *s == "inline")
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                if x.is_some() || y.is_some() {
+                                    Some("block".to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                        let caption = val
+                            .get("caption")
+                            .and_then(|v| v.as_str())
+                            .map(|s| sanitize_custom_html(s.trim(), 240))
+                            .filter(|s| !s.is_empty());
+
+                        let sig = format!(
+                            "{sprite}:{}:{}:{}",
+                            caption.as_deref().unwrap_or(""),
+                            x.map(|v| v.round() as i32).unwrap_or(0),
+                            y.map(|v| v.round() as i32).unwrap_or(0),
+                        );
+                        let block_id =
+                            content_stable_block_id("pixel", &sig, &mut seen_block_ids);
+                        if let Some(ref c) = caption {
+                            plain_chunks.push(c.clone());
+                        }
+                        blocks.push(NotebookBlock::PixelSticker {
+                            block_id,
+                            sprite,
+                            align,
+                            size,
+                            anchor,
+                            x,
+                            y,
+                            rotate,
+                            scale,
+                            flip,
+                            locked,
+                            layer,
+                            caption,
                         });
                     }
                     continue;
@@ -1139,8 +1972,11 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 if trimmed_info == "sketch" || trimmed_info.starts_with("sketch ") {
                     let caption = extract_attr(trimmed_info, "caption");
                     if let Ok(spec) = serde_json::from_str::<SketchSpec>(raw_code.trim()) {
-                        ordinal += 1;
-                        let block_id = stable_block_id("sketch", ordinal, raw_code.trim());
+                        let block_id = content_stable_block_id(
+                            "sketch",
+                            raw_code.trim(),
+                            &mut seen_block_ids,
+                        );
                         if let Some(ref c) = caption {
                             plain_chunks.push(c.clone());
                         }
@@ -1163,8 +1999,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                     .map(|s| s.trim().to_ascii_lowercase())
                     .filter(|s| !s.is_empty());
                 let clean_code = raw_code.trim_end_matches('\n').to_string();
-                ordinal += 1;
-                let block_id = stable_block_id("code", ordinal, &clean_code);
+                let block_id = content_stable_block_id("code", &clean_code, &mut seen_block_ids);
                 plain_chunks.push(clean_code.clone());
                 blocks.push(NotebookBlock::CodeCard {
                     block_id,
@@ -1282,9 +2117,12 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
 
                 if !items_html.is_empty() {
                     let is_task_list = item_task_markers.iter().any(|m| m.is_some());
-                    ordinal += 1;
                     if is_task_list {
-                        let block_id = stable_block_id("steps", ordinal, &items_html[0]);
+                        let block_id = content_stable_block_id(
+                            "steps",
+                            &items_html[0],
+                            &mut seen_block_ids,
+                        );
                         let items = items_html
                             .into_iter()
                             .zip(items_detail_html)
@@ -1312,7 +2150,11 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                             items,
                         });
                     } else {
-                        let block_id = stable_block_id("list", ordinal, &items_html[0]);
+                        let block_id = content_stable_block_id(
+                            "list",
+                            &items_html[0],
+                            &mut seen_block_ids,
+                        );
                         blocks.push(NotebookBlock::List {
                             block_id,
                             ordered,
@@ -1350,12 +2192,13 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 html::push_html(&mut q_buf, quote_events.into_iter());
                 let cleaned = sanitize_rich_fragment(&q_buf);
                 if !cleaned.trim().is_empty() {
-                    ordinal += 1;
-                    let block_id = stable_block_id("quote", ordinal, &plain);
+                    let block_id = content_stable_block_id("quote", &plain, &mut seen_block_ids);
                     plain_chunks.push(plain);
                     blocks.push(NotebookBlock::Quote {
                         block_id,
                         html: cleaned,
+                        align: None,
+                        size: None,
                     });
                 }
             }
@@ -1783,5 +2626,304 @@ pub fn cache_key(id: u64) -> String {
             }
             other => panic!("expected sanitized Paragraph fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_flexible_utc_and_roundtrips_frontmatter_timestamps() {
+        assert_eq!(parse_flexible_utc("  "), None);
+        assert!(parse_flexible_utc("2024-05-15").is_some());
+        assert!(parse_flexible_utc("2026-11-22T00:00:00Z").is_some());
+
+        let md = auth::format_step_markdown_file_with_meta(
+            "Timestamp Title",
+            "Summary",
+            2,
+            5,
+            3,
+            3,
+            "published",
+            "cc-by-4.0",
+            "Alice",
+            Some("2025-01-10T08:00:00Z"),
+            Some("2026-11-22T12:00:00Z"),
+            &["rust".to_string()],
+            "Body paragraph.",
+        );
+        let compiled = compile_notebook_markdown(&md);
+        assert_eq!(compiled.frontmatter.author, "Alice");
+        assert_eq!(
+            compiled.frontmatter.published_at.as_deref(),
+            Some("2025-01-10T08:00:00Z")
+        );
+        assert_eq!(
+            compiled.frontmatter.updated_at.as_deref(),
+            Some("2026-11-22T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn compiles_pixel_sticker_directive_blocks() {
+        let md = r#"
+正文第一段。
+
+:::pixel[cat]{anchor="block" x="86.5" y="14" rotate="-15" scale="1.35" flip="true" locked="true" layer="behind" caption="锁定贴纸"}
+
+:::margin[ice:pin | 贴纸后批注]
+
+:::pixel[lightbulb]{align="right" size="lg" caption="灵感闪现 · 手账装饰"}
+
+:::pixel[unknown-sprite]{align="bad" size="huge"}
+:::
+"#;
+        let doc = compile_notebook_markdown(md);
+        assert_eq!(doc.blocks.len(), 4);
+
+        match &doc.blocks[0] {
+            NotebookBlock::Paragraph { margin_note, .. } => {
+                assert_eq!(margin_note.as_deref(), Some("ice:pin | 贴纸后批注"));
+            }
+            other => panic!("expected Paragraph block with margin_note, got {other:?}"),
+        }
+
+        match &doc.blocks[1] {
+            NotebookBlock::PixelSticker {
+                sprite,
+                anchor,
+                x,
+                y,
+                rotate,
+                scale,
+                flip,
+                locked,
+                layer,
+                caption,
+                ..
+            } => {
+                assert_eq!(sprite, "cat");
+                assert_eq!(anchor.as_deref(), Some("block"));
+                assert_eq!(*x, Some(86.5));
+                assert_eq!(*y, Some(14.0));
+                assert_eq!(*rotate, Some(-15.0));
+                assert_eq!(*scale, Some(1.35));
+                assert_eq!(*flip, Some(true));
+                assert_eq!(*locked, Some(true));
+                assert_eq!(layer.as_deref(), Some("behind"));
+                assert_eq!(caption.as_deref(), Some("锁定贴纸"));
+            }
+            other => panic!("expected posable PixelSticker block, got {other:?}"),
+        }
+
+        match &doc.blocks[2] {
+            NotebookBlock::PixelSticker {
+                sprite,
+                align,
+                size,
+                anchor,
+                caption,
+                ..
+            } => {
+                assert_eq!(sprite, "lightbulb");
+                assert_eq!(align.as_deref(), Some("right"));
+                assert_eq!(size.as_deref(), Some("lg"));
+                assert!(anchor.is_none());
+                assert_eq!(caption.as_deref(), Some("灵感闪现 · 手账装饰"));
+            }
+            other => panic!("expected PixelSticker block, got {other:?}"),
+        }
+
+        match &doc.blocks[3] {
+            NotebookBlock::PixelSticker {
+                sprite,
+                align,
+                size,
+                caption,
+                ..
+            } => {
+                assert_eq!(sprite, "cat");
+                assert_eq!(align.as_deref(), Some("center"));
+                assert_eq!(size.as_deref(), Some("md"));
+                assert!(caption.is_none());
+            }
+            other => panic!("expected fallback PixelSticker block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compiles_rich_inline_spans_kbd_and_block_format_directives() {
+        let md = r#"
+## **快速开始** <kbd class="ink-kbd">Ctrl</kbd>
+:::format{align="center"}
+
+按下 <span class="ink-kbd-combo"><kbd class="ink-kbd">Ctrl</kbd><span class="ink-kbd-sep">+</span><kbd class="ink-kbd">K</kbd></span> 打开搜索，查看 <code class="ink-inline-code">cargo test</code> 并重点标出 <span class="ink-fg-ice ink-bg-amber ink-size-xl">高亮文本</span> 与 <mark class="ink-hl-violet">荧光划痕</mark>。
+:::format{align="center" size="lg"}
+:::pixel[lightbulb]{anchor="block" x="85" y="15" rotate="0" scale="1"}
+:::margin[violet:tape | 带样式旁注]
+
+:::tip[提示]{align="right" size="sm"}
+支持 **对齐** 与 <kbd class="ink-kbd">Esc</kbd> 返回。
+:::
+"#;
+        let doc = compile_notebook_markdown(md);
+        assert_eq!(doc.toc.len(), 1);
+        assert_eq!(doc.toc[0].text, "快速开始 Ctrl");
+
+        match &doc.blocks[0] {
+            NotebookBlock::Heading { text, align, .. } => {
+                assert!(text.contains("<strong>快速开始</strong>"));
+                assert!(text.contains("<kbd class=\"ink-kbd\">Ctrl</kbd>"));
+                assert_eq!(align.as_deref(), Some("center"));
+            }
+            other => panic!("expected Heading block, got {other:?}"),
+        }
+
+        match &doc.blocks[1] {
+            NotebookBlock::Paragraph {
+                html,
+                align,
+                size,
+                margin_note,
+                ..
+            } => {
+                assert!(html.contains("ink-kbd-combo"));
+                assert!(html.contains("ink-inline-code"));
+                assert!(html.contains("ink-fg-ice"));
+                assert!(html.contains("ink-bg-amber"));
+                assert!(html.contains("ink-size-xl"));
+                assert!(html.contains("ink-hl-violet"));
+                assert_eq!(align.as_deref(), Some("center"));
+                assert_eq!(size.as_deref(), Some("lg"));
+                assert_eq!(margin_note.as_deref(), Some("violet:tape | 带样式旁注"));
+            }
+            other => panic!("expected formatted Paragraph block, got {other:?}"),
+        }
+
+        match &doc.blocks[3] {
+            NotebookBlock::Alert { align, size, .. } => {
+                assert_eq!(align.as_deref(), Some("right"));
+                assert_eq!(size.as_deref(), Some("sm"));
+            }
+            other => panic!("expected formatted Alert block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toc_plain_text_decodes_ampersands_without_double_escaping() {
+        let md = "## Section 1: Inline Typography & Alerts\n\nBody with `a & b`.\n";
+        let doc = compile_notebook_markdown(md);
+        assert_eq!(doc.toc.len(), 1);
+        assert_eq!(doc.toc[0].text, "Section 1: Inline Typography & Alerts");
+    }
+
+    #[test]
+    fn block_ids_remain_stable_when_inserting_paragraphs_above() {
+        let before = "## Intro\n\nTarget paragraph that carries a reader margin note.\n\nSecond identical line.\n\nSecond identical line.\n";
+        let after = "## Intro\n\nNewly inserted preface paragraph.\n\nAnother new paragraph.\n\nTarget paragraph that carries a reader margin note.\n\nSecond identical line.\n\nSecond identical line.\n";
+        let doc_before = compile_notebook_markdown(before);
+        let doc_after = compile_notebook_markdown(after);
+
+        let id_of = |doc: &CompiledDocument, needle: &str| -> Vec<String> {
+            doc.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    NotebookBlock::Paragraph { block_id, html, .. } if html.contains(needle) => {
+                        Some(block_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            id_of(&doc_before, "Target paragraph"),
+            id_of(&doc_after, "Target paragraph")
+        );
+        let dup_before = id_of(&doc_before, "Second identical");
+        let dup_after = id_of(&doc_after, "Second identical");
+        assert_eq!(dup_before.len(), 2);
+        assert_ne!(dup_before[0], dup_before[1]);
+        assert_eq!(dup_before, dup_after);
+    }
+
+    #[test]
+    fn sanitize_user_note_supports_safe_markdown_and_strips_xss() {
+        let md = "**关键点** 和 `cargo test` 以及 ~~旧方案~~\n第二行<script>alert(1)</script><img src=x onerror=alert(2)>";
+        let html = sanitize_user_note(md);
+        assert!(html.contains("<strong>关键点</strong>"), "html={html}");
+        assert!(html.contains("<code>cargo test</code>"), "html={html}");
+        assert!(html.contains("<del>旧方案</del>"), "html={html}");
+        assert!(html.contains("<br>"), "html={html}");
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("onerror"));
+        assert!(!html.contains("<img"));
+    }
+
+    #[test]
+    fn guest_cookie_signing_roundtrip_and_tamper_rejection() {
+        let secret = "super-secret-guest-signing-key-for-tests";
+        let signed = crypto::sign_guest_learner_cookie("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", secret)
+            .expect("sign");
+        assert_eq!(
+            crypto::verify_guest_learner_cookie(&signed, secret).as_deref(),
+            Some("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+        );
+        // Tampered ID or signature must fail verification
+        let tampered = signed.replace("9b1deb4d", "00000000");
+        assert!(crypto::verify_guest_learner_cookie(&tampered, secret).is_none());
+        assert!(crypto::verify_guest_learner_cookie(&signed, "wrong-secret").is_none());
+    }
+
+    #[test]
+    fn exports_notes_to_rfc7763_markdown_and_w3c_jsonld() {
+        let now = Utc::now();
+        let note = UserMarginNoteDto {
+            id: Uuid::new_v4(),
+            learner_id: "user:test".to_string(),
+            step_id: Uuid::new_v4(),
+            locale_code: "zh-CN".to_string(),
+            block_anchor_id: "p-12345678".to_string(),
+            note_color: "amber:tape:idea".to_string(),
+            tone: "amber".to_string(),
+            style: "tape".to_string(),
+            tag: "idea".to_string(),
+            motivation: "commenting".to_string(),
+            target: Some(AnnotationTarget {
+                source: "urn:icehandnote:step:1".to_string(),
+                source_revision: 2,
+                selector: vec![
+                    AnnotationSelector::FragmentSelector {
+                        conforms_to: "https://icehandnote.dev/spec/block-id".to_string(),
+                        value: "p-12345678".to_string(),
+                    },
+                    AnnotationSelector::TextQuoteSelector {
+                        exact: "核心引用".to_string(),
+                        prefix: "前文".to_string(),
+                        suffix: "后文".to_string(),
+                    },
+                ],
+            }),
+            body_format: "text/markdown".to_string(),
+            content_html: "<strong>灵感</strong>".to_string(),
+            raw_content: "**灵感**".to_string(),
+            version: 2,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            track_slug: Some("getting-started".to_string()),
+            chapter_slug: Some("01-welcome".to_string()),
+            step_slug: Some("01-welcome-to-icehandnote".to_string()),
+            step_title: Some("欢迎来到 IceHandnote".to_string()),
+        };
+
+        let md = export_notes_as_markdown(&[note.clone()], "IceHandnote");
+        assert!(md.contains("欢迎来到 IceHandnote"));
+        assert!(md.contains("> 核心引用"));
+        assert!(md.contains("**灵感**"));
+
+        let jsonld = export_notes_as_w3c_jsonld(&[note], "https://notes.example.com");
+        assert_eq!(jsonld["@context"], "http://www.w3.org/ns/anno.jsonld");
+        assert_eq!(jsonld["type"], "AnnotationCollection");
+        assert_eq!(jsonld["total"], 1);
+        assert_eq!(jsonld["items"][0]["type"], "Annotation");
+        assert_eq!(jsonld["items"][0]["body"]["format"], "text/markdown");
     }
 }

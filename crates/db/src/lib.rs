@@ -13,19 +13,92 @@ pub(crate) fn domain_err(
     icehandnote_core::error::DomainError::new(code, detail).into()
 }
 
+pub(crate) const GUEST_NOTES_PER_STEP_LIMIT: usize = 50;
+pub(crate) const USER_NOTES_PER_STEP_LIMIT: usize = 500;
+pub(crate) const NOTE_UNDO_GRACE_MINUTES: i64 = 15;
+
+pub(crate) fn note_quota_for_owner(owner_key: &str) -> usize {
+    if owner_key.starts_with("user:") {
+        USER_NOTES_PER_STEP_LIMIT
+    } else {
+        GUEST_NOTES_PER_STEP_LIMIT
+    }
+}
+
+/// RFC 9110 §13.1.1 strong comparison for `If-Match` conditional requests.
+pub(crate) fn if_match_satisfies(if_match_raw: &str, current_etag: &str) -> bool {
+    let trimmed = if_match_raw.trim();
+    if trimmed == "*" {
+        return true;
+    }
+    trimmed.split(',').map(str::trim).any(|candidate| {
+        !candidate.is_empty()
+            && !candidate.starts_with("W/")
+            && !current_etag.starts_with("W/")
+            && candidate == current_etag
+    })
+}
+
+pub(crate) fn precondition_failed_err(
+    expected_etag: &str,
+    current: &UserMarginNoteDto,
+) -> anyhow::Error {
+    icehandnote_core::error::DomainError::new(
+        icehandnote_core::error::ErrorCode::PreconditionFailed,
+        "This note was modified elsewhere. Refresh before saving your changes.",
+    )
+    .with_meta(serde_json::json!({
+        "expected_etag": expected_etag,
+        "current_etag": current.etag(),
+        "current_version": current.version,
+        "updated_at": current.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }))
+    .into()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn revision_conflict_err(
+    expected_etag: &str,
+    current_etag: &str,
+    current_edit_seq: i64,
+    updated_by: &str,
+    updated_at: DateTime<Utc>,
+    remote_title: &str,
+    remote_summary: &str,
+    remote_body_markdown: &str,
+) -> anyhow::Error {
+    icehandnote_core::error::DomainError::new(
+        icehandnote_core::error::ErrorCode::RevisionConflict,
+        "This article was updated by another collaborator since you loaded it.",
+    )
+    .with_meta(serde_json::json!({
+        "expected_etag": expected_etag,
+        "current_etag": current_etag,
+        "current_edit_seq": current_edit_seq,
+        "updated_by": updated_by,
+        "updated_at": updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "remote_title": remote_title,
+        "remote_summary": remote_summary,
+        "remote_body_markdown": remote_body_markdown,
+    }))
+    .into()
+}
+
 use anyhow::Result;
 use async_trait::async_trait;
 use content_loader::ContentBundle;
 use icehandnote_core::{
     auth::{
-        BlogSsoClaims, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        SaveStudioStepInput, SiteSettingsDto, StudioStepEditorDto, StudioTrackDto,
-        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
+        BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
+        CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
+        StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto,
+        UserProfileDto, UserRole, UserSessionDto,
     },
     webauthn::StoredPasskeyCredential,
-    ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto,
-    TrackSummaryDto, UserMarginNoteDto,
+    ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, ListMarginNotesFilter,
+    SearchHitDto, StepDetailDto, TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
 };
+use chrono::{DateTime, Utc};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -66,8 +139,30 @@ pub trait TutorialRepository: Send + Sync {
         step_id: Uuid,
         learner_id: &str,
     ) -> Result<Vec<UserMarginNoteDto>>;
+    async fn list_margin_notes_filtered(
+        &self,
+        learner_id: &str,
+        filter: &ListMarginNotesFilter,
+    ) -> Result<(Vec<UserMarginNoteDto>, usize)>;
     async fn create_margin_note(&self, input: CreateMarginNoteInput) -> Result<UserMarginNoteDto>;
-    async fn delete_margin_note(&self, note_id: Uuid, learner_id: &str) -> Result<bool>;
+    async fn update_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        input: UpdateMarginNoteInput,
+        expected_etag: Option<&str>,
+    ) -> Result<UserMarginNoteDto>;
+    async fn delete_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        expected_etag: Option<&str>,
+    ) -> Result<Option<DateTime<Utc>>>;
+    async fn restore_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+    ) -> Result<UserMarginNoteDto>;
     async fn sync_bundle(&self, bundle: &ContentBundle) -> Result<usize>;
 
     // Auth, OAuth Onboarding/Binding, Profile & Password Reset
@@ -231,7 +326,11 @@ pub trait TutorialRepository: Send + Sync {
     async fn merge_anonymous_learner(&self, anon_id: &str, user_learner_id: &str) -> Result<()>;
 
     // Studio Authoring, Track/Chapter Deletion & Co-Author Collaboration
-    async fn studio_list_tracks(&self, locale: &str) -> Result<Vec<StudioTrackDto>>;
+    async fn studio_list_tracks(
+        &self,
+        viewer: &UserProfileDto,
+        locale: &str,
+    ) -> Result<Vec<StudioTrackDto>>;
     async fn studio_get_step_editor(
         &self,
         viewer: &UserProfileDto,
@@ -245,6 +344,7 @@ pub trait TutorialRepository: Send + Sync {
         author: &UserProfileDto,
         input: SaveStudioStepInput,
         content_dir: &Path,
+        require_if_match: bool,
     ) -> Result<StudioStepEditorDto>;
     async fn studio_create_track(
         &self,
@@ -271,6 +371,7 @@ pub trait TutorialRepository: Send + Sync {
         step_slug: &str,
         content_dir: &Path,
     ) -> Result<bool>;
+    #[allow(clippy::too_many_arguments)]
     async fn create_collaborator_invite(
         &self,
         actor: &UserProfileDto,
@@ -278,7 +379,14 @@ pub trait TutorialRepository: Send + Sync {
         chapter_slug: &str,
         step_slug: &str,
         email: &str,
+        role: &str,
+        locale_scope: &[String],
     ) -> Result<(CollaboratorInviteDto, String, String)>;
+    async fn preview_collaborator_invite(
+        &self,
+        viewer: Option<&UserProfileDto>,
+        raw_token: &str,
+    ) -> Result<InvitePreviewDto>;
     async fn revoke_collaborator_invite(
         &self,
         actor: &UserProfileDto,
@@ -297,6 +405,59 @@ pub trait TutorialRepository: Send + Sync {
         step_slug: &str,
         target_user_id: Uuid,
     ) -> Result<bool>;
+    #[allow(clippy::too_many_arguments)]
+    async fn update_step_collaborator_role(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+        role: &str,
+        locale_scope: &[String],
+    ) -> Result<bool>;
+    async fn leave_step_collaboration(
+        &self,
+        user: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<bool>;
+    async fn transfer_step_ownership(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+    ) -> Result<bool>;
+    async fn list_step_revisions(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+    ) -> Result<Vec<StepRevisionDto>>;
+    #[allow(clippy::too_many_arguments)]
+    async fn restore_step_revision(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+        revision_id: Uuid,
+        expected_etag: Option<&str>,
+        content_dir: &Path,
+    ) -> Result<StudioStepEditorDto>;
+    async fn list_step_audit_logs(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Vec<CollaborationAuditLogDto>>;
 
     // Admin Moderation, User Governance & Site Settings
     async fn admin_takedown_step(

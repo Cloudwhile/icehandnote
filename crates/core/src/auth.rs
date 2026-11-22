@@ -86,6 +86,8 @@ pub struct UserProfileDto {
     pub has_password: bool,
     pub bio: String,
     pub role: UserRole,
+    #[serde(default)]
+    pub has_collaborations: bool,
     pub auth_source: String,
     #[serde(default)]
     pub is_banned: bool,
@@ -95,6 +97,10 @@ pub struct UserProfileDto {
 }
 
 impl UserProfileDto {
+    pub fn can_access_studio(&self) -> bool {
+        self.role.can_author() || self.has_collaborations
+    }
+
     pub fn with_resolved_avatar(mut self, gravatar_base_url: &str) -> Self {
         self.avatar_url = crate::crypto::resolve_avatar_url(
             &self.avatar_source,
@@ -108,6 +114,80 @@ impl UserProfileDto {
     }
 }
 
+fn default_editor_role() -> String {
+    "editor".to_string()
+}
+
+fn default_one_i64() -> i64 {
+    1
+}
+
+/// Normalize a collaborator role into the canonical set: `"editor"`, `"translator"`, or `"reviewer"`.
+pub fn normalize_collaborator_role(raw: Option<&str>) -> String {
+    match raw.unwrap_or("editor").trim().to_ascii_lowercase().as_str() {
+        "translator" => "translator".to_string(),
+        "reviewer" => "reviewer".to_string(),
+        _ => "editor".to_string(),
+    }
+}
+
+/// Normalize optional locale scopes for translator collaborators against supported locales.
+pub fn normalize_locale_scope(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in raw {
+        let trimmed = item.trim();
+        let canonical = match trimmed.to_ascii_lowercase().as_str() {
+            "zh-cn" => Some("zh-CN"),
+            "zh-tw" => Some("zh-TW"),
+            "en" => Some("en"),
+            "ja" => Some("ja"),
+            _ => None,
+        };
+        if let Some(code) = canonical {
+            if !out.iter().any(|x| x == code) {
+                out.push(code.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Compute a deterministic SHA-256 hex digest for a step translation's editable content.
+pub fn compute_step_content_sha256(
+    title: &str,
+    summary: &str,
+    status: &str,
+    license: &str,
+    tags: &[String],
+    body_markdown: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"step_translation_v1\0");
+    hasher.update(title.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(summary.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(status.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(license.as_bytes());
+    hasher.update(b"\0");
+    for t in tags {
+        hasher.update(t.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\0");
+    hasher.update(body_markdown.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Format an RFC 9110 strong ETag for a step translation: `"st-{edit_seq}-{sha256[..12]}"`.
+pub fn compute_step_etag(edit_seq: i64, content_sha256: &str) -> String {
+    let prefix: String = content_sha256.chars().take(12).collect();
+    let seq = edit_seq.max(1);
+    format!("\"st-{seq}-{prefix}\"")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArticleAuthorDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,14 +198,72 @@ pub struct ArticleAuthorDto {
     pub avatar_url: String,
     #[serde(default)]
     pub is_owner: bool,
+    #[serde(default = "default_editor_role")]
+    pub role: String, // "owner" | "editor" | "translator" | "reviewer"
+    #[serde(default)]
+    pub locale_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollaboratorInviteDto {
     pub id: Uuid,
     pub email: String,
+    #[serde(default = "default_editor_role")]
+    pub role: String,
+    #[serde(default)]
+    pub locale_scope: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvitePreviewDto {
+    pub invite_id: Uuid,
+    pub masked_email: String,
+    pub role: String,
+    #[serde(default)]
+    pub locale_scope: Vec<String>,
+    pub track_slug: String,
+    pub chapter_slug: String,
+    pub step_slug: String,
+    pub article_title: String,
+    pub invited_by_name: String,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_matches_viewer: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepRevisionDto {
+    pub id: Uuid,
+    pub step_id: Uuid,
+    pub locale_code: String,
+    pub edit_seq: i64,
+    pub synced_revision: i32,
+    pub status: String,
+    pub title: String,
+    pub summary: String,
+    pub body_markdown: String,
+    pub content_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_user_id: Option<Uuid>,
+    pub author_name: String,
+    #[serde(default)]
+    pub change_note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollaborationAuditLogDto {
+    pub id: Uuid,
+    pub step_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<Uuid>,
+    pub actor_name: String,
+    pub action: String,
+    #[serde(default)]
+    pub detail: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,6 +531,10 @@ fn default_one() -> i32 {
     1
 }
 
+fn default_utc_now() -> DateTime<Utc> {
+    Utc::now()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioStepRowDto {
     pub step_id: Uuid,
@@ -449,6 +591,10 @@ pub struct StudioStepEditorDto {
     pub canonical_revision: i32,
     #[serde(default = "default_one")]
     pub version: i32,
+    #[serde(default = "default_one_i64")]
+    pub edit_seq: i64,
+    #[serde(default)]
+    pub etag: String,
     pub status: String,
     #[serde(default)]
     pub license: String,
@@ -461,13 +607,23 @@ pub struct StudioStepEditorDto {
     #[serde(default)]
     pub pending_invites: Vec<CollaboratorInviteDto>,
     #[serde(default)]
+    pub can_edit: bool,
+    #[serde(default)]
     pub can_manage_collaborators: bool,
+    #[serde(default)]
+    pub can_leave: bool,
+    #[serde(default)]
+    pub viewer_role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takedown_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takedown_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takedown_by: Option<String>,
+    #[serde(default = "default_utc_now")]
+    pub published_at: DateTime<Utc>,
+    #[serde(default = "default_utc_now")]
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -475,6 +631,8 @@ pub struct SaveStudioStepInput {
     pub track_slug: String,
     pub chapter_slug: String,
     pub step_slug: String,
+    #[serde(default)]
+    pub previous_step_slug: Option<String>,
     pub locale: String,
     pub title: String,
     pub summary: String,
@@ -492,6 +650,10 @@ pub struct SaveStudioStepInput {
     pub body_markdown: String,
     #[serde(default = "default_write_disk")]
     pub write_to_content_dir: bool,
+    #[serde(default)]
+    pub expected_etag: Option<String>,
+    #[serde(default)]
+    pub change_note: Option<String>,
 }
 
 fn default_write_disk() -> bool {
@@ -507,7 +669,9 @@ pub struct CreateTrackInput {
     pub title_zh_tw: String,
     pub subtitle_zh_tw: String,
     pub description_zh_tw: String,
+    #[serde(default)]
     pub first_chapter_slug: String,
+    #[serde(default)]
     pub first_chapter_title: String,
 }
 
@@ -570,6 +734,39 @@ pub fn format_step_markdown_file_with_author(
     tags: &[String],
     body_markdown: &str,
 ) -> String {
+    format_step_markdown_file_with_meta(
+        title,
+        summary,
+        step_number,
+        estimated_minutes,
+        synced_revision,
+        canonical_revision,
+        status,
+        license,
+        author,
+        None,
+        None,
+        tags,
+        body_markdown,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_step_markdown_file_with_meta(
+    title: &str,
+    summary: &str,
+    step_number: i32,
+    estimated_minutes: i32,
+    synced_revision: i32,
+    canonical_revision: i32,
+    status: &str,
+    license: &str,
+    author: &str,
+    published_at: Option<&str>,
+    updated_at: Option<&str>,
+    tags: &[String],
+    body_markdown: &str,
+) -> String {
     let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_summary = summary.replace('\\', "\\\\").replace('"', "\\\"");
     let clean_status = if status == "draft" {
@@ -589,6 +786,16 @@ pub fn format_step_markdown_file_with_author(
         let escaped_author = author.trim().replace('\\', "\\\\").replace('"', "\\\"");
         format!("author = \"{escaped_author}\"\n")
     };
+    let published_line = published_at
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("published_at = \"{s}\"\n"))
+        .unwrap_or_default();
+    let updated_line = updated_at
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("updated_at = \"{s}\"\n"))
+        .unwrap_or_default();
     let tags_toml = tags
         .iter()
         .map(|t| format!("\"{}\"", t.replace('"', "")))
@@ -596,7 +803,7 @@ pub fn format_step_markdown_file_with_author(
         .join(", ");
 
     format!(
-        "+++\ntitle = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{author_line}tags = [{tags_toml}]\n+++\n\n{}\n",
+        "+++\ntitle = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{author_line}{published_line}{updated_line}tags = [{tags_toml}]\n+++\n\n{}\n",
         body_markdown.trim()
     )
 }

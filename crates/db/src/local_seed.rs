@@ -6,32 +6,36 @@ use crate::{
         default_seeded_blog_users, delete_chapter_in_bundle_and_disk,
         delete_step_in_bundle_and_disk, delete_track_in_bundle_and_disk,
         generate_raw_session_token, match_local_user_password, read_step_editor_from_bundle,
-        resolve_local_step_authors, upsert_local_blog_user, user_can_edit_local_step,
-        StoredCollabInviteRecord, StoredEmailVerificationRecord, StoredLoginOtpChallengeRecord,
-        StoredOAuthBinding, StoredPasswordResetRecord, StoredSessionRecord, StoredStepMetaRecord,
-        StoredTrustedDeviceRecord, StoredUserRecord,
+        resolve_local_step_authors, upsert_local_blog_user, user_can_edit_local_step_locale,
+        user_can_read_local_draft, StoredCollabInviteRecord, StoredEmailVerificationRecord,
+        StoredLoginOtpChallengeRecord, StoredOAuthBinding, StoredPasswordResetRecord,
+        StoredSessionRecord, StoredStepMetaRecord, StoredTrustedDeviceRecord, StoredUserRecord,
     },
-    domain_err, TutorialRepository,
+    domain_err, if_match_satisfies, note_quota_for_owner, precondition_failed_err,
+    TutorialRepository, NOTE_UNDO_GRACE_MINUTES,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
         constant_time_str_eq, generate_action_token, generate_email_verification_code,
         hash_action_token, hash_email_verification_code, hash_password, hash_session_token,
-        normalize_avatar_source, parse_user_agent_device, verify_password, BlogSsoClaims,
-        CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, SaveStudioStepInput,
-        SiteSettingsDto, StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput,
-        UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
+        mask_email_address, normalize_avatar_source, normalize_collaborator_role,
+        normalize_locale_scope, parse_user_agent_device, verify_password, BlogSsoClaims,
+        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
+        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
+        StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto,
+        UserProfileDto, UserRole, UserSessionDto,
     },
     build_highlighted_snippet,
     error::{DomainError, ErrorCode},
-    sanitize_user_note,
+    normalize_note_motivation, normalize_note_visuals, sanitize_user_note,
+    validate_user_note_content,
     webauthn::StoredPasskeyCredential,
-    ArticleTaskChecksDto, ChapterNavDto,
-    CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto, StepNavItemDto,
-    StepNeighborDto, TrackSummaryDto, UserMarginNoteDto,
+    ArticleTaskChecksDto, ChapterNavDto, CreateMarginNoteInput, LearnerProgressDto,
+    ListMarginNotesFilter, SearchHitDto, StepDetailDto, StepNavItemDto, StepNeighborDto,
+    TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -68,6 +72,10 @@ struct PersistedUserState {
     step_meta: HashMap<Uuid, StoredStepMetaRecord>,
     #[serde(default)]
     collab_invites: Vec<StoredCollabInviteRecord>,
+    #[serde(default)]
+    step_revisions: Vec<StepRevisionDto>,
+    #[serde(default)]
+    collab_audit_logs: Vec<CollaborationAuditLogDto>,
     #[serde(default)]
     passkeys: Vec<StoredPasskeyCredential>,
     #[serde(default)]
@@ -161,6 +169,18 @@ impl LocalSeedRepository {
             .map(|s| s.gravatar_base_url.as_str())
             .filter(|u| !u.is_empty())
             .unwrap_or("https://www.gravatar.com/avatar")
+    }
+
+    fn user_has_collaborations(user_id: Uuid, step_meta: &HashMap<Uuid, StoredStepMetaRecord>) -> bool {
+        step_meta
+            .values()
+            .any(|m| m.owner_user_id == Some(user_id) || m.is_collaborator(user_id))
+    }
+
+    fn resolve_user_dto_in_state(rec: &StoredUserRecord, state: &PersistedUserState) -> UserProfileDto {
+        let mut dto = Self::resolve_user_dto(rec, Self::gravatar_base(state));
+        dto.has_collaborations = Self::user_has_collaborations(dto.id, &state.step_meta);
+        dto
     }
 
     fn resolve_user_dto(rec: &StoredUserRecord, gravatar_base: &str) -> UserProfileDto {
@@ -290,20 +310,10 @@ impl TutorialRepository for LocalSeedRepository {
         };
         let (track_title, _, _) = Self::resolve_track_meta(track, locale);
 
-        let mut chapters_nav = Vec::new();
+        let mut all_nav_steps: Vec<StepNavItemDto> = Vec::new();
         let mut flat_steps: Vec<(String, String, String, Uuid)> = Vec::new();
 
         for ch in &track.chapters {
-            let ch_title = ch
-                .titles
-                .get(locale)
-                .or_else(|| ch.titles.get("zh-CN"))
-                .or_else(|| ch.titles.get("en"))
-                .or_else(|| ch.titles.values().next())
-                .cloned()
-                .unwrap_or_else(|| ch.slug.clone());
-
-            let mut nav_steps = Vec::new();
             for s in ch.steps.iter().filter(|s| step_is_public(s, &state.step_meta)) {
                 let tr_req = s.translations.get(locale).filter(|t| is_published(t));
                 let tr_any = pick_published(s, locale);
@@ -311,28 +321,55 @@ impl TutorialRepository for LocalSeedRepository {
                     .map(|tr| tr.compiled.frontmatter.title.clone())
                     .unwrap_or_else(|| s.slug.clone());
                 let has_req = tr_req.is_some();
+                let canonical_rev = s.canonical_revision.max(1);
+                let has_drift = tr_req.is_some_and(|t| {
+                    t.compiled.frontmatter.synced_revision.max(1) < canonical_rev
+                });
 
                 flat_steps.push((ch.slug.clone(), s.slug.clone(), s_title.clone(), s.id));
-                nav_steps.push(StepNavItemDto {
+                all_nav_steps.push(StepNavItemDto {
                     id: s.id,
                     slug: s.slug.clone(),
                     step_number: s.step_number,
                     title: s_title,
                     estimated_minutes: s.estimated_minutes,
                     has_requested_locale: has_req,
-                    has_revision_drift: false,
+                    has_revision_drift: has_drift,
                 });
             }
-
-            chapters_nav.push(ChapterNavDto {
-                slug: ch.slug.clone(),
-                number: ch.number,
-                title: ch_title,
-                steps: nav_steps,
-            });
         }
 
-        let Some(ch) = track.chapters.iter().find(|c| c.slug == chapter_slug) else {
+        let primary_ch_slug = track
+            .chapters
+            .first()
+            .map(|c| c.slug.clone())
+            .unwrap_or_else(|| "chapters".to_string());
+        let chapters_nav = vec![ChapterNavDto {
+            slug: primary_ch_slug,
+            number: 1,
+            title: track_title.to_string(),
+            steps: all_nav_steps,
+        }];
+
+        let found = if chapter_slug.is_empty() || chapter_slug == "-" {
+            track
+                .chapters
+                .iter()
+                .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
+        } else {
+            track
+                .chapters
+                .iter()
+                .find(|c| c.slug == chapter_slug)
+                .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
+                .or_else(|| {
+                    track
+                        .chapters
+                        .iter()
+                        .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
+                })
+        };
+        let Some((ch, step)) = found else {
             return Ok(None);
         };
         let ch_title = ch
@@ -343,9 +380,6 @@ impl TutorialRepository for LocalSeedRepository {
             .cloned()
             .unwrap_or_else(|| ch.slug.clone());
 
-        let Some(step) = ch.steps.iter().find(|s| s.slug == step_slug) else {
-            return Ok(None);
-        };
         if Self::is_step_taken_down(step.id, &state.step_meta) {
             return Ok(None);
         }
@@ -385,6 +419,8 @@ impl TutorialRepository for LocalSeedRepository {
             .map(|a| a.display_name.clone())
             .unwrap_or_default();
 
+        let canonical_rev = step.canonical_revision.max(1);
+        let is_fallback = tr.locale != locale;
         Ok(Some(StepDetailDto {
             step_id: step.id,
             track_slug: track.manifest.slug.clone(),
@@ -396,17 +432,17 @@ impl TutorialRepository for LocalSeedRepository {
             total_steps_in_track: flat_steps.len(),
             requested_locale: locale.to_string(),
             resolved_locale: tr.locale.clone(),
-            is_fallback: tr.locale != locale,
+            is_fallback,
             available_locales: step
                 .translations
                 .values()
                 .filter(|t| is_published(t))
                 .map(|t| t.locale.clone())
                 .collect(),
-            canonical_revision: step.canonical_revision.max(1),
+            canonical_revision: canonical_rev,
             synced_revision: synced_rev,
             version: synced_rev,
-            has_revision_drift: false,
+            has_revision_drift: !is_fallback && synced_rev < canonical_rev,
             estimated_minutes: tr.compiled.frontmatter.estimated_minutes,
             title: tr.compiled.frontmatter.title.clone(),
             summary: tr.compiled.frontmatter.summary.clone(),
@@ -420,6 +456,7 @@ impl TutorialRepository for LocalSeedRepository {
             prev_step,
             next_step,
             likes_count: step.initial_likes + likes_delta,
+            published_at: tr.published_at,
             updated_at: tr.updated_at,
         }))
     }
@@ -582,45 +619,297 @@ impl TutorialRepository for LocalSeedRepository {
         step_id: Uuid,
         learner_id: &str,
     ) -> Result<Vec<UserMarginNoteDto>> {
+        let (items, _) = self
+            .list_margin_notes_filtered(
+                learner_id,
+                &ListMarginNotesFilter {
+                    step_id: Some(step_id),
+                    limit: 500,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(items)
+    }
+
+    async fn list_margin_notes_filtered(
+        &self,
+        learner_id: &str,
+        filter: &ListMarginNotesFilter,
+    ) -> Result<(Vec<UserMarginNoteDto>, usize)> {
+        let bundle = self.bundle.read().await;
         let state = self.state.read().await;
-        Ok(state
+
+        let locale_opt = filter
+            .locale_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let tag_opt = filter
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "all");
+        let q_lower = filter
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
+
+        // Build lookup map of step metadata for cross-article "My Notes" & export enrichment
+        let mut step_meta: HashMap<Uuid, (String, String, String, HashMap<String, String>, String)> =
+            HashMap::new();
+        for t in &bundle.tracks {
+            for c in &t.chapters {
+                for s in &c.steps {
+                    let titles: HashMap<String, String> = s
+                        .translations
+                        .iter()
+                        .map(|(loc, tr)| (loc.clone(), tr.compiled.frontmatter.title.clone()))
+                        .collect();
+                    step_meta.insert(
+                        s.id,
+                        (
+                            t.manifest.slug.clone(),
+                            c.slug.clone(),
+                            s.slug.clone(),
+                            titles,
+                            s.default_locale.clone(),
+                        ),
+                    );
+                }
+            }
+        }
+
+        let mut matched: Vec<UserMarginNoteDto> = state
             .notes
             .iter()
-            .filter(|n| n.step_id == step_id && n.learner_id == learner_id)
-            .cloned()
-            .collect())
+            .filter(|n| n.learner_id == learner_id && n.deleted_at.is_none())
+            .filter(|n| filter.step_id.map_or(true, |sid| n.step_id == sid))
+            .filter(|n| locale_opt.map_or(true, |loc| n.locale_code == loc))
+            .map(|n| {
+                let mut cloned = n.clone();
+                cloned.hydrate_legacy_fields();
+                if let Some((t_slug, c_slug, s_slug, titles, def_loc)) = step_meta.get(&cloned.step_id)
+                {
+                    cloned.track_slug = Some(t_slug.clone());
+                    cloned.chapter_slug = Some(c_slug.clone());
+                    cloned.step_slug = Some(s_slug.clone());
+                    cloned.step_title = titles
+                        .get(&cloned.locale_code)
+                        .or_else(|| titles.get(def_loc))
+                        .or_else(|| titles.values().next())
+                        .cloned()
+                        .or_else(|| Some(s_slug.clone()));
+                }
+                cloned
+            })
+            .filter(|n| tag_opt.map_or(true, |tg| n.tag == tg))
+            .filter(|n| {
+                q_lower.as_ref().map_or(true, |q| {
+                    n.raw_content.to_lowercase().contains(q)
+                        || n.step_title
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(q)
+                })
+            })
+            .collect();
+
+        if filter.step_id.is_some() {
+            matched.sort_by_key(|n| n.created_at);
+        } else {
+            matched.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.created_at.cmp(&a.created_at)));
+        }
+
+        let total = matched.len();
+        let limit = filter.limit.clamp(1, 500);
+        let page: Vec<UserMarginNoteDto> = matched
+            .into_iter()
+            .skip(filter.offset)
+            .take(limit)
+            .collect();
+        Ok((page, total))
     }
 
     async fn create_margin_note(&self, input: CreateMarginNoteInput) -> Result<UserMarginNoteDto> {
-        let content_html = sanitize_user_note(&input.content);
+        let clean_content = validate_user_note_content(&input.content)?;
+        let quota = note_quota_for_owner(&input.learner_id);
+        let mut state = self.state.write().await;
+        let existing_count = state
+            .notes
+            .iter()
+            .filter(|n| {
+                n.learner_id == input.learner_id
+                    && n.step_id == input.step_id
+                    && n.deleted_at.is_none()
+            })
+            .count();
+        if existing_count >= quota {
+            return Err(DomainError::new(
+                ErrorCode::NoteQuotaExceeded,
+                format!("Reached the maximum of {quota} notes for this article."),
+            )
+            .with_meta(serde_json::json!({ "quota": quota }))
+            .into());
+        }
+
+        let (tone, style, tag) = normalize_note_visuals(
+            input.tone.as_deref(),
+            input.style.as_deref(),
+            input.tag.as_deref(),
+            Some(&input.note_color),
+        );
+        let note_color = format!("{tone}:{style}:{tag}");
+        let motivation = normalize_note_motivation(input.motivation.as_deref(), &tag);
+        let content_html = sanitize_user_note(&clean_content);
+        let now = Utc::now();
+
         let dto = UserMarginNoteDto {
             id: Uuid::new_v4(),
             learner_id: input.learner_id,
             step_id: input.step_id,
             locale_code: input.locale_code,
             block_anchor_id: input.block_anchor_id,
-            note_color: input.note_color,
+            note_color,
+            tone,
+            style,
+            tag,
+            motivation,
+            target: input.target,
+            body_format: "text/markdown".to_string(),
             content_html,
-            raw_content: input.content,
-            created_at: Utc::now(),
+            raw_content: clean_content,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            track_slug: None,
+            chapter_slug: None,
+            step_slug: None,
+            step_title: None,
         };
-        let mut state = self.state.write().await;
         state.notes.push(dto.clone());
         self.persist_state(&state);
         Ok(dto)
     }
 
-    async fn delete_margin_note(&self, note_id: Uuid, learner_id: &str) -> Result<bool> {
+    async fn update_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        input: UpdateMarginNoteInput,
+        expected_etag: Option<&str>,
+    ) -> Result<UserMarginNoteDto> {
         let mut state = self.state.write().await;
-        let before = state.notes.len();
+        let Some(note) = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == note_id && n.learner_id == learner_id && n.deleted_at.is_none())
+        else {
+            return Err(domain_err(ErrorCode::NoteNotFound, "Note not found."));
+        };
+
+        note.hydrate_legacy_fields();
+        if let Some(if_match) = expected_etag {
+            if !if_match_satisfies(if_match, &note.etag()) {
+                return Err(precondition_failed_err(if_match, note));
+            }
+        }
+
+        if let Some(ref c) = input.content {
+            let validated = validate_user_note_content(c)?;
+            note.content_html = sanitize_user_note(&validated);
+            note.raw_content = validated;
+        }
+
+        let (next_tone, next_style, next_tag) = normalize_note_visuals(
+            input.tone.as_deref().or(Some(&note.tone)),
+            input.style.as_deref().or(Some(&note.style)),
+            input.tag.as_deref().or(Some(&note.tag)),
+            input.note_color.as_deref(),
+        );
+        note.tone = next_tone;
+        note.style = next_style;
+        note.tag = next_tag;
+        note.note_color = format!("{}:{}:{}", note.tone, note.style, note.tag);
+        note.motivation =
+            normalize_note_motivation(input.motivation.as_deref().or(Some(&note.motivation)), &note.tag);
+        if let Some(ref anchor) = input.block_anchor_id {
+            let trimmed = anchor.trim();
+            if !trimmed.is_empty() {
+                note.block_anchor_id = trimmed.to_string();
+            }
+        }
+        if let Some(target) = input.target {
+            note.target = Some(target);
+        }
+        note.version = note.version.max(1) + 1;
+        note.updated_at = Utc::now();
+        let updated = note.clone();
+        self.persist_state(&state);
+        Ok(updated)
+    }
+
+    async fn delete_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        expected_etag: Option<&str>,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let cutoff = now - Duration::minutes(NOTE_UNDO_GRACE_MINUTES);
         state
             .notes
-            .retain(|n| !(n.id == note_id && n.learner_id == learner_id));
-        let changed = state.notes.len() < before;
-        if changed {
-            self.persist_state(&state);
+            .retain(|n| n.deleted_at.map_or(true, |dt| dt >= cutoff));
+
+        let Some(note) = state
+            .notes
+            .iter_mut()
+            .find(|n| n.id == note_id && n.learner_id == learner_id && n.deleted_at.is_none())
+        else {
+            return Ok(None);
+        };
+        note.hydrate_legacy_fields();
+        if let Some(if_match) = expected_etag {
+            if !if_match_satisfies(if_match, &note.etag()) {
+                return Err(precondition_failed_err(if_match, note));
+            }
         }
-        Ok(changed)
+        note.deleted_at = Some(now);
+        note.updated_at = now;
+        self.persist_state(&state);
+        Ok(Some(now + Duration::minutes(NOTE_UNDO_GRACE_MINUTES)))
+    }
+
+    async fn restore_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+    ) -> Result<UserMarginNoteDto> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let cutoff = now - Duration::minutes(NOTE_UNDO_GRACE_MINUTES);
+        let Some(note) = state.notes.iter_mut().find(|n| {
+            n.id == note_id
+                && n.learner_id == learner_id
+                && n.deleted_at.map_or(false, |dt| dt >= cutoff)
+        }) else {
+            return Err(domain_err(
+                ErrorCode::NoteNotFound,
+                "Deleted note could not be restored or the undo window has expired.",
+            ));
+        };
+        note.deleted_at = None;
+        note.version = note.version.max(1) + 1;
+        note.updated_at = now;
+        note.hydrate_legacy_fields();
+        let restored = note.clone();
+        self.persist_state(&state);
+        Ok(restored)
     }
 
     async fn sync_bundle(&self, bundle: &ContentBundle) -> Result<usize> {
@@ -774,6 +1063,7 @@ impl TutorialRepository for LocalSeedRepository {
             has_password: false,
             bio: String::new(),
             role: safe_role,
+            has_collaborations: false,
             auth_source: clean_provider.clone(),
             is_banned: false,
             ban_reason: String::new(),
@@ -1100,6 +1390,7 @@ impl TutorialRepository for LocalSeedRepository {
             has_password: true,
             bio: String::new(),
             role: safe_role,
+            has_collaborations: false,
             auth_source: "local".to_string(),
             is_banned: false,
             ban_reason: String::new(),
@@ -1158,6 +1449,7 @@ impl TutorialRepository for LocalSeedRepository {
             rec.profile.last_login_at = now;
             resolved = Self::resolve_user_dto(rec, &grav);
         }
+        resolved.has_collaborations = Self::user_has_collaborations(resolved.id, &state.step_meta);
         self.persist_state(&state);
         Ok(Some(resolved))
     }
@@ -1647,12 +1939,11 @@ impl TutorialRepository for LocalSeedRepository {
         else {
             return Ok(None);
         };
-        let grav = Self::gravatar_base(&state);
         Ok(state
             .users
             .iter()
             .find(|u| u.profile.id == sess.user_id && !u.profile.is_banned)
-            .map(|u| Self::resolve_user_dto(u, grav)))
+            .map(|u| Self::resolve_user_dto_in_state(u, &state)))
     }
 
     async fn touch_session(&self, raw_token: &str, ip_address: &str) -> Result<()> {
@@ -1992,7 +2283,11 @@ impl TutorialRepository for LocalSeedRepository {
     }
 
     async fn merge_anonymous_learner(&self, anon_id: &str, user_learner_id: &str) -> Result<()> {
-        if anon_id.trim().is_empty() || anon_id == user_learner_id {
+        let clean_anon = anon_id.trim();
+        if clean_anon.is_empty()
+            || clean_anon == user_learner_id
+            || clean_anon.starts_with("user:")
+        {
             return Ok(());
         }
         let mut state = self.state.write().await;
@@ -2021,12 +2316,17 @@ impl TutorialRepository for LocalSeedRepository {
         Ok(())
     }
 
-    async fn studio_list_tracks(&self, locale: &str) -> Result<Vec<StudioTrackDto>> {
+    async fn studio_list_tracks(
+        &self,
+        viewer: &UserProfileDto,
+        locale: &str,
+    ) -> Result<Vec<StudioTrackDto>> {
         let bundle = self.bundle.read().await;
         let state = self.state.read().await;
         let grav = Self::gravatar_base(&state);
         Ok(build_studio_overview_from_bundle(
             &bundle,
+            Some(viewer),
             locale,
             &state.step_meta,
             &state.users,
@@ -2045,7 +2345,7 @@ impl TutorialRepository for LocalSeedRepository {
         let bundle = self.bundle.read().await;
         let state = self.state.read().await;
         let grav = Self::gravatar_base(&state);
-        Ok(read_step_editor_from_bundle(
+        read_step_editor_from_bundle(
             viewer,
             &bundle,
             track_slug,
@@ -2056,7 +2356,7 @@ impl TutorialRepository for LocalSeedRepository {
             &state.collab_invites,
             &state.users,
             grav,
-        ))
+        )
     }
 
     async fn studio_save_step(
@@ -2064,12 +2364,15 @@ impl TutorialRepository for LocalSeedRepository {
         author: &UserProfileDto,
         input: SaveStudioStepInput,
         content_dir: &Path,
+        require_if_match: bool,
     ) -> Result<StudioStepEditorDto> {
         let mut bundle = self.bundle.write().await;
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
         let PersistedUserState {
             ref mut step_meta,
+            ref mut step_revisions,
+            ref mut collab_audit_logs,
             ref collab_invites,
             ref users,
             ..
@@ -2078,11 +2381,14 @@ impl TutorialRepository for LocalSeedRepository {
             author,
             &mut bundle,
             step_meta,
+            step_revisions,
+            collab_audit_logs,
             collab_invites,
             users,
             &grav,
             &input,
             content_dir,
+            require_if_match,
         )?;
         self.persist_state(&state);
         Ok(saved)
@@ -2159,7 +2465,7 @@ impl TutorialRepository for LocalSeedRepository {
                 if let Some(step) = ch.steps.iter().find(|s| s.slug == step_slug) {
                     if !actor.role.is_admin() {
                         let owner = state.step_meta.get(&step.id).and_then(|m| m.owner_user_id);
-                        if owner.is_some() && owner != Some(actor.id) {
+                        if owner != Some(actor.id) {
                             return Err(domain_err(
                                 ErrorCode::StepDeleteForbidden,
                                 "Only the article owner or an administrator can delete this article.",
@@ -2169,12 +2475,19 @@ impl TutorialRepository for LocalSeedRepository {
                 }
             }
         }
-        let (removed, sid_opt) =
-            delete_step_in_bundle_and_disk(&mut bundle, track_slug, chapter_slug, step_slug, content_dir)?;
+        let (removed, sid_opt) = delete_step_in_bundle_and_disk(
+            &mut bundle,
+            track_slug,
+            chapter_slug,
+            step_slug,
+            content_dir,
+        )?;
         if let Some(sid) = sid_opt {
             state.step_meta.remove(&sid);
             state.likes_delta.remove(&sid);
             state.collab_invites.retain(|i| i.step_id != sid);
+            state.step_revisions.retain(|r| r.step_id != sid);
+            state.collab_audit_logs.retain(|l| l.step_id != sid);
             state.notes.retain(|n| n.step_id != sid);
             self.persist_state(&state);
         }
@@ -2188,6 +2501,8 @@ impl TutorialRepository for LocalSeedRepository {
         chapter_slug: &str,
         step_slug: &str,
         email: &str,
+        role: &str,
+        locale_scope: &[String],
     ) -> Result<(CollaboratorInviteDto, String, String)> {
         let Some(clean_email) = icehandnote_core::auth::validate_and_normalize_email(email) else {
             return Err(domain_err(
@@ -2196,6 +2511,13 @@ impl TutorialRepository for LocalSeedRepository {
             ));
         };
         let clean_email = clean_email.as_str();
+        let norm_role = normalize_collaborator_role(Some(role));
+        let norm_scope = if norm_role == "translator" {
+            normalize_locale_scope(locale_scope)
+        } else {
+            Vec::new()
+        };
+
         let bundle = self.bundle.read().await;
         let Some(track) = bundle.tracks.iter().find(|t| t.manifest.slug == track_slug) else {
             return Err(domain_err(ErrorCode::TrackNotFound, "Track not found."));
@@ -2219,44 +2541,164 @@ impl TutorialRepository for LocalSeedRepository {
         drop(bundle);
 
         let mut state = self.state.write().await;
-        if !user_can_edit_local_step(actor, step_id, &state.step_meta) {
-            return Err(domain_err(
-                ErrorCode::CollaboratorForbidden,
-                "You do not have permission to manage collaborators for this article.",
-            ));
-        }
-        let meta = state.step_meta.entry(step_id).or_default();
-        if meta.owner_user_id.is_none() {
-            meta.owner_user_id = Some(actor.id);
-        }
-        if !actor.role.is_admin() && meta.owner_user_id != Some(actor.id) {
+        let owner_opt = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        // C-03: Never allow non-admin authors to claim unowned (owner_user_id = None) articles
+        if !actor.role.is_admin() && owner_opt != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::InviteForbidden,
                 "Only the article owner or an administrator can send collaboration invites.",
             ));
         }
 
+        // Reject inviting someone who is already a member of this article
+        if let Some(existing_user) = state
+            .users
+            .iter()
+            .find(|u| u.profile.email.eq_ignore_ascii_case(clean_email))
+        {
+            let uid = existing_user.profile.id;
+            if owner_opt == Some(uid)
+                || state
+                    .step_meta
+                    .get(&step_id)
+                    .map_or(false, |m| m.is_collaborator(uid))
+            {
+                return Err(domain_err(
+                    ErrorCode::InviteAlreadyMember,
+                    "This user is already a collaborator on this article.",
+                ));
+            }
+        }
+
         let now = Utc::now();
-        state.collab_invites.retain(|i| i.expires_at > now);
+        // Deduplicate: supersede any previous active invite for the same (step_id, email)
+        for existing in &mut state.collab_invites {
+            if existing.step_id == step_id
+                && existing.email.eq_ignore_ascii_case(clean_email)
+                && existing.consumed_at.is_none()
+                && existing.revoked_at.is_none()
+            {
+                existing.revoked_at = Some(now);
+            }
+        }
+        // Prune very old finished invites (> 30 days) while keeping recent ones for 410 Gone accuracy
+        let prune_cutoff = now - Duration::days(30);
+        state
+            .collab_invites
+            .retain(|i| i.expires_at > prune_cutoff && i.created_at > prune_cutoff);
+
         let (raw_token, token_hash) = generate_action_token("ihn_inv", "collab_invite_v1");
         let inv = StoredCollabInviteRecord {
             id: Uuid::new_v4(),
             step_id,
             email: clean_email.to_string(),
             token_hash,
+            role: norm_role.clone(),
+            locale_scope: norm_scope.clone(),
             invited_by: Some(actor.id),
             expires_at: now + Duration::days(7),
             created_at: now,
+            consumed_at: None,
+            revoked_at: None,
         };
         let dto = CollaboratorInviteDto {
             id: inv.id,
             email: inv.email.clone(),
+            role: inv.role.clone(),
+            locale_scope: inv.locale_scope.clone(),
             created_at: inv.created_at,
             expires_at: inv.expires_at,
         };
         state.collab_invites.push(inv);
+        state.collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(actor.id),
+            actor_name: actor.display_name.clone(),
+            action: "invite_created".to_string(),
+            detail: format!("{} ({norm_role})", mask_email_address(clean_email)),
+            created_at: now,
+        });
         self.persist_state(&state);
         Ok((dto, raw_token, step_title))
+    }
+
+    async fn preview_collaborator_invite(
+        &self,
+        viewer: Option<&UserProfileDto>,
+        raw_token: &str,
+    ) -> Result<InvitePreviewDto> {
+        let token_hash = hash_action_token("collab_invite_v1", raw_token.trim());
+        let bundle = self.bundle.read().await;
+        let state = self.state.read().await;
+        let now = Utc::now();
+
+        let Some(inv) = state
+            .collab_invites
+            .iter()
+            .find(|i| i.token_hash == token_hash)
+        else {
+            return Err(domain_err(
+                ErrorCode::InviteNotFound,
+                "Collaboration invitation was not found.",
+            ));
+        };
+        if inv.consumed_at.is_some() || inv.revoked_at.is_some() || inv.expires_at <= now {
+            return Err(domain_err(
+                ErrorCode::InviteExpired,
+                "This collaboration invitation has expired, been revoked, or already been used.",
+            ));
+        }
+
+        let mut target_info = None;
+        for t in &bundle.tracks {
+            for c in &t.chapters {
+                for s in &c.steps {
+                    if s.id == inv.step_id {
+                        let title = s
+                            .translations
+                            .get(&s.default_locale)
+                            .or_else(|| s.translations.values().next())
+                            .map(|tr| tr.compiled.frontmatter.title.clone())
+                            .unwrap_or_else(|| s.slug.clone());
+                        target_info = Some((
+                            t.manifest.slug.clone(),
+                            c.slug.clone(),
+                            s.slug.clone(),
+                            title,
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        let Some((track_slug, chapter_slug, step_slug, article_title)) = target_info else {
+            return Err(domain_err(
+                ErrorCode::InviteTargetDeleted,
+                "The invited article no longer exists.",
+            ));
+        };
+
+        let invited_by_name = inv
+            .invited_by
+            .and_then(|uid| state.users.iter().find(|u| u.profile.id == uid))
+            .map(|u| u.profile.display_name.clone())
+            .unwrap_or_else(|| "Author".to_string());
+        let email_matches_viewer = viewer.map(|v| v.email.trim().eq_ignore_ascii_case(&inv.email));
+
+        Ok(InvitePreviewDto {
+            invite_id: inv.id,
+            masked_email: mask_email_address(&inv.email),
+            role: normalize_collaborator_role(Some(&inv.role)),
+            locale_scope: inv.locale_scope.clone(),
+            track_slug,
+            chapter_slug,
+            step_slug,
+            article_title,
+            invited_by_name,
+            expires_at: inv.expires_at,
+            email_matches_viewer,
+        })
     }
 
     async fn revoke_collaborator_invite(
@@ -2265,17 +2707,31 @@ impl TutorialRepository for LocalSeedRepository {
         invite_id: Uuid,
     ) -> Result<bool> {
         let mut state = self.state.write().await;
-        let Some(inv) = state.collab_invites.iter().find(|i| i.id == invite_id) else {
+        let Some(pos) = state.collab_invites.iter().position(|i| {
+            i.id == invite_id && i.consumed_at.is_none() && i.revoked_at.is_none()
+        }) else {
             return Ok(false);
         };
-        let owner = state.step_meta.get(&inv.step_id).and_then(|m| m.owner_user_id);
-        if !actor.role.is_admin() && owner.is_some() && owner != Some(actor.id) {
+        let step_id = state.collab_invites[pos].step_id;
+        let inv_email = state.collab_invites[pos].email.clone();
+        let owner = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        if !actor.role.is_admin() && owner != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::InviteForbidden,
                 "You do not have permission to revoke this invitation.",
             ));
         }
-        state.collab_invites.retain(|i| i.id != invite_id);
+        let now = Utc::now();
+        state.collab_invites[pos].revoked_at = Some(now);
+        state.collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(actor.id),
+            actor_name: actor.display_name.clone(),
+            action: "invite_revoked".to_string(),
+            detail: mask_email_address(&inv_email),
+            created_at: now,
+        });
         self.persist_state(&state);
         Ok(true)
     }
@@ -2285,11 +2741,10 @@ impl TutorialRepository for LocalSeedRepository {
         user: &UserProfileDto,
         raw_token: &str,
     ) -> Result<(String, String, String)> {
-        let token_hash = hash_action_token("collab_invite_v1", raw_token);
+        let token_hash = hash_action_token("collab_invite_v1", raw_token.trim());
         let bundle = self.bundle.read().await;
         let mut state = self.state.write().await;
         let now = Utc::now();
-        state.collab_invites.retain(|i| i.expires_at > now);
 
         let Some(pos) = state
             .collab_invites
@@ -2297,18 +2752,42 @@ impl TutorialRepository for LocalSeedRepository {
             .position(|i| i.token_hash == token_hash)
         else {
             return Err(domain_err(
-                ErrorCode::InviteInvalid,
-                "Collaboration invitation link is invalid or has expired.",
+                ErrorCode::InviteNotFound,
+                "Collaboration invitation was not found.",
             ));
         };
-        let inv = state.collab_invites.remove(pos);
+        if state.collab_invites[pos].consumed_at.is_some()
+            || state.collab_invites[pos].revoked_at.is_some()
+            || state.collab_invites[pos].expires_at <= now
+        {
+            return Err(domain_err(
+                ErrorCode::InviteExpired,
+                "This collaboration invitation has expired, been revoked, or already been used.",
+            ));
+        }
+
+        // C-02: Strict email binding BEFORE consuming the token (so mismatched clickers cannot burn the link!)
+        let inv_email = state.collab_invites[pos].email.clone();
+        if !user.email.trim().eq_ignore_ascii_case(&inv_email) {
+            return Err(DomainError::new(
+                ErrorCode::InviteEmailMismatch,
+                "This invitation was issued for a different email address. Sign in with the invited account.",
+            )
+            .with_meta(serde_json::json!({ "expected_email": mask_email_address(&inv_email) }))
+            .into());
+        }
+
+        let step_id = state.collab_invites[pos].step_id;
+        let inv_role = normalize_collaborator_role(Some(&state.collab_invites[pos].role));
+        let inv_scope = state.collab_invites[pos].locale_scope.clone();
 
         let mut target_loc = None;
         for t in &bundle.tracks {
             for c in &t.chapters {
                 for s in &c.steps {
-                    if s.id == inv.step_id {
-                        target_loc = Some((t.manifest.slug.clone(), c.slug.clone(), s.slug.clone()));
+                    if s.id == step_id {
+                        target_loc =
+                            Some((t.manifest.slug.clone(), c.slug.clone(), s.slug.clone()));
                         break;
                     }
                 }
@@ -2321,15 +2800,30 @@ impl TutorialRepository for LocalSeedRepository {
             ));
         };
 
-        let meta = state.step_meta.entry(inv.step_id).or_default();
-        if meta.owner_user_id != Some(user.id) && !meta.collaborator_ids.contains(&user.id) {
-            meta.collaborator_ids.push(user.id);
-        }
-        if let Some(u_rec) = state.users.iter_mut().find(|u| u.profile.id == user.id) {
-            if u_rec.profile.role == UserRole::Reader {
-                u_rec.profile.role = UserRole::Author;
+        // Check if already a member (409 Conflict)
+        if let Some(meta) = state.step_meta.get(&step_id) {
+            if meta.owner_user_id == Some(user.id) || meta.is_collaborator(user.id) {
+                return Err(domain_err(
+                    ErrorCode::InviteAlreadyMember,
+                    "You are already a collaborator on this article.",
+                ));
             }
         }
+
+        // Consume invite & grant scoped collaborator role WITHOUT site-wide reader->author privilege escalation!
+        state.collab_invites[pos].consumed_at = Some(now);
+        let meta = state.step_meta.entry(step_id).or_default();
+        meta.set_collaborator(user.id, &inv_role, &inv_scope);
+
+        state.collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(user.id),
+            actor_name: user.display_name.clone(),
+            action: "invite_accepted".to_string(),
+            detail: format!("{} ({inv_role})", user.display_name),
+            created_at: now,
+        });
         self.persist_state(&state);
         Ok(slugs)
     }
@@ -2356,22 +2850,437 @@ impl TutorialRepository for LocalSeedRepository {
         drop(bundle);
 
         let mut state = self.state.write().await;
-        let Some(meta) = state.step_meta.get_mut(&step_id) else {
-            return Ok(false);
-        };
-        if !actor.role.is_admin() && meta.owner_user_id != Some(actor.id) {
+        let owner_opt = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        if !actor.role.is_admin() && owner_opt != Some(actor.id) {
             return Err(domain_err(
                 ErrorCode::CollaboratorForbidden,
                 "Only the article owner or an administrator can remove collaborators.",
             ));
         }
-        let before = meta.collaborator_ids.len();
-        meta.collaborator_ids.retain(|id| *id != target_user_id);
-        let changed = meta.collaborator_ids.len() < before;
+        let target_name = state
+            .users
+            .iter()
+            .find(|u| u.profile.id == target_user_id)
+            .map(|u| u.profile.display_name.clone())
+            .unwrap_or_else(|| target_user_id.to_string());
+        let changed = state
+            .step_meta
+            .get_mut(&step_id)
+            .map_or(false, |meta| meta.remove_collaborator(target_user_id));
         if changed {
+            state.collab_audit_logs.push(CollaborationAuditLogDto {
+                id: Uuid::new_v4(),
+                step_id,
+                actor_user_id: Some(actor.id),
+                actor_name: actor.display_name.clone(),
+                action: "collaborator_removed".to_string(),
+                detail: target_name,
+                created_at: Utc::now(),
+            });
             self.persist_state(&state);
         }
         Ok(changed)
+    }
+
+    async fn update_step_collaborator_role(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+        role: &str,
+        locale_scope: &[String],
+    ) -> Result<bool> {
+        let bundle = self.bundle.read().await;
+        let Some(step_id) = bundle
+            .tracks
+            .iter()
+            .find(|t| t.manifest.slug == track_slug)
+            .and_then(|t| t.chapters.iter().find(|c| c.slug == chapter_slug))
+            .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
+            .map(|s| s.id)
+        else {
+            return Ok(false);
+        };
+        drop(bundle);
+
+        let mut state = self.state.write().await;
+        let owner_opt = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        if !actor.role.is_admin() && owner_opt != Some(actor.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Only the article owner or an administrator can update collaborator roles.",
+            ));
+        }
+        let is_member = state
+            .step_meta
+            .get(&step_id)
+            .map_or(false, |m| m.is_collaborator(target_user_id));
+        if !is_member {
+            return Ok(false);
+        }
+        let norm_role = normalize_collaborator_role(Some(role));
+        let norm_scope = if norm_role == "translator" {
+            normalize_locale_scope(locale_scope)
+        } else {
+            Vec::new()
+        };
+        let target_name = state
+            .users
+            .iter()
+            .find(|u| u.profile.id == target_user_id)
+            .map(|u| u.profile.display_name.clone())
+            .unwrap_or_else(|| target_user_id.to_string());
+        if let Some(meta) = state.step_meta.get_mut(&step_id) {
+            meta.set_collaborator(target_user_id, &norm_role, &norm_scope);
+        }
+        state.collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(actor.id),
+            actor_name: actor.display_name.clone(),
+            action: "role_updated".to_string(),
+            detail: format!("{target_name} -> {norm_role}"),
+            created_at: Utc::now(),
+        });
+        self.persist_state(&state);
+        Ok(true)
+    }
+
+    async fn leave_step_collaboration(
+        &self,
+        user: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<bool> {
+        let bundle = self.bundle.read().await;
+        let Some(step_id) = bundle
+            .tracks
+            .iter()
+            .find(|t| t.manifest.slug == track_slug)
+            .and_then(|t| t.chapters.iter().find(|c| c.slug == chapter_slug))
+            .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
+            .map(|s| s.id)
+        else {
+            return Ok(false);
+        };
+        drop(bundle);
+
+        let mut state = self.state.write().await;
+        let owner_opt = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        if owner_opt == Some(user.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Article owners must transfer ownership before leaving.",
+            ));
+        }
+        let changed = state
+            .step_meta
+            .get_mut(&step_id)
+            .map_or(false, |meta| meta.remove_collaborator(user.id));
+        if changed {
+            state.collab_audit_logs.push(CollaborationAuditLogDto {
+                id: Uuid::new_v4(),
+                step_id,
+                actor_user_id: Some(user.id),
+                actor_name: user.display_name.clone(),
+                action: "collaborator_left".to_string(),
+                detail: user.display_name.clone(),
+                created_at: Utc::now(),
+            });
+            self.persist_state(&state);
+        }
+        Ok(changed)
+    }
+
+    async fn transfer_step_ownership(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+    ) -> Result<bool> {
+        let bundle = self.bundle.read().await;
+        let Some(step_id) = bundle
+            .tracks
+            .iter()
+            .find(|t| t.manifest.slug == track_slug)
+            .and_then(|t| t.chapters.iter().find(|c| c.slug == chapter_slug))
+            .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
+            .map(|s| s.id)
+        else {
+            return Ok(false);
+        };
+        drop(bundle);
+
+        let mut state = self.state.write().await;
+        let prev_owner = state.step_meta.get(&step_id).and_then(|m| m.owner_user_id);
+        if !actor.role.is_admin() && prev_owner != Some(actor.id) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "Only the article owner or an administrator can transfer ownership.",
+            ));
+        }
+        let Some(target_user) = state
+            .users
+            .iter()
+            .find(|u| u.profile.id == target_user_id && !u.profile.is_banned)
+        else {
+            return Err(domain_err(
+                ErrorCode::UserNotFound,
+                "Target user not found.",
+            ));
+        };
+        let target_name = target_user.profile.display_name.clone();
+        let meta = state.step_meta.entry(step_id).or_default();
+        if let Some(old_oid) = prev_owner {
+            if old_oid != target_user_id {
+                meta.set_collaborator(old_oid, "editor", &[]);
+            }
+        }
+        meta.remove_collaborator(target_user_id);
+        meta.owner_user_id = Some(target_user_id);
+        meta.author_name_fallback = target_name.clone();
+
+        state.collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(actor.id),
+            actor_name: actor.display_name.clone(),
+            action: "owner_transferred".to_string(),
+            detail: format!("-> {target_name}"),
+            created_at: Utc::now(),
+        });
+        self.persist_state(&state);
+        Ok(true)
+    }
+
+    async fn list_step_revisions(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+    ) -> Result<Vec<StepRevisionDto>> {
+        let bundle = self.bundle.read().await;
+        let state = self.state.read().await;
+        let Some(step) = bundle
+            .tracks
+            .iter()
+            .find(|t| t.manifest.slug == track_slug)
+            .and_then(|t| {
+                if chapter_slug.is_empty() || chapter_slug == "-" {
+                    t.chapters
+                        .iter()
+                        .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug))
+                } else {
+                    t.chapters
+                        .iter()
+                        .find(|c| c.slug == chapter_slug)
+                        .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
+                        .or_else(|| {
+                            t.chapters
+                                .iter()
+                                .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug))
+                        })
+                }
+            })
+        else {
+            return Ok(Vec::new());
+        };
+        let can_read_drafts = user_can_read_local_draft(viewer, step.id, &state.step_meta);
+        if !can_read_drafts {
+            let has_pub = step
+                .translations
+                .get(locale)
+                .map_or(false, |tr| tr.compiled.frontmatter.status != "draft");
+            if !has_pub {
+                return Err(domain_err(
+                    ErrorCode::DraftAccessForbidden,
+                    "You do not have permission to view this article's revision history.",
+                ));
+            }
+        }
+        let mut revs: Vec<StepRevisionDto> = state
+            .step_revisions
+            .iter()
+            .filter(|r| r.step_id == step.id && r.locale_code == locale)
+            .filter(|r| can_read_drafts || r.status != "draft")
+            .cloned()
+            .collect();
+        revs.sort_by(|a, b| {
+            b.edit_seq
+                .cmp(&a.edit_seq)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        revs.truncate(50);
+        Ok(revs)
+    }
+
+    async fn restore_step_revision(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+        revision_id: Uuid,
+        expected_etag: Option<&str>,
+        content_dir: &Path,
+    ) -> Result<StudioStepEditorDto> {
+        let mut bundle = self.bundle.write().await;
+        let mut state = self.state.write().await;
+        let Some((resolved_ch_slug, step_id, step_number, cur_license, cur_tags, cur_status)) =
+            bundle
+                .tracks
+                .iter()
+                .find(|t| t.manifest.slug == track_slug)
+                .and_then(|t| {
+                    t.chapters
+                        .iter()
+                        .find(|c| c.slug == chapter_slug)
+                        .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
+                        .or_else(|| {
+                            t.chapters.iter().find_map(|c| {
+                                c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s))
+                            })
+                        })
+                })
+                .map(|(c, s)| {
+                    let tr = s.translations.get(locale);
+                    (
+                        c.slug.clone(),
+                        s.id,
+                        s.step_number,
+                        tr.map(|t| t.compiled.frontmatter.license.clone())
+                            .unwrap_or_default(),
+                        tr.map(|t| t.compiled.frontmatter.tags.clone())
+                            .unwrap_or_default(),
+                        tr.map(|t| t.compiled.frontmatter.status.clone())
+                            .unwrap_or_else(|| "draft".to_string()),
+                    )
+                })
+        else {
+            return Err(domain_err(ErrorCode::StepNotFound, "Article not found."));
+        };
+
+        user_can_edit_local_step_locale(actor, step_id, locale, &state.step_meta)?;
+
+        let Some(rev) = state
+            .step_revisions
+            .iter()
+            .find(|r| r.id == revision_id && r.step_id == step_id && r.locale_code == locale)
+            .cloned()
+        else {
+            return Err(domain_err(
+                ErrorCode::RevisionNotFound,
+                "Revision snapshot not found.",
+            ));
+        };
+
+        let input = SaveStudioStepInput {
+            track_slug: track_slug.to_string(),
+            chapter_slug: resolved_ch_slug,
+            step_slug: step_slug.to_string(),
+            previous_step_slug: None,
+            locale: locale.to_string(),
+            title: rev.title.clone(),
+            summary: rev.summary.clone(),
+            step_number,
+            estimated_minutes: 1,
+            synced_revision: rev.synced_revision,
+            bump_canonical: false,
+            status: cur_status,
+            license: cur_license,
+            tags: cur_tags,
+            body_markdown: rev.body_markdown.clone(),
+            write_to_content_dir: true,
+            expected_etag: expected_etag.map(ToString::to_string),
+            change_note: Some(format!("Restored from #{}", rev.edit_seq)),
+        };
+
+        let grav = Self::gravatar_base(&state).to_string();
+        let PersistedUserState {
+            ref mut step_meta,
+            ref mut step_revisions,
+            ref mut collab_audit_logs,
+            ref collab_invites,
+            ref users,
+            ..
+        } = *state;
+        let saved = apply_save_step_to_bundle_and_disk(
+            actor,
+            &mut bundle,
+            step_meta,
+            step_revisions,
+            collab_audit_logs,
+            collab_invites,
+            users,
+            &grav,
+            &input,
+            content_dir,
+            true,
+        )?;
+        collab_audit_logs.push(CollaborationAuditLogDto {
+            id: Uuid::new_v4(),
+            step_id,
+            actor_user_id: Some(actor.id),
+            actor_name: actor.display_name.clone(),
+            action: "revision_restored".to_string(),
+            detail: format!("{locale} <- #{}", rev.edit_seq),
+            created_at: Utc::now(),
+        });
+        self.persist_state(&state);
+        Ok(saved)
+    }
+
+    async fn list_step_audit_logs(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Vec<CollaborationAuditLogDto>> {
+        let bundle = self.bundle.read().await;
+        let state = self.state.read().await;
+        let Some(step_id) = bundle
+            .tracks
+            .iter()
+            .find(|t| t.manifest.slug == track_slug)
+            .and_then(|t| {
+                t.chapters
+                    .iter()
+                    .find(|c| c.slug == chapter_slug)
+                    .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
+                    .or_else(|| {
+                        t.chapters
+                            .iter()
+                            .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug))
+                    })
+            })
+            .map(|s| s.id)
+        else {
+            return Ok(Vec::new());
+        };
+        if !user_can_read_local_draft(viewer, step_id, &state.step_meta) {
+            return Err(domain_err(
+                ErrorCode::CollaboratorForbidden,
+                "You do not have permission to view this article's collaboration audit log.",
+            ));
+        }
+        let mut logs: Vec<CollaborationAuditLogDto> = state
+            .collab_audit_logs
+            .iter()
+            .filter(|l| l.step_id == step_id)
+            .cloned()
+            .collect();
+        logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        logs.truncate(50);
+        Ok(logs)
     }
 
     async fn admin_takedown_step(
@@ -2526,6 +3435,7 @@ impl TutorialRepository for LocalSeedRepository {
                 has_password: true,
                 bio: String::new(),
                 role,
+                has_collaborations: false,
                 auth_source: "local".to_string(),
                 is_banned: false,
                 ban_reason: String::new(),
@@ -2605,6 +3515,7 @@ impl TutorialRepository for LocalSeedRepository {
             has_password: true,
             bio: String::new(),
             role,
+            has_collaborations: false,
             auth_source: "local".to_string(),
             is_banned: false,
             ban_reason: String::new(),
@@ -2747,5 +3658,77 @@ impl TutorialRepository for LocalSeedRepository {
         state.site_settings = Some(clean.clone());
         self.persist_state(&state);
         Ok(clean)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reports_revision_drift_only_on_outdated_non_fallback_translations() {
+        let root = std::env::temp_dir().join(format!("ihn_drift_test_{}", Uuid::new_v4()));
+        let ch_dir = root.join("track-a").join("01-ch");
+        fs::create_dir_all(&ch_dir).unwrap();
+
+        fs::write(
+            root.join("track-a").join("track.toml"),
+            r#"slug = "track-a"
+difficulty = "beginner"
+[translations.zh-CN]
+title = "Track A"
+subtitle = "Sub"
+description = "Desc"
+[[chapters]]
+slug = "01-ch"
+number = 1
+[chapters.titles]
+zh-CN = "Ch 1"
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            ch_dir.join("01-step.zh-CN.md"),
+            "+++\ntitle = \"中文标题\"\nsummary = \"摘要\"\nstep_number = 1\nsynced_revision = 2\ncanonical_revision = 2\nstatus = \"published\"\n+++\n\n正文\n",
+        )
+        .unwrap();
+        fs::write(
+            ch_dir.join("01-step.en.md"),
+            "+++\ntitle = \"English & Title\"\nsummary = \"Sum\"\nstep_number = 1\nsynced_revision = 1\ncanonical_revision = 2\nstatus = \"published\"\n+++\n\nBody\n",
+        )
+        .unwrap();
+
+        let store_path = root.join("store.json");
+        let repo = LocalSeedRepository::from_content_dir(&root, store_path).unwrap();
+
+        let en_detail = repo
+            .get_step_detail("en", "track-a", "01-ch", "01-step")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!en_detail.is_fallback);
+        assert_eq!(en_detail.synced_revision, 1);
+        assert_eq!(en_detail.canonical_revision, 2);
+        assert!(en_detail.has_revision_drift);
+        assert!(en_detail.chapters[0].steps[0].has_revision_drift);
+
+        let zh_detail = repo
+            .get_step_detail("zh-CN", "track-a", "01-ch", "01-step")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!zh_detail.is_fallback);
+        assert!(!zh_detail.has_revision_drift);
+
+        let ja_fallback = repo
+            .get_step_detail("ja", "track-a", "01-ch", "01-step")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ja_fallback.is_fallback);
+        assert!(!ja_fallback.has_revision_drift);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -133,6 +133,9 @@ pub struct SiteSettingsDto {
     pub enable_draft_autosave: bool,
     #[serde(default = "default_autosave_interval_secs")]
     pub draft_autosave_interval_secs: i32,
+    /// Number of days after which an un-updated chapter displays an outdated warning (`0` disables).
+    #[serde(default = "default_stale_article_days")]
+    pub stale_article_days: i32,
 }
 
 fn default_oauth_scopes() -> String {
@@ -161,6 +164,10 @@ fn default_sso_query_param() -> String {
 
 fn default_autosave_interval_secs() -> i32 {
     15
+}
+
+fn default_stale_article_days() -> i32 {
+    180
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
@@ -275,6 +282,9 @@ impl SiteSettingsDto {
             enable_progress_tracking: true,
             enable_draft_autosave: true,
             draft_autosave_interval_secs: default_autosave_interval_secs(),
+            stale_article_days: env_non_empty("STALE_ARTICLE_DAYS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(default_stale_article_days),
         }
     }
 
@@ -566,6 +576,7 @@ impl SiteSettingsDto {
         };
 
         self.draft_autosave_interval_secs = self.draft_autosave_interval_secs.clamp(5, 300);
+        self.stale_article_days = self.stale_article_days.clamp(0, 3650);
 
         Ok(self)
     }

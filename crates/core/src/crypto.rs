@@ -75,6 +75,43 @@ pub fn hash_action_token(domain: &str, raw_token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Sign an anonymous guest learner identifier into an HMAC-SHA256 authenticated cookie value (`v1.<id>.<hex_sig>`).
+/// Prevents client-side IDOR enumeration of `learner_id` across anonymous or authenticated users.
+pub fn sign_guest_learner_cookie(guest_id: &str, secret: &str) -> Result<String> {
+    let clean = guest_id.trim();
+    if clean.is_empty() || clean.len() > 64 || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("Invalid guest learner identifier");
+    }
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| anyhow!("Invalid guest cookie secret"))?;
+    mac.update(b"icehandnote_guest_v1:");
+    mac.update(clean.as_bytes());
+    let sig_hex = hex::encode(mac.finalize().into_bytes());
+    Ok(format!("v1.{clean}.{sig_hex}"))
+}
+
+/// Verify an HMAC-SHA256 signed guest learner cookie value using constant-time MAC verification.
+/// Returns the verified raw `guest_id` (without the `"guest:"` namespace prefix).
+pub fn verify_guest_learner_cookie(raw_cookie: &str, secret: &str) -> Option<String> {
+    let trimmed = raw_cookie.trim();
+    let rest = trimmed.strip_prefix("v1.")?;
+    let (guest_id, sig_hex) = rest.rsplit_once('.')?;
+    if guest_id.is_empty()
+        || guest_id.len() > 64
+        || !guest_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let sig_bytes = hex::decode(sig_hex).ok()?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(b"icehandnote_guest_v1:");
+    mac.update(guest_id.as_bytes());
+    mac.verify_slice(&sig_bytes).ok()?;
+    Some(guest_id.to_string())
+}
+
 pub fn generate_action_token(prefix: &str, domain: &str) -> (String, String) {
     use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut random_bytes = [0u8; 32];

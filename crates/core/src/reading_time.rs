@@ -21,7 +21,50 @@ fn is_cjk_char(ch: char) -> bool {
     )
 }
 
-/// Strip HTML tags so inline markup does not inflate word count.
+/// Decode common HTML entities in a single pass so plain-text titles and TOC entries
+/// never leak `&amp;` or double-unescape literal `&amp;lt;` sequences.
+pub fn decode_html_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp_idx) = rest.find('&') {
+        out.push_str(&rest[..amp_idx]);
+        let after_amp = &rest[amp_idx + 1..];
+        if let Some(semi_idx) = after_amp.find(';') {
+            let entity = &after_amp[..semi_idx];
+            let decoded: Option<char> = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" | "#39" => Some('\''),
+                "nbsp" => Some(' '),
+                _ if entity.starts_with('#') => {
+                    let num = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        entity[1..].parse::<u32>().ok()
+                    };
+                    num.and_then(char::from_u32)
+                }
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                rest = &after_amp[semi_idx + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = after_amp;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Strip HTML tags so inline markup does not inflate word count, and decode HTML entities once.
 pub fn strip_html_tags(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_tag = false;
@@ -35,7 +78,8 @@ pub fn strip_html_tags(input: &str) -> String {
             out.push(ch);
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let decoded = decode_html_entities(&out);
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Deterministically predict reading time for multilingual technical articles:

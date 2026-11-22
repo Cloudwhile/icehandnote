@@ -63,12 +63,26 @@ pub enum ErrorCode {
     StepEditForbidden,
     StepDeleteForbidden,
     NoteContentEmpty,
+    NoteTooLong,
+    NoteNotFound,
+    NoteQuotaExceeded,
+    PreconditionFailed,
+    PreconditionRequired,
+    RateLimited,
     TitleOrSlugRequired,
     // Collaboration
+    RevisionConflict,
+    RevisionNotFound,
+    DraftAccessForbidden,
     InviteInvalid,
+    InviteNotFound,
+    InviteExpired,
+    InviteEmailMismatch,
+    InviteAlreadyMember,
     InviteForbidden,
     InviteTargetDeleted,
     CollaboratorForbidden,
+    CollaboratorRoleForbidden,
     // Admin / Settings / Storage / SMTP
     CannotModifySelf,
     UserNotFound,
@@ -141,11 +155,25 @@ impl ErrorCode {
             Self::StepEditForbidden => "STEP_EDIT_FORBIDDEN",
             Self::StepDeleteForbidden => "STEP_DELETE_FORBIDDEN",
             Self::NoteContentEmpty => "NOTE_CONTENT_EMPTY",
+            Self::NoteTooLong => "NOTE_TOO_LONG",
+            Self::NoteNotFound => "NOTE_NOT_FOUND",
+            Self::NoteQuotaExceeded => "NOTE_QUOTA_EXCEEDED",
+            Self::PreconditionFailed => "PRECONDITION_FAILED",
+            Self::PreconditionRequired => "PRECONDITION_REQUIRED",
+            Self::RateLimited => "RATE_LIMITED",
             Self::TitleOrSlugRequired => "TITLE_OR_SLUG_REQUIRED",
+            Self::RevisionConflict => "REVISION_CONFLICT",
+            Self::RevisionNotFound => "REVISION_NOT_FOUND",
+            Self::DraftAccessForbidden => "DRAFT_ACCESS_FORBIDDEN",
             Self::InviteInvalid => "INVITE_INVALID",
+            Self::InviteNotFound => "INVITE_NOT_FOUND",
+            Self::InviteExpired => "INVITE_EXPIRED",
+            Self::InviteEmailMismatch => "INVITE_EMAIL_MISMATCH",
+            Self::InviteAlreadyMember => "INVITE_ALREADY_MEMBER",
             Self::InviteForbidden => "INVITE_FORBIDDEN",
             Self::InviteTargetDeleted => "INVITE_TARGET_DELETED",
             Self::CollaboratorForbidden => "COLLABORATOR_FORBIDDEN",
+            Self::CollaboratorRoleForbidden => "COLLABORATOR_ROLE_FORBIDDEN",
             Self::CannotModifySelf => "CANNOT_MODIFY_SELF",
             Self::UserNotFound => "USER_NOT_FOUND",
             Self::SiteNameRequired => "SITE_NAME_REQUIRED",
@@ -216,14 +244,20 @@ impl ErrorCode {
             | Self::StepTakenDown
             | Self::StepEditForbidden
             | Self::StepDeleteForbidden
+            | Self::DraftAccessForbidden
+            | Self::InviteEmailMismatch
             | Self::InviteForbidden
-            | Self::CollaboratorForbidden => 403,
+            | Self::CollaboratorForbidden
+            | Self::CollaboratorRoleForbidden => 403,
 
             Self::NotFound
             | Self::MediaNotFound
             | Self::StepNotFound
             | Self::TrackNotFound
             | Self::ChapterNotFound
+            | Self::NoteNotFound
+            | Self::RevisionNotFound
+            | Self::InviteNotFound
             | Self::InviteTargetDeleted
             | Self::UserNotFound
             | Self::SessionNotFound
@@ -234,11 +268,16 @@ impl ErrorCode {
             | Self::EmailTaken
             | Self::OAuthAlreadyBound
             | Self::TrackSlugExists
-            | Self::ChapterSlugExists => 409,
+            | Self::ChapterSlugExists
+            | Self::InviteAlreadyMember => 409,
 
+            Self::InviteExpired => 410,
+            Self::PreconditionFailed | Self::RevisionConflict => 412,
             Self::PayloadTooLarge | Self::UploadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
-            Self::VerificationCodeRateLimited => 429,
+            Self::NoteTooLong | Self::NoteQuotaExceeded => 422,
+            Self::PreconditionRequired => 428,
+            Self::VerificationCodeRateLimited | Self::RateLimited => 429,
             Self::BadGateway
             | Self::StorageConnectionFailed
             | Self::SmtpSendFailed
