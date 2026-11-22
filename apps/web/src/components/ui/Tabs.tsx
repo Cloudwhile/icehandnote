@@ -48,7 +48,11 @@ export function UnderlineTabs<T extends string | number>({
       if (focusElement) {
         btn.focus();
       }
-      btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      btn.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest',
+        container: 'nearest',
+      } as ScrollIntoViewOptions);
     }
   };
 

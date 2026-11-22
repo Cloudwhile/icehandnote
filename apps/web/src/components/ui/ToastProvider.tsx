@@ -14,16 +14,27 @@ import { IconAlertCircle, IconCheck, IconClose } from './Icons';
 
 export type ToastTone = 'success' | 'error' | 'warning' | 'info';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void | Promise<void>;
+}
+
 interface ToastItem {
   id: number;
   tone: ToastTone;
   message: string;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  push: (tone: ToastTone, message: string, durationMs?: number) => void;
-  success: (message: string) => void;
-  info: (message: string) => void;
+  push: (
+    tone: ToastTone,
+    message: string,
+    durationMs?: number,
+    action?: ToastAction,
+  ) => void;
+  success: (message: string, action?: ToastAction) => void;
+  info: (message: string, action?: ToastAction) => void;
   warning: (message: string) => void;
   error: (errOrMessage: unknown, fallbackMessage?: string) => string;
 }
@@ -53,12 +64,20 @@ export function ToastProvider({
   }, []);
 
   const push = useCallback(
-    (tone: ToastTone, message: string, durationMs = 4500) => {
+    (
+      tone: ToastTone,
+      message: string,
+      durationMs = 4500,
+      action?: ToastAction,
+    ) => {
       const clean = message.trim();
       if (!clean) return;
       const id = nextIdRef.current++;
       latestPushTickRef.current = id;
-      setItems((prev) => [...prev.slice(-3), { id, tone, message: clean }]);
+      setItems((prev) => [
+        ...prev.slice(-3),
+        { id, tone, message: clean, action },
+      ]);
       const timer = window.setTimeout(() => {
         timersRef.current.delete(id);
         setItems((prev) => prev.filter((item) => item.id !== id));
@@ -97,8 +116,10 @@ export function ToastProvider({
   const apiValue = useMemo<ToastContextValue>(
     () => ({
       push,
-      success: (message) => push('success', message, 3600),
-      info: (message) => push('info', message, 4200),
+      success: (message, action) =>
+        push('success', message, action ? 8000 : 3600, action),
+      info: (message, action) =>
+        push('info', message, action ? 8000 : 4200, action),
       warning: (message) => push('warning', message, 5200),
       error: (errOrMessage, fallbackMessage) => {
         const localized = resolveLocalizedError(errOrMessage, locale, fallbackMessage);
@@ -165,6 +186,19 @@ export function ToastProvider({
                 )}
               </span>
               <span className="flex-1 min-w-0 break-words">{item.message}</span>
+              {item.action && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const act = item.action;
+                    dismiss(item.id);
+                    void act?.onClick();
+                  }}
+                  className="px-2 py-0.5 -my-0.5 rounded-md text-xs font-semibold border border-current/35 hover:bg-current/10 cursor-pointer shrink-0 transition-colors"
+                >
+                  {item.action.label}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => dismiss(item.id)}

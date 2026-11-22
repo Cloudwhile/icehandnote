@@ -6,7 +6,10 @@ import type {
   AuthSessionResponse,
   AvatarSource,
   CheckUsernameResponse,
+  CollaborationAuditLogDto,
+  CollaboratorRole,
   CreateInviteResponseDto,
+  InvitePreviewDto,
   LearnerProgressDto,
   LocaleCode,
   LoginResultResponse,
@@ -18,6 +21,7 @@ import type {
   SmtpSettingsDto,
   SmtpStatusResponseDto,
   StepDetailDto,
+  StepRevisionDto,
   StorageStatusDto,
   StudioPreviewResponse,
   StudioStepEditorDto,
@@ -124,7 +128,11 @@ export function getCachedSessionUser(): UserProfileDto | null {
   }
 }
 
+let pendingAuthMe: Promise<AuthMeResponse> | null = null;
+let initialAuthChecked = false;
+
 export function saveAuthSession(session: AuthSessionResponse): void {
+  initialAuthChecked = true;
   try {
     localStorage.setItem(SESSION_TOKEN_KEY, session.session_token);
     localStorage.setItem(USER_LEARNER_KEY, session.learner_key);
@@ -135,6 +143,7 @@ export function saveAuthSession(session: AuthSessionResponse): void {
 }
 
 export function saveRawSessionToken(token: string): void {
+  initialAuthChecked = true;
   try {
     if (token) {
       localStorage.setItem(SESSION_TOKEN_KEY, token);
@@ -157,6 +166,15 @@ export function clearAuthSession(): void {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  // Prevent expired localStorage Bearer tokens from racing initial boot and returning 401 on guest-capable `/api/v1/me/*`
+  if (url.startsWith('/api/v1/me/') && getSessionToken()) {
+    if (pendingAuthMe) {
+      await pendingAuthMe.catch(() => {});
+    } else if (!initialAuthChecked) {
+      await api.authMe().catch(() => {});
+    }
+  }
+
   const token = getSessionToken();
   const activeLocale =
     typeof document !== 'undefined' && document.documentElement.lang
@@ -173,11 +191,19 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
 
   const res = await fetch(url, {
+    credentials: 'same-origin',
     ...init,
     headers,
   });
   if (!res.ok) {
-    throw await parseApiErrorResponse(res);
+    const err = await parseApiErrorResponse(res);
+    if (res.status === 401 && token && err.code === 'SESSION_EXPIRED') {
+      clearAuthSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('ihn:session-expired'));
+      }
+    }
+    throw err;
   }
   return (await res.json()) as T;
 }
@@ -235,21 +261,26 @@ export const api = {
       `/api/v1/${locale}/tracks/${encodeURIComponent(track)}/steps/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}`,
     ),
 
+  getSeriesArticleDetail: (
+    locale: LocaleCode,
+    track: string,
+    step: string,
+  ) =>
+    fetchJson<StepDetailDto>(
+      `/api/v1/${locale}/series/${encodeURIComponent(track)}/${encodeURIComponent(step)}`,
+    ),
+
   search: (locale: LocaleCode, query: string) =>
     fetchJson<SearchHitDto[]>(
       `/api/v1/${locale}/search?q=${encodeURIComponent(query)}`,
     ),
 
-  getProgress: () =>
-    fetchJson<LearnerProgressDto>(
-      `/api/v1/me/progress?learner_id=${encodeURIComponent(getActiveLearnerId())}`,
-    ),
+  getProgress: () => fetchJson<LearnerProgressDto>('/api/v1/me/progress'),
 
   toggleStepComplete: (stepId: string, completed: boolean) =>
     fetchJson<LearnerProgressDto>('/api/v1/me/progress', {
       method: 'POST',
       body: JSON.stringify({
-        learner_id: getActiveLearnerId(),
         step_id: stepId,
         completed,
       }),
@@ -257,14 +288,13 @@ export const api = {
 
   getTaskChecks: (stepId: string) =>
     fetchJson<ArticleTaskChecksDto>(
-      `/api/v1/me/task-checks?step_id=${encodeURIComponent(stepId)}&learner_id=${encodeURIComponent(getActiveLearnerId())}`,
+      `/api/v1/me/task-checks?step_id=${encodeURIComponent(stepId)}`,
     ),
 
   toggleTaskCheck: (stepId: string, taskItemId: string, checked: boolean) =>
     fetchJson<ArticleTaskChecksDto>('/api/v1/me/task-checks', {
       method: 'POST',
       body: JSON.stringify({
-        learner_id: getActiveLearnerId(),
         step_id: stepId,
         task_item_id: taskItemId,
         checked,
@@ -276,31 +306,122 @@ export const api = {
       method: 'POST',
     }),
 
-  listMarginNotes: (stepId: string) =>
-    fetchJson<UserMarginNoteDto[]>(
-      `/api/v1/me/notes?step_id=${encodeURIComponent(stepId)}&learner_id=${encodeURIComponent(getActiveLearnerId())}`,
-    ),
+  listMarginNotes: (stepId: string, locale?: LocaleCode) => {
+    const qs = new URLSearchParams({ step_id: stepId });
+    if (locale) qs.set('locale', locale);
+    return fetchJson<UserMarginNoteDto[]>(`/api/v1/me/notes?${qs.toString()}`);
+  },
+
+  listAllMarginNotes: (opts?: {
+    locale?: string;
+    tag?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (opts?.locale) qs.set('locale', opts.locale);
+    if (opts?.tag && opts.tag !== 'all') qs.set('tag', opts.tag);
+    if (opts?.q?.trim()) qs.set('q', opts.q.trim());
+    if (opts?.limit) qs.set('limit', String(opts.limit));
+    if (opts?.offset) qs.set('offset', String(opts.offset));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return fetchJson<UserMarginNoteDto[]>(`/api/v1/me/notes${suffix}`);
+  },
 
   createMarginNote: (payload: {
     step_id: string;
     locale_code: LocaleCode;
     block_anchor_id: string;
     note_color: string;
+    tone?: string;
+    style?: string;
+    tag?: string;
+    motivation?: string;
+    target?: import('./types').AnnotationTarget;
     content: string;
-  }) =>
-    fetchJson<UserMarginNoteDto>('/api/v1/me/notes', {
+    idempotencyKey?: string;
+  }) => {
+    const { idempotencyKey, ...body } = payload;
+    const key =
+      idempotencyKey ??
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `note-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    return fetchJson<UserMarginNoteDto>('/api/v1/me/notes', {
       method: 'POST',
-      body: JSON.stringify({
-        learner_id: getActiveLearnerId(),
-        ...payload,
-      }),
+      headers: {
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify(body),
+    });
+  },
+
+  updateMarginNote: (
+    noteId: string,
+    patch: {
+      content?: string;
+      note_color?: string;
+      tone?: string;
+      style?: string;
+      tag?: string;
+      motivation?: string;
+      block_anchor_id?: string;
+      target?: import('./types').AnnotationTarget;
+    },
+    expectedEtag?: string,
+  ) =>
+    fetchJson<UserMarginNoteDto>(`/api/v1/me/notes/${encodeURIComponent(noteId)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/merge-patch+json',
+        ...(expectedEtag ? { 'If-Match': expectedEtag } : {}),
+      },
+      body: JSON.stringify(patch),
     }),
 
-  deleteMarginNote: (noteId: string) =>
-    fetchJson<{ deleted: boolean }>(
-      `/api/v1/me/notes/${encodeURIComponent(noteId)}?learner_id=${encodeURIComponent(getActiveLearnerId())}`,
-      { method: 'DELETE' },
+  deleteMarginNote: (noteId: string, expectedEtag?: string) =>
+    fetchJson<{ deleted: boolean; id: string; undo_expires_at?: string | null }>(
+      `/api/v1/me/notes/${encodeURIComponent(noteId)}`,
+      {
+        method: 'DELETE',
+        headers: expectedEtag ? { 'If-Match': expectedEtag } : undefined,
+      },
     ),
+
+  restoreMarginNote: (noteId: string) =>
+    fetchJson<UserMarginNoteDto>(
+      `/api/v1/me/notes/${encodeURIComponent(noteId)}/restore`,
+      { method: 'POST' },
+    ),
+
+  exportMarginNotes: async (
+    format: 'markdown' | 'w3c-jsonld',
+    opts?: { stepId?: string; locale?: string; tag?: string },
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const qs = new URLSearchParams({ format });
+    if (opts?.stepId) qs.set('step_id', opts.stepId);
+    if (opts?.locale) qs.set('locale', opts.locale);
+    if (opts?.tag && opts.tag !== 'all') qs.set('tag', opts.tag);
+    const token = getSessionToken();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(`/api/v1/me/notes/export?${qs.toString()}`, {
+      credentials: 'same-origin',
+      headers,
+    });
+    if (!res.ok) {
+      throw await parseApiErrorResponse(res);
+    }
+    const blob = await res.blob();
+    const filename =
+      format === 'w3c-jsonld'
+        ? 'icehandnote-annotations.jsonld'
+        : 'icehandnote-notes.md';
+    return { blob, filename };
+  },
 
   // Media Upload (Authenticated users or OAuth onboarding)
   uploadMedia: (file: File, onboardingToken?: string) =>
@@ -311,9 +432,26 @@ export const api = {
 
   // Auth, Profile, Password Reset & OAuth / SSO
   authMe: async () => {
-    const me = await fetchJson<AuthMeResponse>('/api/v1/auth/me');
-    saveCachedSessionUser(me.authenticated ? (me.user ?? null) : null);
-    return me;
+    if (pendingAuthMe) {
+      return pendingAuthMe;
+    }
+    const req = fetchJson<AuthMeResponse>('/api/v1/auth/me')
+      .then((me) => {
+        if (me.authenticated && me.user) {
+          saveCachedSessionUser(me.user);
+        } else {
+          clearAuthSession();
+        }
+        return me;
+      })
+      .finally(() => {
+        initialAuthChecked = true;
+        if (pendingAuthMe === req) {
+          pendingAuthMe = null;
+        }
+      });
+    pendingAuthMe = req;
+    return req;
   },
 
   loginWithPassword: async (
@@ -647,6 +785,7 @@ export const api = {
     track_slug: string;
     chapter_slug: string;
     step_slug: string;
+    previous_step_slug?: string;
     locale: string;
     title: string;
     summary: string;
@@ -659,11 +798,19 @@ export const api = {
     tags: string[];
     body_markdown: string;
     write_to_content_dir?: boolean;
-  }) =>
-    fetchJson<StudioStepEditorDto>('/api/v1/studio/steps', {
+    expected_etag?: string;
+    change_note?: string;
+  }) => {
+    const headers: Record<string, string> = {};
+    if (payload.expected_etag) {
+      headers['If-Match'] = payload.expected_etag;
+    }
+    return fetchJson<StudioStepEditorDto>('/api/v1/studio/steps', {
       method: 'POST',
+      headers,
       body: JSON.stringify(payload),
-    }),
+    });
+  },
 
   studioDeleteStep: (track: string, chapter: string, step: string) =>
     fetchJson<{ deleted: boolean }>(
@@ -679,8 +826,8 @@ export const api = {
     title_zh_tw: string;
     subtitle_zh_tw: string;
     description_zh_tw: string;
-    first_chapter_slug: string;
-    first_chapter_title: string;
+    first_chapter_slug?: string;
+    first_chapter_title?: string;
   }) =>
     fetchJson<StudioTrackDto>('/api/v1/studio/tracks', {
       method: 'POST',
@@ -726,14 +873,33 @@ export const api = {
     step: string,
     email: string,
     locale?: LocaleCode,
+    role: CollaboratorRole = 'editor',
+    localeScope: string[] = [],
   ) =>
     fetchJson<CreateInviteResponseDto>(
       `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/invites`,
       {
         method: 'POST',
-        body: JSON.stringify({ email, locale }),
+        headers: {
+          'Idempotency-Key':
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `inv-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        },
+        body: JSON.stringify({
+          email,
+          locale,
+          role,
+          locale_scope: localeScope,
+        }),
       },
     ),
+
+  previewCollaboratorInvite: (token: string) =>
+    fetchJson<InvitePreviewDto>('/api/v1/studio/invites/preview', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
 
   revokeCollaboratorInvite: (inviteId: string) =>
     fetchJson<{ deleted: boolean }>(
@@ -756,6 +922,78 @@ export const api = {
     fetchJson<{ removed: boolean }>(
       `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/collaborators/${encodeURIComponent(userId)}`,
       { method: 'DELETE' },
+    ),
+
+  updateStepCollaboratorRole: (
+    track: string,
+    chapter: string,
+    step: string,
+    userId: string,
+    role: CollaboratorRole,
+    localeScope: string[] = [],
+  ) =>
+    fetchJson<{ updated: boolean }>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/collaborators/${encodeURIComponent(userId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ role, locale_scope: localeScope }),
+      },
+    ),
+
+  leaveStepCollaboration: (track: string, chapter: string, step: string) =>
+    fetchJson<{ left: boolean; user?: UserProfileDto | null }>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/collaborators/me`,
+      { method: 'DELETE' },
+    ),
+
+  transferStepOwnership: (
+    track: string,
+    chapter: string,
+    step: string,
+    targetUserId: string,
+  ) =>
+    fetchJson<{ transferred: boolean }>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/transfer-owner`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ target_user_id: targetUserId }),
+      },
+    ),
+
+  listStepRevisions: (
+    track: string,
+    chapter: string,
+    step: string,
+    locale: string,
+  ) =>
+    fetchJson<StepRevisionDto[]>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/${encodeURIComponent(locale)}/revisions`,
+    ),
+
+  restoreStepRevision: (
+    track: string,
+    chapter: string,
+    step: string,
+    locale: string,
+    revisionId: string,
+    expectedEtag?: string,
+  ) => {
+    const headers: Record<string, string> = {};
+    if (expectedEtag) {
+      headers['If-Match'] = expectedEtag;
+    }
+    return fetchJson<StudioStepEditorDto>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/${encodeURIComponent(locale)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+      {
+        method: 'POST',
+        headers,
+      },
+    );
+  },
+
+  listStepAuditLogs: (track: string, chapter: string, step: string) =>
+    fetchJson<CollaborationAuditLogDto[]>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/audit-logs`,
     ),
 
   checkSiteUpdate: async (): Promise<UpdateCheckResponse> => {
@@ -946,23 +1184,4 @@ export const api = {
     ),
 };
 
-export function runDirectionalTransition(
-  updateDOM: () => void,
-  direction: 'forward' | 'backward',
-): void {
-  const doc = document as Document & {
-    startViewTransition?: (arg: { update: () => void; types?: string[] }) => unknown;
-  };
-  if (typeof doc.startViewTransition !== 'function') {
-    updateDOM();
-    return;
-  }
-  try {
-    doc.startViewTransition({
-      update: updateDOM,
-      types: [direction],
-    });
-  } catch {
-    updateDOM();
-  }
-}
+export { runDirectionalTransition } from './motion';

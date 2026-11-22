@@ -11,11 +11,13 @@ import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 
 import { IconChevronDown } from './Icons';
 
 interface PopupMenuProps {
+  triggerId?: string;
   triggerLabel: ReactNode;
   triggerAriaLabel?: string;
   triggerTitle?: string;
   triggerClassName?: string;
   triggerStyle?: React.CSSProperties;
+  triggerDisabled?: boolean;
   onTriggerPointerDown?: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onTriggerClickCapture?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   showChevron?: boolean;
@@ -46,11 +48,13 @@ function supportsAnchorArea(): boolean {
 }
 
 export function PopupMenu({
+  triggerId: triggerIdProp,
   triggerLabel,
   triggerAriaLabel,
   triggerTitle,
   triggerClassName = '',
   triggerStyle,
+  triggerDisabled = false,
   onTriggerPointerDown,
   onTriggerClickCapture,
   showChevron = true,
@@ -59,7 +63,8 @@ export function PopupMenu({
   variant = 'menu',
   children,
 }: PopupMenuProps) {
-  const triggerId = useId();
+  const generatedTriggerId = useId();
+  const triggerId = triggerIdProp ?? generatedTriggerId;
   const menuId = useId();
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -281,6 +286,7 @@ export function PopupMenu({
         ref={triggerRef}
         id={triggerId}
         type="button"
+        disabled={triggerDisabled}
         aria-haspopup={variant === 'menu' ? 'menu' : undefined}
         aria-expanded={open}
         aria-label={triggerAriaLabel}
@@ -292,10 +298,12 @@ export function PopupMenu({
         className={`inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
           open ? 'border-border-ink bg-surface-raised text-ink-primary' : ''
         } ${triggerClassName}`}
-        {...({
-          commandfor: menuId,
-          command: 'toggle-popover',
-        } as Record<string, string>)}
+        {...(triggerDisabled
+          ? {}
+          : ({
+              commandfor: menuId,
+              command: 'toggle-popover',
+            } as Record<string, string>))}
       >
         {triggerLabel}
         {showChevron && (

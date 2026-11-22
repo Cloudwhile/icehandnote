@@ -24,6 +24,7 @@
 
   --color-accent-ice: var(--accent-ice-ink);
   --color-accent-amber: var(--accent-amber-ink);
+  --color-accent-warn: var(--accent-amber-ink);
   --color-accent-success: var(--accent-success-ink);
   --color-accent-danger: var(--accent-danger-ink);
 

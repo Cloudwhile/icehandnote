@@ -17,6 +17,11 @@ function coerceSiteSettings(raw: unknown): SiteSettingsDto | null {
   return {
     ...DEFAULT_SITE_SETTINGS,
     ...candidate,
+    stale_article_days:
+      typeof candidate.stale_article_days === 'number' &&
+      Number.isFinite(candidate.stale_article_days)
+        ? candidate.stale_article_days
+        : DEFAULT_SITE_SETTINGS.stale_article_days,
     enabled_locales:
       Array.isArray(candidate.enabled_locales) && candidate.enabled_locales.length > 0
         ? candidate.enabled_locales

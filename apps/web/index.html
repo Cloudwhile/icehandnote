@@ -45,7 +45,13 @@
       if (routeTitle) {
         document.title = routeTitle;
       } else if (bootSettings && typeof bootSettings.site_name === "string") {
-        var plainTitle = bootSettings.site_name.replace(/<[^>]*>/g, "").trim();
+        var entityMap = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'", apos: "'" };
+        var plainTitle = bootSettings.site_name
+          .replace(/<[^>]*>/g, "")
+          .replace(/&(amp|lt|gt|quot|#39|apos);/gi, function (m, k) {
+            return entityMap[k.toLowerCase()] || m;
+          })
+          .trim();
         if (plainTitle) document.title = plainTitle;
       }
 

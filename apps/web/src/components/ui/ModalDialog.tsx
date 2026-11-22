@@ -17,6 +17,7 @@ export interface ModalDialogProps {
   ariaLabel?: string;
   maxWidthClass?: string;
   closedBy?: 'any' | 'closerequest' | 'none';
+  stableScrollbarGutter?: boolean;
   children: ReactNode;
 }
 
@@ -108,9 +109,12 @@ export function ModalDialog({
   ariaLabel,
   maxWidthClass = 'max-w-lg',
   closedBy = 'any',
+  stableScrollbarGutter = false,
   children,
 }: ModalDialogProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   const closeAnimated = useCallback(async (dialog: HTMLDialogElement) => {
     if (!dialog.open) return;
@@ -153,7 +157,7 @@ export function ModalDialog({
     const handleClose = () => {
       dialog.returnValue = '';
       dialog.removeAttribute('data-closing');
-      onClose();
+      onCloseRef.current();
     };
     const handleCancel = (event: Event) => {
       if (closedBy === 'none') {
@@ -205,7 +209,7 @@ export function ModalDialog({
       dialog.removeEventListener('cancel', handleCancel);
       cleanupFallback?.();
     };
-  }, [onClose, closeAnimated, closedBy]);
+  }, [closeAnimated, closedBy]);
 
   return (
     <dialog
@@ -215,7 +219,11 @@ export function ModalDialog({
       className={`search-dialog ink-surface-modal w-[calc(100%-2rem)] ${maxWidthClass} m-auto rounded-2xl p-0 overflow-hidden bg-surface-sheet text-ink-primary`}
       {...({ closedby: closedBy } as Record<string, unknown>)}
     >
-      <div className="max-h-[min(90dvh,calc(100dvh-2rem))] overflow-y-auto overscroll-contain">
+      <div
+        className={`max-h-[min(90dvh,calc(100dvh-2rem))] overflow-y-auto overscroll-contain ink-thin-scrollbar ${
+          stableScrollbarGutter ? '[scrollbar-gutter:stable]' : ''
+        }`.trim()}
+      >
         {children}
       </div>
     </dialog>

@@ -11,6 +11,11 @@ html {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Prevent keyboard focus & #hash targets from hiding behind sticky TopNavbar (WCAG 2.4.11) */
+html:not(:has(.studio-shell)) {
+  scroll-padding-top: 5.5rem;
+}
+
 /* Normalize Latin lowercase x-height on English pages only; CJK ideographs use full 1em em-boxes
    and must not be scaled by embedded Latin x-height ratios (`visually-stable-font-fallbacks`) */
 html:lang(en) {
@@ -73,17 +78,19 @@ kbd,
   align-items: center;
   gap: 0.25rem;
   min-block-size: 1.75rem;
-  padding-inline: 0.125rem;
+  padding-inline: 0.2rem;
   border-radius: 6px;
   color: var(--ink-muted);
   text-decoration: none;
   transition: color 140ms ease-out;
 }
 
-.notebook-breadcrumb > ol > li > a:hover {
+.notebook-breadcrumb > ol > li > a:not([aria-current="page"]):hover {
   color: var(--ink-primary);
-  text-decoration: underline;
-  text-underline-offset: 3px;
+}
+
+.notebook-breadcrumb > ol > li > a:not([aria-current="page"]):active {
+  color: var(--link-ink);
 }
 
 .notebook-breadcrumb > ol > li > a[aria-current="page"] {
@@ -200,32 +207,256 @@ body {
   }
 }
 
-.notebook-prose code {
+.notebook-prose code,
+.rich-editable code,
+.ink-inline-code {
   font-family: var(--font-mono);
   /* Never shrink inline code below 12px (0.75rem) inside text-xs secondary copy (§4.1) */
   font-size: max(0.75rem, 0.875em);
-  padding: 0.1rem 0.4rem;
+  padding: 0.1rem 0.42rem;
   border-radius: 6px;
-  background-color: var(--action-subtle);
-  border: 1px solid var(--border-subtle);
-  color: var(--ink-primary);
+  background-color: var(--code-bg);
+  border: 1px dashed var(--border-control);
+  color: var(--code-fg);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
-.notebook-prose a {
+:where(.notebook-prose, .rich-editable) a[href],
+a.ink-inline-link {
   color: var(--link-ink);
   font-weight: 600;
-  text-decoration: underline;
+  text-decoration-line: underline;
   text-decoration-style: wavy;
-  text-underline-offset: 3px;
+  text-decoration-color: var(--link-ink);
+  text-decoration-color: color-mix(in oklab, var(--link-ink) 64%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition:
+    color 150ms ease-out,
+    text-decoration-color 150ms ease-out,
+    box-shadow 150ms ease-out;
 }
 
-/* Highlighter <mark> for search snippets & callouts */
-mark {
-  background-color: var(--mark-bg);
-  color: inherit;
-  padding-inline: 0.2em;
-  border-radius: 4px;
+@media (prefers-reduced-motion: no-preference) {
+  :where(.notebook-prose, .rich-editable) a[href],
+  a.ink-inline-link {
+    transition:
+      color 150ms ease-out,
+      text-decoration-color 150ms ease-out,
+      text-underline-offset 150ms ease-out,
+      box-shadow 150ms ease-out;
+  }
 }
+
+:where(.notebook-prose, .rich-editable) a[href]:hover,
+a.ink-inline-link:hover {
+  color: var(--accent-ice-ink);
+  text-decoration-style: solid;
+  text-decoration-color: var(--accent-ice-ink);
+  text-decoration-thickness: 2.5px;
+  text-underline-offset: 2.5px;
+  box-shadow: 0 2px 0 -0.5px color-mix(in oklab, var(--accent-ice-ink) 32%, transparent);
+}
+
+:where(.notebook-prose, .rich-editable) a[href]:active,
+a.ink-inline-link:active {
+  color: var(--link-hover-ink);
+  text-decoration-style: double;
+  text-decoration-color: var(--link-hover-ink);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+  box-shadow: none;
+}
+
+/* Harmonized inline link hover inside colored stationery sticker alerts & marginalia */
+.sticker-card :is(.notebook-prose a[href], .rich-editable a[href], a.ink-inline-link) {
+  color: inherit;
+  text-decoration-color: var(--sticker-border);
+}
+
+.sticker-card :is(.notebook-prose a[href], .rich-editable a[href], a.ink-inline-link):hover {
+  color: inherit;
+  text-decoration-style: solid;
+  text-decoration-color: var(--sticker-border);
+  text-decoration-thickness: 2.5px;
+  text-underline-offset: 2.5px;
+  box-shadow: 0 2px 0 -0.5px color-mix(in oklab, var(--sticker-border) 42%, transparent);
+}
+
+.sticker-card :is(.notebook-prose a[href], .rich-editable a[href], a.ink-inline-link):active {
+  text-decoration-style: double;
+  text-decoration-thickness: 1.5px;
+  box-shadow: none;
+  opacity: 0.86;
+}
+
+/* Tactile Hand-Drawn Keyboard Keycap & Key Combo Component */
+.notebook-prose kbd,
+.rich-editable kbd,
+.ink-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 1.5rem;
+  padding: 0.06rem 0.42rem;
+  font-family: var(--font-mono);
+  font-size: max(0.75rem, 0.82em);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink-primary);
+  background-color: var(--surface-sheet);
+  border: 1.5px solid var(--border-ink);
+  border-radius: 6px;
+  box-shadow: 0 2px 0 0 var(--border-ink);
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.ink-kbd-combo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-inline: 0.14rem;
+  vertical-align: baseline;
+}
+
+.ink-kbd-sep {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+/* Hand-Brushed Multi-Pass Highlighter <mark> (`visual-effects`: layered oklab strokes with back-and-forth scrub traces) */
+mark,
+mark.ink-hl-amber,
+mark.ink-hl-violet,
+mark.ink-hl-ice,
+mark.ink-hl-emerald,
+mark.ink-hl-rose {
+  --hl-ink: var(--inline-hl-amber);
+  background-color: transparent;
+  color: inherit;
+  padding: 0.04em 0.34em 0.08em 0.28em;
+  margin-inline: -0.06em;
+  border-radius: 0.42em 0.16em 0.46em 0.2em / 0.26em 0.48em 0.22em 0.4em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  background-image: linear-gradient(
+    104deg,
+    transparent 0.6%,
+    var(--hl-ink) 2.5%,
+    var(--hl-ink) 97.5%,
+    transparent 99.4%
+  );
+  background-repeat: no-repeat;
+  background-position: 0 82%;
+  background-size: 100% 58%;
+}
+
+@supports (color: color-mix(in oklab, red, transparent)) {
+  mark,
+  mark.ink-hl-amber,
+  mark.ink-hl-violet,
+  mark.ink-hl-ice,
+  mark.ink-hl-emerald,
+  mark.ink-hl-rose {
+    background-image:
+      /* 1. Fine chisel-nib dry-brush scrub streaks (来回擦写笔刷细纹) */
+      repeating-linear-gradient(
+        -18deg,
+        transparent 0 3px,
+        color-mix(in oklab, var(--hl-ink) 52%, transparent) 3px 4.5px,
+        transparent 4.5px 8px
+      ),
+      /* 2. Forward marker pass (→): ink-pooling at start & right turn-around */
+      linear-gradient(
+        104deg,
+        transparent 0.8%,
+        color-mix(in oklab, var(--hl-ink) 92%, transparent) 4%,
+        color-mix(in oklab, var(--hl-ink) 56%, transparent) 24%,
+        color-mix(in oklab, var(--hl-ink) 66%, transparent) 58%,
+        color-mix(in oklab, var(--hl-ink) 50%, transparent) 82%,
+        color-mix(in oklab, var(--hl-ink) 88%, transparent) 95%,
+        transparent 98.8%
+      ),
+      /* 3. Return scrub pass (←): counter-tilted & offset upward so overlap deepens naturally */
+      linear-gradient(
+        77deg,
+        transparent 2.5%,
+        color-mix(in oklab, var(--hl-ink) 74%, transparent) 7%,
+        color-mix(in oklab, var(--hl-ink) 44%, transparent) 46%,
+        color-mix(in oklab, var(--hl-ink) 78%, transparent) 91%,
+        transparent 97%
+      ),
+      /* 4. Short third back-and-forth touch-up pass along lower edge */
+      linear-gradient(
+        98deg,
+        transparent 3%,
+        color-mix(in oklab, var(--hl-ink) 64%, transparent) 10%,
+        color-mix(in oklab, var(--hl-ink) 42%, transparent) 62%,
+        color-mix(in oklab, var(--hl-ink) 68%, transparent) 92%,
+        transparent 98%
+      );
+    background-repeat: no-repeat;
+    background-position:
+      50% 64%,
+      0% 88%,
+      100% 42%,
+      24% 98%;
+    background-size:
+      94% 64%,
+      98% 46%,
+      92% 44%,
+      78% 28%;
+  }
+}
+
+mark.ink-hl-amber { --hl-ink: var(--inline-hl-amber); }
+mark.ink-hl-violet { --hl-ink: var(--inline-hl-violet); }
+mark.ink-hl-ice { --hl-ink: var(--inline-hl-ice); }
+mark.ink-hl-emerald { --hl-ink: var(--inline-hl-emerald); }
+mark.ink-hl-rose { --hl-ink: var(--inline-hl-rose); }
+
+.ink-fg-violet { color: var(--inline-fg-violet); }
+.ink-fg-ice { color: var(--inline-fg-ice); }
+.ink-fg-emerald { color: var(--inline-fg-emerald); }
+.ink-fg-amber { color: var(--inline-fg-amber); }
+.ink-fg-rose { color: var(--inline-fg-rose); }
+.ink-fg-muted { color: var(--inline-fg-muted); }
+
+.ink-bg-violet,
+.ink-bg-ice,
+.ink-bg-emerald,
+.ink-bg-amber,
+.ink-bg-rose,
+.ink-bg-kraft {
+  padding: 0.06em 0.34em;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.ink-bg-violet { background-color: var(--inline-bg-violet); border-color: var(--inline-bg-violet-border); }
+.ink-bg-ice { background-color: var(--inline-bg-ice); border-color: var(--inline-bg-ice-border); }
+.ink-bg-emerald { background-color: var(--inline-bg-emerald); border-color: var(--inline-bg-emerald-border); }
+.ink-bg-amber { background-color: var(--inline-bg-amber); border-color: var(--inline-bg-amber-border); }
+.ink-bg-rose { background-color: var(--inline-bg-rose); border-color: var(--inline-bg-rose-border); }
+.ink-bg-kraft { background-color: var(--inline-bg-kraft); border-color: var(--inline-bg-kraft-border); }
+
+.ink-size-sm { font-size: 0.875rem; line-height: 1.65; }
+.ink-size-lg { font-size: 1.125rem; line-height: 1.68; }
+.ink-size-xl { font-size: 1.25rem; line-height: 1.6; }
+.ink-size-2xl { font-size: 1.5rem; line-height: 1.45; }
+
+.ink-align-left { text-align: start; }
+.ink-align-center { text-align: center; }
+.ink-align-right { text-align: end; }
 
 /* Stacked Loose-Leaf Notebook Sheet */
 .notebook-sheet-stack {
@@ -243,12 +474,12 @@ mark {
   background-color: var(--surface-sheet-tab);
   border: 2px solid var(--border-ink);
   border-radius: 16px;
-  z-index: 0;
+  z-index: var(--z-base);
   pointer-events: none;
 }
 .notebook-sheet-card {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   min-width: 0;
   max-width: 100%;
   background-color: var(--surface-sheet);
@@ -302,11 +533,6 @@ input[type="search"]::-webkit-search-decoration {
   color: var(--action-fg);
   border: 2px solid var(--border-ink);
   box-shadow: var(--shadow-control);
-  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
-}
-.ink-btn-primary:hover:not(:disabled) {
-  transform: translate(-1px, -1px);
-  box-shadow: var(--shadow-control-hover);
 }
 .ink-btn-primary:active:not(:disabled) {
   transform: translate(2px, 2px);
@@ -318,15 +544,34 @@ input[type="search"]::-webkit-search-decoration {
   color: var(--ink-primary);
   border: 2px solid var(--border-ink);
   box-shadow: var(--shadow-control);
-  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
-}
-.ink-btn-secondary:hover:not(:disabled) {
-  transform: translate(-1px, -1px);
-  box-shadow: var(--shadow-control-hover);
 }
 .ink-btn-secondary:active:not(:disabled) {
   transform: translate(2px, 2px);
   box-shadow: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ink-btn-primary,
+  .ink-btn-secondary {
+    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+  }
+  .ink-btn-primary:hover:not(:disabled),
+  .ink-btn-secondary:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-control-hover);
+  }
+}
+
+/* Extend hit target area to >= 44px on coarse pointers without inflating visual icon buttons */
+.ink-icon-target {
+  position: relative;
+}
+@media (pointer: coarse) {
+  .ink-icon-target::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
 }
 
 /* Accessible keyboard focus ring (15-beyond-the-book.md: >= 3:1 contrast with offset) */
@@ -416,11 +661,24 @@ input[type="search"]::-webkit-search-decoration {
 }
 
 .washi-code-pre {
-  scrollbar-width: thin;
+  scrollbar-width: auto;
   scrollbar-color: var(--code-scrollbar-thumb) var(--code-scrollbar-track);
 }
 
+/* Shared 2-column grid + subgrid keeps the red gutter vertical rule perfectly aligned across 1/2/3+ digit line numbers */
+.washi-code-grid {
+  display: grid;
+  grid-template-columns: minmax(3.25rem, max-content) 1fr;
+  width: max-content;
+  min-width: 100%;
+}
+
 .washi-code-line {
+  grid-column: 1 / -1;
+  display: grid;
+  /* Same-cascade fallback before subgrid */
+  grid-template-columns: var(--code-gutter-width, 3.5rem) 1fr;
+  grid-template-columns: subgrid;
   min-block-size: 24px;
   line-height: 24px;
   transition: background-color 110ms ease-out;
@@ -438,95 +696,96 @@ input[type="search"]::-webkit-search-decoration {
 .washi-code-gutter {
   color: var(--code-gutter-fg);
   border-inline-end: 1.5px solid var(--code-gutter-rule);
+  white-space: nowrap;
 }
 
 /* Dual-Theme Drafting Ink Syntax Highlighting (all tokens >= 5.87:1 WCAG AA in both light & dark) */
-.washi-code-surface .hljs-comment,
-.washi-code-surface .hljs-quote {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-comment,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-quote {
   color: var(--code-syn-comment);
   font-style: italic;
 }
 
-.washi-code-surface .hljs-keyword,
-.washi-code-surface .hljs-selector-tag,
-.washi-code-surface .hljs-template-tag {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-keyword,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-selector-tag,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-template-tag {
   color: var(--code-syn-kw);
   font-weight: 600;
 }
 
-.washi-code-surface .hljs-type,
-.washi-code-surface .hljs-title.class_,
-.washi-code-surface .hljs-title.class_.inherited__,
-.washi-code-surface .hljs-class .hljs-title,
-.washi-code-surface .hljs-built_in {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-type,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-title.class_,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-title.class_.inherited__,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-class .hljs-title,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-built_in {
   color: var(--code-syn-type);
 }
 
-.washi-code-surface .hljs-title,
-.washi-code-surface .hljs-title.function_,
-.washi-code-surface .hljs-function .hljs-title,
-.washi-code-surface .hljs-section {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-title,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-title.function_,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-function .hljs-title,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-section {
   color: var(--code-syn-fn);
 }
 
-.washi-code-surface .hljs-string,
-.washi-code-surface .hljs-regexp,
-.washi-code-surface .hljs-template-variable,
-.washi-code-surface .hljs-addition {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-string,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-regexp,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-template-variable,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-addition {
   color: var(--code-syn-str);
 }
 
-.washi-code-surface .hljs-number,
-.washi-code-surface .hljs-literal,
-.washi-code-surface .hljs-bullet,
-.washi-code-surface .hljs-link {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-number,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-literal,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-bullet,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-link {
   color: var(--code-syn-num);
 }
 
-.washi-code-surface .hljs-meta,
-.washi-code-surface .hljs-meta .hljs-keyword,
-.washi-code-surface .hljs-symbol,
-.washi-code-surface .hljs-selector-id,
-.washi-code-surface .hljs-selector-pseudo,
-.washi-code-surface .hljs-deletion {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-meta,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-meta .hljs-keyword,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-symbol,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-selector-id,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-selector-pseudo,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-deletion {
   color: var(--code-syn-meta);
 }
 
-.washi-code-surface .hljs-meta .hljs-string {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-meta .hljs-string {
   color: var(--code-syn-str);
 }
 
-.washi-code-surface .hljs-attr,
-.washi-code-surface .hljs-attribute,
-.washi-code-surface .hljs-property,
-.washi-code-surface .hljs-selector-class,
-.washi-code-surface .hljs-selector-attr,
-.washi-code-surface .hljs-name,
-.washi-code-surface .hljs-tag {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-attr,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-attribute,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-property,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-selector-class,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-selector-attr,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-name,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-tag {
   color: var(--code-syn-attr);
 }
 
-.washi-code-surface .hljs-variable,
-.washi-code-surface .hljs-params,
-.washi-code-surface .hljs-subst {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-variable,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-params,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-subst {
   color: var(--code-fg);
 }
 
-.washi-code-surface .hljs-punctuation,
-.washi-code-surface .hljs-operator {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-punctuation,
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-operator {
   color: var(--code-syn-punct);
 }
 
-.washi-code-surface .hljs-doctag {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-doctag {
   color: var(--code-syn-fn);
   font-weight: 600;
 }
 
-.washi-code-surface .hljs-emphasis {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-emphasis {
   font-style: italic;
 }
 
-.washi-code-surface .hljs-strong {
+:is(.washi-code-surface, .ink-inline-code, .notebook-prose code, .rich-editable code) .hljs-strong {
   font-weight: 600;
 }
 
@@ -623,7 +882,7 @@ input[type="search"]::-webkit-search-decoration {
   inset-block-start: 0;
   width: 100%;
   height: 4px;
-  z-index: 50;
+  z-index: var(--z-progress);
   background: linear-gradient(90deg, #8b3dff 0%, #0dcaf0 100%);
   transform-origin: 0 50%;
   transform: scaleX(0);
@@ -636,7 +895,7 @@ input[type="search"]::-webkit-search-decoration {
       to { transform: scaleX(1); }
     }
     #reading-progress {
-      animation: grow-notebook-progress auto linear;
+      animation: grow-notebook-progress auto linear both;
       /* MANDATORY: Declare animation-timeline AFTER animation shorthand */
       animation-timeline: scroll(root block);
     }
@@ -928,13 +1187,13 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
 .responsive-table thead {
   position: sticky;
   inset-block-start: 0;
-  z-index: 2;
+  z-index: var(--z-sticky-cell);
   background-color: var(--surface-raised);
 }
 .responsive-table tbody th {
   position: sticky;
   inset-inline-start: 0;
-  z-index: 1;
+  z-index: var(--z-raised);
   background-color: var(--surface-sheet);
 }
 @container (width < 600px) {
@@ -1008,7 +1267,7 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   grid-area: topbar;
   position: sticky;
   inset-block-start: 0;
-  z-index: 30;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: safe center;
   justify-content: space-between;
@@ -1170,14 +1429,14 @@ input[type="checkbox"][switch]:disabled {
     overflow-y: auto;
     scrollbar-gutter: stable;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
+    scrollbar-width: auto;
     scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   }
 }
 
-/* Thin themed scrollbar utility without overscroll trapping (safe for sticky/horizontal regions) */
+/* Subdued scrollbar utility without overscroll trapping (safe for sticky/horizontal regions) */
 .ink-thin-scrollbar {
-  scrollbar-width: thin;
+  scrollbar-width: auto;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
@@ -1186,7 +1445,7 @@ input[type="checkbox"][switch]:disabled {
   overflow-y: auto;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  scrollbar-width: auto;
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
@@ -1199,32 +1458,52 @@ input[type="checkbox"][switch]:disabled {
       width: 8px;
       height: 8px;
     }
+    .studio-main::-webkit-scrollbar-button {
+      display: none;
+      width: 0;
+      height: 0;
+    }
     .studio-main::-webkit-scrollbar-thumb {
       background: var(--scrollbar-thumb);
       border-radius: 4px;
     }
     .studio-main::-webkit-scrollbar-track {
-      background: var(--scrollbar-track);
+      background: transparent;
     }
   }
   .ink-thin-scrollbar,
-  .studio-scroll-pane {
-    /* Reset scrollbar-width so legacy WebKit pseudo-elements are not suppressed */
+  .studio-scroll-pane,
+  .studio-editor-inspector,
+  .washi-code-pre {
     scrollbar-width: auto;
   }
   .ink-thin-scrollbar::-webkit-scrollbar,
-  .studio-scroll-pane::-webkit-scrollbar {
+  .studio-scroll-pane::-webkit-scrollbar,
+  .studio-editor-inspector::-webkit-scrollbar,
+  .washi-code-pre::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
+  .ink-thin-scrollbar::-webkit-scrollbar-button,
+  .studio-scroll-pane::-webkit-scrollbar-button,
+  .studio-editor-inspector::-webkit-scrollbar-button,
+  .washi-code-pre::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
   .ink-thin-scrollbar::-webkit-scrollbar-thumb,
-  .studio-scroll-pane::-webkit-scrollbar-thumb {
+  .studio-scroll-pane::-webkit-scrollbar-thumb,
+  .studio-editor-inspector::-webkit-scrollbar-thumb,
+  .washi-code-pre::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb);
     border-radius: 4px;
   }
   .ink-thin-scrollbar::-webkit-scrollbar-track,
-  .studio-scroll-pane::-webkit-scrollbar-track {
-    background: var(--scrollbar-track);
+  .studio-scroll-pane::-webkit-scrollbar-track,
+  .studio-editor-inspector::-webkit-scrollbar-track,
+  .washi-code-pre::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
@@ -1613,14 +1892,6 @@ input[type="checkbox"][switch]:disabled {
     animation: ui-badge-pop 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  /* Tactile hover lift on Home track notebook cards (transform stays on compositor) */
-  .notebook-track-card {
-    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-  .notebook-track-card:hover {
-    transform: translateY(-2px);
-  }
-
   /* Gentle press response on subtle interactive pills/buttons */
   .ui-press-tactile {
     transition: transform 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
@@ -1724,8 +1995,8 @@ input[type="checkbox"][switch]:disabled {
   margin-block-end: 0.25rem;
 }
 
-.ink-menu-list button,
-.ink-menu-list a {
+.ink-menu-list button:not(.ink-menu-compact button),
+.ink-menu-list a:not(.ink-menu-compact a) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -1743,21 +2014,21 @@ input[type="checkbox"][switch]:disabled {
   transition: background-color 120ms ease-out, color 120ms ease-out;
 }
 
-.ink-menu-list button:hover:not(:disabled),
-.ink-menu-list a:hover {
+.ink-menu-list button:not(.ink-menu-compact button):hover:not(:disabled),
+.ink-menu-list a:not(.ink-menu-compact a):hover {
   background-color: var(--surface-raised);
 }
 
-.ink-menu-list button:disabled {
+.ink-menu-list button:not(.ink-menu-compact button):disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.ink-menu-list button[data-tone="danger"] {
+.ink-menu-list button:not(.ink-menu-compact button)[data-tone="danger"] {
   color: var(--accent-danger-ink);
 }
 
-.ink-menu-list button[data-tone="danger"]:hover:not(:disabled) {
+.ink-menu-list button:not(.ink-menu-compact button)[data-tone="danger"]:hover:not(:disabled) {
   background-color: var(--alert-danger-bg);
 }
 
@@ -1784,8 +2055,7 @@ input[type="checkbox"][switch]:disabled {
   color: var(--ink-muted);
 }
 
-/* Branded Stationery Select — native dropdown arrow adapted to light/dark via `color-scheme`,
- * preserving single-arrow clarity without UA `appearance: none` double-chevron overlap. */
+/* Branded Stationery Select — native `base-select` progressive enhancement (`branded-select-styling`) */
 .ink-select {
   inline-size: 100%;
   max-inline-size: 100%;
@@ -1797,6 +2067,77 @@ input[type="checkbox"][switch]:disabled {
 .ink-select option {
   background-color: var(--surface-sheet);
   color: var(--ink-primary);
+}
+
+@supports (appearance: base-select) {
+  .ink-select,
+  .ink-select::picker(select) {
+    appearance: base-select;
+  }
+
+  .ink-select::picker(select) {
+    background-color: var(--surface-sheet);
+    color: var(--ink-primary);
+    border: 1.5px solid var(--border-ink);
+    border-radius: 12px;
+    padding: 0.375rem;
+    box-shadow: var(--shadow-floating);
+  }
+
+  .ink-select::picker-icon {
+    color: var(--ink-muted);
+  }
+
+  .ink-select option {
+    padding: 0.375rem 0.625rem;
+    border-radius: 8px;
+    color: var(--ink-primary);
+    cursor: pointer;
+  }
+
+  .ink-select option:hover,
+  .ink-select option:checked {
+    background-color: var(--surface-raised);
+    color: var(--link-ink);
+  }
+
+  .ink-select option::checkmark {
+    color: var(--link-ink);
+  }
+}
+
+/* Unified Inspector URL Slug Field — outer card holds full focus ring so inner input has zero clipped rectangle */
+.ink-url-slug-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border-radius: 12px;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-control);
+  box-shadow: var(--shadow-inset);
+  padding: 0.5rem 0.75rem;
+  cursor: text;
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.ink-url-slug-shell:hover {
+  border-color: var(--ink-muted);
+}
+
+.ink-url-slug-shell:focus-within {
+  border-color: var(--border-ink);
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+.ink-url-slug-field,
+.ink-url-slug-field:focus,
+.ink-url-slug-field:focus-visible {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
 }
 
 /* ============================================================================
@@ -1847,7 +2188,7 @@ input[type="checkbox"][switch]:disabled {
 .ink-toast-stack {
   position: fixed;
   inset: auto 1rem 1rem auto;
-  z-index: 90;
+  z-index: var(--z-toast);
   margin: 0;
   padding: 0;
   border: 0;
@@ -1908,7 +2249,7 @@ input[type="checkbox"][switch]:disabled {
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
-    scrollbar-width: thin;
+    scrollbar-width: auto;
     scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   }
 }
@@ -2072,7 +2413,7 @@ input[type="checkbox"][switch]:disabled {
   caret-color: transparent;
   font-size: max(1rem, 16px);
   letter-spacing: 0.5em;
-  z-index: 2;
+  z-index: var(--z-sticky-cell);
   cursor: text;
 }
 
@@ -2217,12 +2558,21 @@ input[type="checkbox"][switch]:disabled {
 
 .pw-strength-meter::-webkit-progress-value {
   background: var(--progress-bar-fill, var(--action-bg));
-  transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+  transition: background-color 140ms ease-out;
 }
 
 .pw-strength-meter::-moz-progress-bar {
   background: var(--progress-bar-fill, var(--action-bg));
-  transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+  transition: background-color 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pw-strength-meter::-webkit-progress-value {
+    transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+  }
+  .pw-strength-meter::-moz-progress-bar {
+    transition: inline-size 120ms ease-out, background-color 140ms ease-out;
+  }
 }
 
 /* Subtle 4-tier segment tick overlays across the native <progress> bar */
@@ -2363,6 +2713,26 @@ textarea.flow-editor-textarea.flow-editor-textarea--code {
   outline-offset: 4px;
 }
 
+.flow-block-row[data-sticker-drop-target="true"] {
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--action-subtle) 55%, transparent);
+  outline: 2px dashed var(--link-ink);
+  outline-offset: 4px;
+}
+
+/* Posable Sticker & Diagram Handles (`modern-web-guidance/drag`) */
+.ink-sticker-gizmo-handle {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ink-sticker-gizmo-handle:active,
+.ink-sticker-gizmo-handle[data-grabbing="true"] {
+  cursor: grabbing;
+}
+
 .flow-drop-line {
   height: 3px;
   border-radius: 999px;
@@ -2380,7 +2750,7 @@ textarea.flow-editor-textarea.flow-editor-textarea--code {
 /* Floating "/" Slash Command Menu & Selection Inline Formatting Toolbar */
 .flow-slash-popover {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-popover);
   margin: 0;
   padding: 0.375rem;
   inline-size: min(21rem, calc(100dvw - 2rem));
@@ -2396,9 +2766,11 @@ textarea.flow-editor-textarea.flow-editor-textarea--code {
 
 .flow-inline-toolbar {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.125rem;
-  padding: 0.25rem;
+  max-inline-size: min(44rem, calc(100dvw - 2rem));
+  padding: 0.25rem 0.35rem;
   border-radius: 12px;
   background-color: var(--surface-sheet);
   color: var(--ink-primary);
@@ -2410,19 +2782,326 @@ textarea.flow-editor-textarea.flow-editor-textarea--code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.25rem;
   min-inline-size: 1.75rem;
   min-block-size: 1.75rem;
-  padding: 0.25rem 0.5rem;
+  padding: 0.25rem 0.45rem;
   border-radius: 8px;
+  border: 1px solid transparent;
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--ink-secondary);
   background: transparent;
   cursor: pointer;
-  transition: background-color 120ms ease-out, color 120ms ease-out;
+  transition: background-color 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+}
+
+@media (pointer: coarse) {
+  .flow-inline-toolbar button {
+    min-inline-size: 2.25rem;
+    min-block-size: 2.25rem;
+  }
 }
 
 .flow-inline-toolbar button:hover {
   background-color: var(--surface-raised);
   color: var(--ink-primary);
+}
+
+.flow-inline-toolbar button[aria-pressed="true"] {
+  background-color: var(--action-subtle);
+  color: var(--link-ink);
+  border-color: var(--action-bg);
+}
+
+@media (forced-colors: active) {
+  .flow-inline-toolbar button[aria-pressed="true"] {
+    background-color: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+}
+
+/* WYSIWYG RichEditable field + CSS Custom Highlight while popovers/context-menu are open */
+.rich-editable {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  outline: none;
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-block-size: 1.5lh;
+}
+
+.rich-editable--single-line {
+  white-space: normal;
+  min-block-size: 1.3lh;
+}
+
+.rich-editable[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: color-mix(in srgb, var(--ink-muted) 65%, transparent);
+  pointer-events: none;
+}
+
+::highlight(ink-editor-selection) {
+  background-color: var(--action-subtle);
+  color: var(--ink-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--link-ink);
+}
+
+/* ============================================================================
+ * Archival Creative Commons Press Colophon Seal & Studio Selector
+ * Intentionally distinct from reader/author `.sticker-card` notes:
+ * double-ruled archival frame, ledger corner ticks, and perforated verification stub.
+ * Tokens are defined in `tokens.css` using `light-dark()` synced with `color-scheme`.
+ * ============================================================================ */
+
+.cc-colophon-host {
+  container: cc-colophon / inline-size;
+}
+
+.cc-colophon-seal {
+  display: block;
+  position: relative;
+  border-radius: 6px;
+  padding: 0.875rem 1.125rem;
+  background-color: var(--surface-colophon);
+  background-image: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--border-colophon) 5%, transparent)
+  );
+  border: 1.5px solid var(--border-colophon);
+  color: var(--ink-primary);
+  text-decoration: none;
+}
+
+/* Archival inner hairline kept on ::before so :focus-visible outline stays unobstructed */
+.cc-colophon-seal::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, var(--border-colophon) 35%, transparent);
+  pointer-events: none;
+}
+
+.cc-colophon-seal--compact {
+  padding: 0.75rem 0.95rem;
+}
+
+.cc-colophon-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+@container cc-colophon (inline-size >= 440px) {
+  .cc-colophon-inner {
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
+  }
+}
+
+.cc-colophon-kicker {
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.cc-colophon-title {
+  transition: color 150ms ease-out;
+}
+
+.cc-colophon-seal--link {
+  cursor: pointer;
+}
+
+.cc-colophon-seal--link:hover .cc-colophon-title {
+  color: var(--accent-ice-ink);
+}
+
+.cc-colophon-seal--link:focus-visible {
+  outline: 2px solid var(--accent-ice-ink);
+  outline-offset: 3px;
+}
+
+/* Studio Interactive License Radio Cards */
+.cc-selector-option {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border-radius: 12px;
+  background-color: var(--surface-sheet);
+  border: 1.5px solid var(--border-control);
+  cursor: pointer;
+  transition: border-color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.cc-selector-option:hover {
+  border-color: var(--action-bg);
+  background-color: var(--surface-raised);
+}
+
+.cc-selector-option--active {
+  border-width: 2px;
+  border-color: var(--action-bg);
+  background-color: var(--action-subtle);
+}
+
+.cc-selector-radio {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 1.5px solid var(--border-control);
+  background-color: var(--surface-raised);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cc-selector-option--active .cc-selector-radio {
+  border-color: var(--action-bg);
+}
+
+.cc-selector-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background-color: var(--action-bg);
+}
+
+/* ============================================================================
+ * Die-Cut Pixel Stickers & Compositor-Friendly Animations (`motion` + `view()`)
+ * ============================================================================ */
+.pixel-sticker {
+  image-rendering: pixelated;
+  filter: drop-shadow(0 2px 3px rgba(24, 26, 43, 0.16));
+}
+
+@keyframes pixel-sticker-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes pixel-steam-rise {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 0.95;
+    transform: translateY(-1.5px);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pixel-sticker-float {
+    animation: pixel-sticker-bob 5.2s ease-in-out infinite;
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .pixel-steam {
+    animation: pixel-steam-rise 2.8s ease-in-out infinite;
+  }
+
+  /* Layered loose-leaf fan-out on Home series cards (compositor transform only) */
+  .notebook-sheet-stack.notebook-track-card::after {
+    transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .notebook-track-card .notebook-sheet-card {
+    transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .notebook-track-card:hover .notebook-sheet-card,
+  .notebook-track-card:focus-within .notebook-sheet-card {
+    transform: translateY(-2px) rotate(0.35deg);
+  }
+
+  .notebook-sheet-stack.notebook-track-card:hover::after,
+  .notebook-sheet-stack.notebook-track-card:focus-within::after {
+    transform: translateY(2px) rotate(-0.9deg);
+  }
+}
+
+/* Smooth disclosure height animation on Studio Explorer details */
+@supports (selector(::details-content)) {
+  details.studio-disclosure::details-content {
+    interpolate-size: allow-keywords;
+    overflow: clip;
+    contain: layout;
+  }
+  details.studio-disclosure:not([open])::details-content {
+    block-size: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    details.studio-disclosure::details-content {
+      transition: block-size 0.22s ease-in-out, content-visibility 0.22s ease-in-out, display 0.22s ease-in-out;
+      transition-behavior: allow-discrete;
+    }
+  }
+}
+
+/* Layout & Scoped Group View Transitions (`group-element-transitions`) */
+::view-transition {
+  pointer-events: none;
+}
+
+html:active-view-transition-type(layout) {
+  view-transition-name: none;
+}
+
+.vt-layout-item {
+  view-transition-class: vt-layout-item;
+}
+
+::view-transition-group(.vt-layout-item) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
+/* Scroll-Driven Card Entry Reveal (`scroll-entry-exit-effects`):
+ * `animation-timeline` & `animation-range` MUST appear AFTER the `animation` shorthand. */
+@media (prefers-reduced-motion: no-preference) {
+  @supports ((animation-timeline: view()) and (animation-range: entry)) {
+    @keyframes ice-scroll-reveal {
+      from {
+        opacity: 0.35;
+        translate: 0 18px;
+        scale: 0.975;
+      }
+      to {
+        opacity: 1;
+        translate: 0 0;
+        scale: 1;
+      }
+    }
+
+    .scroll-reveal-block {
+      animation: ice-scroll-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 75%;
+    }
+  }
 }

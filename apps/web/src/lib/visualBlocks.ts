@@ -12,7 +12,22 @@ import type {
   StickerStyle,
   StickerTone,
   TaskScope,
+  TextAlign,
+  TextSizePreset,
 } from './types';
+
+export interface AttachedPixelSticker {
+  id: string;
+  sprite: string;
+  x: number;
+  y: number;
+  rotate: number;
+  scale: number;
+  flip?: boolean;
+  locked?: boolean;
+  layer?: 'front' | 'behind';
+  caption?: string;
+}
 
 export interface VisualStepItem {
   id: string;
@@ -21,7 +36,7 @@ export interface VisualStepItem {
   defaultChecked: boolean;
 }
 
-export type VisualBlock =
+type VisualBlockCore =
   | {
       id: string;
       type: 'heading';
@@ -29,12 +44,15 @@ export type VisualBlock =
       text: string;
       isTask?: boolean;
       defaultChecked?: boolean;
+      align?: TextAlign;
     }
   | {
       id: string;
       type: 'paragraph';
       text: string;
       marginNote: string;
+      align?: TextAlign;
+      size?: TextSizePreset;
     }
   | {
       id: string;
@@ -54,6 +72,8 @@ export type VisualBlock =
       style: StickerStyle | '';
       tone: StickerTone | '';
       badge: string;
+      align?: TextAlign;
+      size?: TextSizePreset;
     }
   | {
       id: string;
@@ -82,6 +102,8 @@ export type VisualBlock =
       id: string;
       type: 'quote';
       text: string;
+      align?: TextAlign;
+      size?: TextSizePreset;
     }
   | {
       id: string;
@@ -91,9 +113,21 @@ export type VisualBlock =
     }
   | {
       id: string;
+      type: 'pixel_sticker';
+      sprite: string;
+      align: 'left' | 'center' | 'right';
+      size: 'sm' | 'md' | 'lg';
+      caption: string;
+    }
+  | {
+      id: string;
       type: 'raw_markdown';
       content: string;
     };
+
+export type VisualBlock = VisualBlockCore & {
+  stickers?: AttachedPixelSticker[];
+};
 
 let blockSeq = 0;
 export function createVisualId(prefix = 'vb'): string {
@@ -165,6 +199,22 @@ export function normalizeStickerTone(raw?: string | null): StickerTone | '' {
 export function normalizeCodeCardStyle(raw?: string | null): CodeCardStyle {
   const s = (raw ?? '').trim().toLowerCase() as CodeCardStyle;
   return VALID_CODE_STYLES.has(s) ? s : 'washi';
+}
+
+export function normalizeBlockAlign(
+  raw?: string | null,
+): TextAlign | undefined {
+  const s = (raw ?? '').trim().toLowerCase();
+  if (s === 'left' || s === 'center' || s === 'right') return s;
+  return undefined;
+}
+
+export function normalizeBlockSize(
+  raw?: string | null,
+): TextSizePreset | undefined {
+  const s = (raw ?? '').trim().toLowerCase();
+  if (s === 'sm' || s === 'lg' || s === 'xl' || s === '2xl') return s;
+  return undefined;
 }
 
 export interface ParsedAuthorMarginNote {
@@ -365,6 +415,7 @@ function isBlockStart(trimmed: string): boolean {
 export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   const blocks: VisualBlock[] = [];
+  let pendingStickers: AttachedPixelSticker[] = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -393,10 +444,100 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
       continue;
     }
 
-    // 2. Container directives: :::steps[...] and :::tip|note|info|idea|question|check|bookmark|warning|danger[...]{...}
+    // 2. Container directives: :::steps[...], :::pixel[...]{...}, :::format{...} and :::tip|note|...
     if (trimmed.startsWith(':::') && trimmed.length > 3) {
       const rest = trimmed.slice(3);
       const { kindRaw, title, attrsRaw } = parseDirectiveHeader(rest);
+
+      if (kindRaw.toLowerCase() === 'format') {
+        const alignVal = normalizeBlockAlign(extractQuotedAttr(attrsRaw, 'align'));
+        const sizeVal = normalizeBlockSize(extractQuotedAttr(attrsRaw, 'size'));
+        const prev = blocks[blocks.length - 1];
+        if (
+          prev &&
+          (prev.type === 'paragraph' ||
+            prev.type === 'quote' ||
+            prev.type === 'alert')
+        ) {
+          if (alignVal) prev.align = alignVal;
+          if (sizeVal) prev.size = sizeVal;
+        } else if (prev && prev.type === 'heading' && alignVal) {
+          prev.align = alignVal;
+        }
+        i += 1;
+        if (i < lines.length && lines[i].trim() === ':::') {
+          i += 1;
+        }
+        continue;
+      }
+
+      if (kindRaw.toLowerCase() === 'pixel') {
+        const anchorAttr = extractQuotedAttr(attrsRaw, 'anchor').toLowerCase();
+        const xStr = extractQuotedAttr(attrsRaw, 'x');
+        const yStr = extractQuotedAttr(attrsRaw, 'y');
+        const rotStr = extractQuotedAttr(attrsRaw, 'rotate');
+        const scaleStr = extractQuotedAttr(attrsRaw, 'scale');
+        const flipAttr = extractQuotedAttr(attrsRaw, 'flip').toLowerCase();
+        const lockedAttr = extractQuotedAttr(attrsRaw, 'locked').toLowerCase();
+        const layerAttr = extractQuotedAttr(attrsRaw, 'layer').toLowerCase();
+        const caption = extractQuotedAttr(attrsRaw, 'caption').trim();
+        const sprite = (title || 'cat').trim().toLowerCase() || 'cat';
+
+        const isBlockAnchored =
+          anchorAttr === 'block' || xStr !== '' || yStr !== '';
+
+        if (isBlockAnchored) {
+          const xVal = Number.parseFloat(xStr);
+          const yVal = Number.parseFloat(yStr);
+          const rotVal = Number.parseFloat(rotStr);
+          const scaleVal = Number.parseFloat(scaleStr);
+          const sticker: AttachedPixelSticker = {
+            id: createVisualId('stk'),
+            sprite,
+            x: Number.isFinite(xVal) ? Math.max(-25, Math.min(125, xVal)) : 88,
+            y: Number.isFinite(yVal) ? Math.max(-60, Math.min(160, yVal)) : 16,
+            rotate: Number.isFinite(rotVal)
+              ? Math.max(-180, Math.min(180, rotVal))
+              : 0,
+            scale: Number.isFinite(scaleVal)
+              ? Math.max(0.35, Math.min(3.5, scaleVal))
+              : 1,
+            ...(flipAttr === 'true' || flipAttr === '1' ? { flip: true } : {}),
+            ...(lockedAttr === 'true' || lockedAttr === '1'
+              ? { locked: true }
+              : {}),
+            ...(layerAttr === 'behind' ? { layer: 'behind' as const } : {}),
+            ...(caption ? { caption } : {}),
+          };
+          const prevBlock = blocks[blocks.length - 1];
+          if (prevBlock) {
+            prevBlock.stickers = [...(prevBlock.stickers ?? []), sticker];
+          } else {
+            pendingStickers.push(sticker);
+          }
+        } else {
+          const rawAlign = extractQuotedAttr(attrsRaw, 'align').toLowerCase();
+          const align: 'left' | 'center' | 'right' =
+            rawAlign === 'left' || rawAlign === 'right' ? rawAlign : 'center';
+          const rawSize = extractQuotedAttr(attrsRaw, 'size').toLowerCase();
+          const size: 'sm' | 'md' | 'lg' =
+            rawSize === 'sm' || rawSize === 'lg' ? rawSize : 'md';
+          blocks.push({
+            id: createVisualId(),
+            type: 'pixel_sticker',
+            sprite,
+            align,
+            size,
+            caption,
+          });
+        }
+
+        i += 1;
+        if (i < lines.length && lines[i].trim() === ':::') {
+          i += 1;
+        }
+        continue;
+      }
 
       if (kindRaw === 'steps') {
         let scope: TaskScope = 'section';
@@ -459,6 +600,8 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
         }
         if (i < lines.length && lines[i].trim() === ':::') i += 1;
 
+        const align = normalizeBlockAlign(extractQuotedAttr(attrsRaw, 'align'));
+        const size = normalizeBlockSize(extractQuotedAttr(attrsRaw, 'size'));
         blocks.push({
           id: createVisualId(),
           type: 'alert',
@@ -470,6 +613,8 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
           style: normalizeStickerStyle(extractQuotedAttr(attrsRaw, 'style')),
           tone: normalizeStickerTone(extractQuotedAttr(attrsRaw, 'tone')),
           badge: extractQuotedAttr(attrsRaw, 'badge').trim().slice(0, 24),
+          ...(align ? { align } : {}),
+          ...(size ? { size } : {}),
         });
         continue;
       }
@@ -696,7 +841,60 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
     });
   }
 
+  if (pendingStickers.length > 0) {
+    if (blocks.length > 0) {
+      blocks[0].stickers = [...pendingStickers, ...(blocks[0].stickers ?? [])];
+    } else {
+      blocks.push({
+        id: createVisualId(),
+        type: 'paragraph',
+        text: '',
+        marginNote: '',
+        stickers: [...pendingStickers],
+      });
+    }
+  }
+
   return blocks;
+}
+
+function serializeAttachedStickers(
+  stickers?: AttachedPixelSticker[],
+): string[] {
+  if (!stickers || stickers.length === 0) return [];
+  return stickers.map((st) => {
+    const safeSprite = (st.sprite || 'cat').trim().toLowerCase() || 'cat';
+    const x = Number(Math.max(-25, Math.min(125, st.x)).toFixed(1));
+    const y = Number(Math.max(-60, Math.min(160, st.y)).toFixed(1));
+    const rot = Number(Math.max(-180, Math.min(180, st.rotate)).toFixed(1));
+    const sc = Number(Math.max(0.35, Math.min(3.5, st.scale)).toFixed(2));
+    const attrs = [
+      'anchor="block"',
+      `x="${x}"`,
+      `y="${y}"`,
+      `rotate="${rot}"`,
+      `scale="${sc}"`,
+    ];
+    if (st.flip) attrs.push('flip="true"');
+    if (st.locked) attrs.push('locked="true"');
+    if (st.layer === 'behind') attrs.push('layer="behind"');
+    if (st.caption?.trim()) {
+      attrs.push(
+        `caption="${st.caption.trim().replace(/["\r\n]/g, "'")}"`,
+      );
+    }
+    return `:::pixel[${safeSprite}]{${attrs.join(' ')}}`;
+  });
+}
+
+function serializeFormatDirective(
+  align?: TextAlign,
+  size?: TextSizePreset,
+): string {
+  const attrs: string[] = [];
+  if (align && align !== 'left') attrs.push(`align="${align}"`);
+  if (size && size !== 'base') attrs.push(`size="${size}"`);
+  return attrs.length > 0 ? `:::format{${attrs.join(' ')}}` : '';
 }
 
 /**
@@ -706,23 +904,28 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
   const chunks: string[] = [];
 
   for (const block of blocks) {
+    const beforeLen = chunks.length;
     switch (block.type) {
       case 'heading': {
         const hashes = '#'.repeat(block.level);
         const title = block.text.trim();
-        if (block.isTask && title) {
-          const box = block.defaultChecked ? '[x]' : '[ ]';
-          chunks.push(`${hashes} ${box} ${title}`);
-        } else {
-          chunks.push(`${hashes} ${title}`);
-        }
+        const headLine =
+          block.isTask && title
+            ? `${hashes} ${block.defaultChecked ? '[x]' : '[ ]'} ${title}`
+            : `${hashes} ${title}`;
+        const fmtLine = serializeFormatDirective(block.align);
+        chunks.push(fmtLine ? `${headLine}\n${fmtLine}` : headLine);
         break;
       }
       case 'paragraph': {
         const body = block.text.trim();
         const note = block.marginNote.trim();
-        if (!body && !note) break;
-        chunks.push(note ? `${body}\n:::margin[${note}]` : body);
+        const fmtLine = serializeFormatDirective(block.align, block.size);
+        if (!body && !note && !fmtLine) break;
+        const parts: string[] = [body];
+        if (fmtLine) parts.push(fmtLine);
+        if (note) parts.push(`:::margin[${note}]`);
+        chunks.push(parts.filter(Boolean).join('\n'));
         break;
       }
       case 'steps': {
@@ -759,6 +962,12 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
           attrParts.push(
             `badge="${block.badge.trim().slice(0, 24).replace(/"/g, "'")}"`,
           );
+        }
+        if (block.align && block.align !== 'left') {
+          attrParts.push(`align="${block.align}"`);
+        }
+        if (block.size && block.size !== 'base') {
+          attrParts.push(`size="${block.size}"`);
         }
         const attrSuffix =
           attrParts.length > 0 ? `{${attrParts.join(' ')}}` : '';
@@ -809,12 +1018,12 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
       case 'quote': {
         const text = block.text.trim();
         if (!text) break;
-        chunks.push(
-          text
-            .split('\n')
-            .map((line) => `> ${line}`)
-            .join('\n'),
-        );
+        const qLines = text
+          .split('\n')
+          .map((line) => `> ${line}`)
+          .join('\n');
+        const fmtLine = serializeFormatDirective(block.align, block.size);
+        chunks.push(fmtLine ? `${qLines}\n${fmtLine}` : qLines);
         break;
       }
       case 'rough_diagram': {
@@ -825,11 +1034,35 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
         chunks.push(`\`\`\`sketch${capAttr}\n${json}\n\`\`\``);
         break;
       }
+      case 'pixel_sticker': {
+        const safeSprite = (block.sprite || 'cat').trim().toLowerCase() || 'cat';
+        const attrs: string[] = [
+          `align="${block.align || 'center'}"`,
+          `size="${block.size || 'md'}"`,
+        ];
+        if (block.caption.trim()) {
+          attrs.push(
+            `caption="${block.caption.trim().replace(/["\r\n]/g, "'")}"`,
+          );
+        }
+        chunks.push(`:::pixel[${safeSprite}]{${attrs.join(' ')}}`);
+        break;
+      }
       case 'raw_markdown': {
         if (block.content.trim()) {
           chunks.push(block.content.trim());
         }
         break;
+      }
+    }
+
+    const stickerLines = serializeAttachedStickers(block.stickers);
+    if (stickerLines.length > 0) {
+      if (chunks.length > beforeLen) {
+        chunks[chunks.length - 1] =
+          `${chunks[chunks.length - 1]}\n${stickerLines.join('\n')}`;
+      } else {
+        chunks.push(stickerLines.join('\n'));
       }
     }
   }
@@ -883,6 +1116,15 @@ export function createDefaultVisualBlock(kind: VisualBlock['type']): VisualBlock
       return { id, type: 'image', src: '', alt: '', caption: '', marginNote: '' };
     case 'quote':
       return { id, type: 'quote', text: '' };
+    case 'pixel_sticker':
+      return {
+        id,
+        type: 'pixel_sticker',
+        sprite: 'cat',
+        align: 'center',
+        size: 'md',
+        caption: '',
+      };
     case 'rough_diagram':
       return {
         id,
@@ -891,7 +1133,7 @@ export function createDefaultVisualBlock(kind: VisualBlock['type']): VisualBlock
         spec: {
           nodes: [
             { id: 'n1', label: 'A', sublabel: '', x: 24, y: 36, width: 155, height: 64, tone: 'ice' },
-            { id: 'n2', label: 'B', sublabel: '', x: 245, y: 36, width: 160, height: 64, tone: 'violet' },
+            { id: 'n2', label: 'B', sublabel: '', x: 260, y: 36, width: 160, height: 64, tone: 'violet' },
           ],
           edges: [{ from: 'n1', to: 'n2', label: '' }],
         },

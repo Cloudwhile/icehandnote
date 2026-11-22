@@ -836,3 +836,397 @@ export function IconPalette({ className = 'w-4 h-4' }: IconProps) {
     </svg>
   );
 }
+
+export function IconPixelSticker({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M15 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h7l8-8V6a3 3 0 0 0-3-3h-3Z" />
+      <path d="M13 21v-5a3 3 0 0 1 3-3h5" />
+      <rect x="7.5" y="7.5" width="3" height="3" fill="currentColor" stroke="none" />
+      <rect x="11.5" y="10.5" width="3" height="3" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function IconLock({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2.5" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+      <circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none" />
+      <path d="M12 16.6v1.9" />
+    </svg>
+  );
+}
+
+export function IconUnlock({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="11" width="16" height="10" rx="2.5" />
+      <path d="M8 11V7a4 4 0 0 1 7.6-1.7" />
+      <circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none" />
+      <path d="M12 16.6v1.9" />
+    </svg>
+  );
+}
+
+export function IconSparkBullet({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+    >
+      <path d="M12 3c.7 4.4 4.6 8.3 9 9-4.4.7-8.3 4.6-9 9-.7-4.4-4.6-8.3-9-9 4.4-.7 8.3-4.6 9-9Z" />
+    </svg>
+  );
+}
+
+export function IconHeart({
+  className = 'w-4 h-4',
+  filled = false,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20.5s-7.5-4.7-9.2-9C1.4 8 3.7 4.5 7.4 4.5c2 0 3.7 1.1 4.6 2.6.9-1.5 2.6-2.6 4.6-2.6 3.7 0 6 3.5 4.6 7-1.7 4.3-9.2 9-9.2 9Z" />
+    </svg>
+  );
+}
+
+export function IconAlertTriangle({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10.3 3.9 2.3 18a2 2 0 0 0 1.7 3h16a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+      <path d="M12 9v4.5" />
+      <circle cx="12" cy="17" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function IconArrowLeftRight({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 8h15m-3.5-3.5L19.5 8l-4 3.5" />
+      <path d="M20 16H5m3.5-3.5L4.5 16l4 3.5" />
+    </svg>
+  );
+}
+
+export function IconBold({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 4h7.5a4 4 0 0 1 0 8H6Z" />
+      <path d="M6 12h8.5a4 4 0 0 1 0 8H6Z" />
+    </svg>
+  );
+}
+
+export function IconItalic({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M19 4h-9M14 20H5M15 4 9 20" />
+    </svg>
+  );
+}
+
+export function IconUnderline({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M6 4v7a6 6 0 0 0 12 0V4" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+export function IconStrikethrough({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M4 12h16" />
+      <path d="M16.5 7.5C16.5 5.4 14.5 4 12 4S7.5 5.3 7.5 7.2c0 1.4.8 2.2 2.2 2.8" />
+      <path d="M14.8 14.2c1.1.6 1.7 1.4 1.7 2.6 0 2-2.1 3.2-4.6 3.2-2.6 0-4.4-1.2-4.7-3.1" />
+    </svg>
+  );
+}
+
+export function IconInlineCode({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2.5" y="5" width="19" height="14" rx="4" strokeDasharray="3 2" />
+      <path d="m9 9.5-2.8 2.5L9 14.5M15 9.5l2.8 2.5L15 14.5" />
+    </svg>
+  );
+}
+
+export function IconKeyboardKey({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="18" height="14" rx="3.5" />
+      <path d="M4.5 18.5c2 2.2 13 2.2 15 0" />
+      <path d="M8.5 11h7M12 8.5V14" />
+    </svg>
+  );
+}
+
+export function IconHighlighter({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m9 11-6 6v3h4l6-6" />
+      <path d="m20 8-5.5-5.5-7 7 5.5 5.5 7-7Z" />
+      <path d="M3 21h18" />
+    </svg>
+  );
+}
+
+export function IconTextColor({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m6 15 6-11 6 11" />
+      <path d="M8.5 11h7" />
+      <path d="M4 19.5h16" strokeWidth="2.6" />
+    </svg>
+  );
+}
+
+export function IconBgTint({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="5" width="16" height="14" rx="3.5" />
+      <path d="m8 15 4-6 4 6M9.3 13.2h5.4" />
+    </svg>
+  );
+}
+
+export function IconTextSize({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 7h10M8 7v11" />
+      <path d="M14 12h7M17.5 12v6" />
+    </svg>
+  );
+}
+
+export function IconAlignLeft({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M4 6h16M4 10.5h10M4 15h14M4 19.5h8" />
+    </svg>
+  );
+}
+
+export function IconAlignCenter({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M4 6h16M7 10.5h10M5 15h14M8 19.5h8" />
+    </svg>
+  );
+}
+
+export function IconAlignRight({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <path d="M4 6h16M10 10.5h10M6 15h14M12 19.5h8" />
+    </svg>
+  );
+}
+
+export function IconLink({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10 13a4.5 4.5 0 0 0 6.4 0l2.8-2.8a4.5 4.5 0 0 0-6.4-6.4L11.3 5.3" />
+      <path d="M14 11a4.5 4.5 0 0 0-6.4 0L4.8 13.8a4.5 4.5 0 0 0 6.4 6.4l1.4-1.4" />
+    </svg>
+  );
+}
+
+export function IconEraser({ className = 'w-3.5 h-3.5' }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} shrink-0`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m7 20 12-12-4.5-4.5-12 12V20h14" />
+      <path d="m9.5 8.5 5 5" />
+    </svg>
+  );
+}

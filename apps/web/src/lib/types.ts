@@ -76,6 +76,9 @@ export interface StepTaskItem {
   default_checked?: boolean;
 }
 
+export type TextAlign = 'left' | 'center' | 'right';
+export type TextSizePreset = 'sm' | 'base' | 'lg' | 'xl' | '2xl';
+
 export type NotebookBlock =
   | {
       type: 'heading';
@@ -85,12 +88,15 @@ export type NotebookBlock =
       text: string;
       is_task?: boolean;
       default_checked?: boolean;
+      align?: TextAlign | null;
     }
   | {
       type: 'paragraph';
       block_id: string;
       html: string;
       margin_note?: string | null;
+      align?: TextAlign | null;
+      size?: string | null;
     }
   | {
       type: 'alert';
@@ -103,6 +109,8 @@ export type NotebookBlock =
       style?: string | null;
       tone?: string | null;
       badge?: string | null;
+      align?: TextAlign | null;
+      size?: string | null;
     }
   | {
       type: 'code_card';
@@ -141,9 +149,27 @@ export type NotebookBlock =
       margin_note?: string | null;
     }
   | {
+      type: 'pixel_sticker';
+      block_id: string;
+      sprite: string;
+      align?: string | null;
+      size?: string | null;
+      anchor?: string | null;
+      x?: number | null;
+      y?: number | null;
+      rotate?: number | null;
+      scale?: number | null;
+      flip?: boolean | null;
+      locked?: boolean | null;
+      layer?: string | null;
+      caption?: string | null;
+    }
+  | {
       type: 'quote';
       block_id: string;
       html: string;
+      align?: TextAlign | null;
+      size?: string | null;
     };
 
 export interface TocItem {
@@ -192,19 +218,77 @@ export interface StepNeighborDto {
   title: string;
 }
 
+export type CollaboratorRole = 'editor' | 'translator' | 'reviewer';
+
 export interface ArticleAuthorDto {
   user_id?: string | null;
   username: string;
   display_name: string;
   avatar_url: string;
   is_owner: boolean;
+  role?: 'owner' | CollaboratorRole | string;
+  locale_scope?: string[];
 }
 
 export interface CollaboratorInviteDto {
   id: string;
   email: string;
+  role?: CollaboratorRole | string;
+  locale_scope?: string[];
   created_at: string;
   expires_at: string;
+}
+
+export interface InvitePreviewDto {
+  invite_id: string;
+  masked_email: string;
+  role: CollaboratorRole | string;
+  locale_scope: string[];
+  track_slug: string;
+  chapter_slug: string;
+  step_slug: string;
+  article_title: string;
+  invited_by_name: string;
+  expires_at: string;
+  email_matches_viewer?: boolean | null;
+}
+
+export interface StepRevisionDto {
+  id: string;
+  step_id: string;
+  locale_code: string;
+  edit_seq: number;
+  synced_revision: number;
+  status: string;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  content_sha256: string;
+  author_user_id?: string | null;
+  author_name: string;
+  change_note: string;
+  created_at: string;
+}
+
+export interface CollaborationAuditLogDto {
+  id: string;
+  step_id: string;
+  actor_user_id?: string | null;
+  actor_name: string;
+  action: string;
+  detail: string;
+  created_at: string;
+}
+
+export interface RevisionConflictMeta {
+  expected_etag: string;
+  current_etag: string;
+  current_edit_seq: number;
+  updated_by: string;
+  updated_at: string;
+  remote_title: string;
+  remote_summary: string;
+  remote_body_markdown: string;
 }
 
 export interface StepDetailDto {
@@ -237,6 +321,7 @@ export interface StepDetailDto {
   prev_step?: StepNeighborDto | null;
   next_step?: StepNeighborDto | null;
   likes_count: number;
+  published_at: string;
   updated_at: string;
 }
 
@@ -251,6 +336,30 @@ export interface SearchHitDto {
   tags: string[];
 }
 
+export type AnnotationSelector =
+  | {
+      type: 'FragmentSelector';
+      conformsTo: string;
+      value: string;
+    }
+  | {
+      type: 'TextQuoteSelector';
+      exact: string;
+      prefix?: string;
+      suffix?: string;
+    }
+  | {
+      type: 'TextPositionSelector';
+      start: number;
+      end: number;
+    };
+
+export interface AnnotationTarget {
+  source: string;
+  source_revision: number;
+  selector: AnnotationSelector[];
+}
+
 export interface UserMarginNoteDto {
   id: string;
   learner_id: string;
@@ -258,9 +367,21 @@ export interface UserMarginNoteDto {
   locale_code: string;
   block_anchor_id: string;
   note_color: string;
+  tone?: string;
+  style?: string;
+  tag?: string;
+  motivation?: string;
+  target?: AnnotationTarget | null;
+  body_format?: string;
   content_html: string;
   raw_content: string;
+  version?: number;
   created_at: string;
+  updated_at?: string;
+  track_slug?: string;
+  chapter_slug?: string;
+  step_slug?: string;
+  step_title?: string;
 }
 
 export interface LearnerProgressDto {
@@ -291,6 +412,7 @@ export interface UserProfileDto {
   has_password?: boolean;
   bio: string;
   role: UserRole;
+  has_collaborations?: boolean;
   auth_source: string;
   is_banned?: boolean;
   ban_reason?: string;
@@ -426,6 +548,8 @@ export interface StudioStepEditorDto {
   synced_revision: number;
   canonical_revision: number;
   version?: number;
+  edit_seq?: number;
+  etag?: string;
   status: string;
   license?: string;
   tags: string[];
@@ -433,10 +557,15 @@ export interface StudioStepEditorDto {
   owner_user_id?: string | null;
   authors?: ArticleAuthorDto[];
   pending_invites?: CollaboratorInviteDto[];
+  can_edit?: boolean;
   can_manage_collaborators?: boolean;
+  can_leave?: boolean;
+  viewer_role?: string;
   takedown_reason?: string | null;
   takedown_at?: string | null;
   takedown_by?: string | null;
+  published_at?: string;
+  updated_at?: string;
 }
 
 export interface StudioPreviewResponse {
@@ -521,6 +650,7 @@ export interface SiteSettingsDto {
   enable_progress_tracking: boolean;
   enable_draft_autosave: boolean;
   draft_autosave_interval_secs: number;
+  stale_article_days: number;
 }
 
 export function getEffectiveOAuthProviders(
@@ -589,6 +719,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsDto = {
   enable_progress_tracking: true,
   enable_draft_autosave: true,
   draft_autosave_interval_secs: 15,
+  stale_article_days: 180,
 };
 
 export const APP_VERSION = 'v0.1.0-rc.6';
