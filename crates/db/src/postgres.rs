@@ -3580,13 +3580,13 @@ impl TutorialRepository for PostgresRepository {
         step_slug: &str,
         email: &str,
     ) -> Result<(CollaboratorInviteDto, String, String)> {
-        let clean_email = email.trim();
-        if !clean_email.contains('@') {
+        let Some(clean_email) = icehandnote_core::auth::validate_and_normalize_email(email) else {
             return Err(domain_err(
                 ErrorCode::InvalidEmail,
                 "Please provide a valid email address.",
             ));
-        }
+        };
+        let clean_email = clean_email.as_str();
         let srow_opt = sqlx::query(
             r#"
             SELECT s.id, s.owner_user_id,

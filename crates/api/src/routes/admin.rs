@@ -17,7 +17,10 @@ use axum::{
     Json,
 };
 use icehandnote_core::{
-    auth::{slugify_oauth_provider_id, SiteSettingsDto, UserRole},
+    auth::{
+        is_deliverable_email, is_valid_email, slugify_oauth_provider_id,
+        validate_and_normalize_email, SiteSettingsDto, UserRole,
+    },
     error::ErrorCode,
     mail_templates::{render_mail_preview, SmtpSettingsDto},
 };
@@ -482,6 +485,12 @@ pub async fn admin_update_smtp_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
     let clean = body.settings.sanitize();
+    if (clean.enabled || !clean.from_email.is_empty()) && !is_valid_email(&clean.from_email) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidEmail,
+            "Please provide a valid sender email address.",
+        ));
+    }
     let mut secrets = state.runtime_secrets.write().await;
     secrets.smtp = clean.clone();
     if body.clear_password {
@@ -556,13 +565,12 @@ pub async fn admin_test_smtp_handler(
     Json(body): Json<TestSmtpBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
-    let to_email = body.to_email.trim();
-    if !to_email.contains('@') || to_email.len() > 160 {
-        return Err(ApiError::new(
+    let to_email = validate_and_normalize_email(&body.to_email).ok_or_else(|| {
+        ApiError::new(
             ErrorCode::InvalidEmail,
             "Please provide a valid test recipient email address.",
-        ));
-    }
+        )
+    })?;
 
     let (cfg, pw) = {
         let secrets = state.runtime_secrets.read().await;
@@ -577,6 +585,12 @@ pub async fn admin_test_smtp_handler(
         };
         (effective_cfg, effective_pw)
     };
+    if !is_valid_email(&cfg.from_email) {
+        return Err(ApiError::new(
+            ErrorCode::InvalidEmail,
+            "Please provide a valid sender email address.",
+        ));
+    }
 
     let site_settings = state
         .repo
@@ -596,7 +610,7 @@ pub async fn admin_test_smtp_handler(
             origin: &origin,
             locale: target_locale,
         },
-        to_email,
+        &to_email,
     )
     .await
     .map_err(|e| {
@@ -668,13 +682,16 @@ pub async fn admin_create_user_handler(
             "Username must be 2–32 characters using letters, digits, underscores, or hyphens.",
         ));
     }
-    let clean_email = body.email.trim();
-    if !clean_email.is_empty() && (!clean_email.contains('@') || clean_email.len() > 160) {
-        return Err(ApiError::new(
-            ErrorCode::InvalidEmail,
-            "Invalid email address.",
-        ));
-    }
+    let clean_email = if body.email.trim().is_empty() {
+        String::new()
+    } else {
+        validate_and_normalize_email(&body.email).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::InvalidEmail,
+                "Please provide a valid email address.",
+            )
+        })?
+    };
     if body.password.chars().count() < 8 {
         return Err(ApiError::new(
             ErrorCode::PasswordTooShort,
@@ -686,7 +703,7 @@ pub async fn admin_create_user_handler(
         .admin_create_user(
             clean_username,
             body.display_name.trim(),
-            clean_email,
+            &clean_email,
             body.role,
             &body.password,
         )
@@ -741,10 +758,7 @@ pub async fn admin_set_user_ban_handler(
         Some(u) => {
             if body.banned {
                 let email = u.email.trim().to_string();
-                let deliverable = !email.is_empty()
-                    && email.contains('@')
-                    && !email.to_ascii_lowercase().ends_with("@localhost");
-                if deliverable {
+                if is_deliverable_email(&email) {
                     let (smtp_cfg, smtp_pw) = {
                         let secrets = state.runtime_secrets.read().await;
                         (secrets.smtp.clone(), secrets.smtp_password.clone())
@@ -898,10 +912,7 @@ pub async fn admin_takedown_step_handler(
         let mut tasks = tokio::task::JoinSet::new();
         for recipient in &recipients {
             let email = recipient.email.trim().to_string();
-            if email.is_empty()
-                || !email.contains('@')
-                || email.to_ascii_lowercase().ends_with("@localhost")
-            {
+            if !is_deliverable_email(&email) {
                 continue;
             }
             let smtp_cfg_cl = smtp_cfg.clone();

@@ -11,7 +11,7 @@ use axum::{
 };
 use error::ApiError;
 use icehandnote_core::{
-    auth::{SiteSettingsDto, UserRole},
+    auth::{validate_and_normalize_email, SiteSettingsDto, UserRole},
     error::ErrorCode,
     SUPPORTED_LOCALES,
 };
@@ -151,11 +151,23 @@ async fn bootstrap_initial_admin(repo: &dyn TutorialRepository) -> anyhow::Resul
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "Admin".to_string());
-    let email = env::var("ADMIN_EMAIL")
+    let email = match env::var("ADMIN_EMAIL")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("{username}@localhost"));
+    {
+        Some(raw) => match validate_and_normalize_email(&raw) {
+            Some(valid) => valid,
+            None => {
+                tracing::warn!(
+                    "Ignoring invalid ADMIN_EMAIL env value; falling back to '{}@localhost'",
+                    username
+                );
+                format!("{username}@localhost")
+            }
+        },
+        None => format!("{username}@localhost"),
+    };
     let explicit_pw = env::var("ADMIN_PASSWORD")
         .ok()
         .map(|v| v.trim().to_string())
@@ -1335,6 +1347,59 @@ mod tests {
         .expect("account ban notice email must deliver cleanly");
         let captured = sink.await.unwrap();
         assert!(!captured.is_empty());
+
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn collaborator_invite_rejects_malformed_emails_and_normalizes_valid_ones() {
+        let content_dir = resolve_content_dir(None);
+        let store_path = env::temp_dir().join(format!(
+            "icehandnote-invite-email-test-{}.json",
+            Uuid::new_v4()
+        ));
+        let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path.clone()).unwrap();
+
+        let owner = repo
+            .register_local_account(
+                "invite_owner",
+                "Invite Owner",
+                "owner@icehandnote.dev",
+                "supersecret123",
+                UserRole::Author,
+            )
+            .await
+            .unwrap();
+
+        for bad in ["user@gm", "..bad@example.com", "a@localhost", "a@-b.com"] {
+            let err = repo
+                .create_collaborator_invite(
+                    &owner,
+                    "getting-started",
+                    "01-welcome",
+                    "01-welcome-to-icehandnote",
+                    bad,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                ApiError::from_anyhow(err).code,
+                ErrorCode::InvalidEmail,
+                "expected `{bad}` to return ErrorCode::InvalidEmail"
+            );
+        }
+
+        let (invite, _tok, _title) = repo
+            .create_collaborator_invite(
+                &owner,
+                "getting-started",
+                "01-welcome",
+                "01-welcome-to-icehandnote",
+                "  Collab+Notes@Example.COM ",
+            )
+            .await
+            .unwrap();
+        assert_eq!(invite.email, "Collab+Notes@example.com");
 
         let _ = std::fs::remove_file(store_path);
     }

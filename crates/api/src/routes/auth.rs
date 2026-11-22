@@ -24,9 +24,10 @@ use icehandnote_core::{
     auth::{
         build_gravatar_url, constant_time_str_eq, encode_basic_client_credentials, form_urlencode,
         generate_email_verification_code, generate_oauth_flow_tokens, hash_email_verification_code,
-        mask_email_address, percent_encode_component, sanitize_internal_return_path,
-        sign_blog_sso_token, verify_blog_sso_token, BlogSsoClaims, SiteSettingsDto,
-        UpdateUserProfileInput, UserProfileDto, UserRole,
+        is_deliverable_email, mask_email_address, percent_encode_component,
+        sanitize_internal_return_path, sign_blog_sso_token, validate_and_normalize_email,
+        verify_blog_sso_token, BlogSsoClaims, SiteSettingsDto, UpdateUserProfileInput,
+        UserProfileDto, UserRole,
     },
     error::ErrorCode,
     webauthn::{
@@ -286,15 +287,13 @@ fn validate_username(raw: &str) -> Result<&str, ApiError> {
     Ok(clean)
 }
 
-fn validate_email(raw: &str) -> Result<&str, ApiError> {
-    let clean = raw.trim();
-    if !clean.contains('@') || clean.len() > 160 {
-        return Err(ApiError::new(
+fn validate_email(raw: &str) -> Result<String, ApiError> {
+    validate_and_normalize_email(raw).ok_or_else(|| {
+        ApiError::new(
             ErrorCode::InvalidEmail,
             "Please provide a valid email address.",
-        ));
-    }
-    Ok(clean)
+        )
+    })
 }
 
 fn validate_password(raw: &str) -> Result<(), ApiError> {
@@ -432,9 +431,7 @@ async fn complete_password_login_or_challenge(
             (secrets.smtp.clone(), secrets.smtp_password.clone())
         };
         let clean_email = user.email.trim();
-        let email_deliverable = !clean_email.is_empty()
-            && clean_email.contains('@')
-            && !clean_email.to_ascii_lowercase().ends_with("@localhost");
+        let email_deliverable = is_deliverable_email(clean_email);
 
         if is_smtp_ready(&smtp_cfg) && email_deliverable {
             let settings = state
@@ -693,7 +690,7 @@ pub async fn auth_send_register_code_handler(
 
     let (code_id, raw_code) = state
         .repo
-        .create_registration_verification_code(clean_email)
+        .create_registration_verification_code(&clean_email)
         .await
         .map_err(repo_err)?;
 
@@ -710,7 +707,7 @@ pub async fn auth_send_register_code_handler(
             origin: &origin,
             locale: target_locale,
         },
-        clean_email,
+        &clean_email,
         &raw_code,
         10,
     )
@@ -798,7 +795,7 @@ pub async fn auth_register_handler(
 
     let verified_code_id = state
         .repo
-        .verify_registration_verification_code(clean_email, clean_code)
+        .verify_registration_verification_code(&clean_email, clean_code)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?;
 
@@ -812,7 +809,7 @@ pub async fn auth_register_handler(
         .register_local_account(
             clean_username,
             body.display_name.trim(),
-            clean_email,
+            &clean_email,
             &body.password,
             desired_role,
         )
@@ -895,7 +892,7 @@ pub async fn forgot_password_handler(
 
     if let Some((user, raw_token, raw_otp)) = state
         .repo
-        .create_password_reset_token(clean_email)
+        .create_password_reset_token(&clean_email)
         .await
         .map_err(repo_err)?
     {
@@ -951,7 +948,7 @@ pub async fn verify_reset_otp_handler(
     }
     let reset_token = state
         .repo
-        .verify_password_reset_otp(clean_email, clean_code)
+        .verify_password_reset_otp(&clean_email, clean_code)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?;
     Ok(Json(serde_json::json!({
@@ -971,7 +968,7 @@ pub async fn reset_password_handler(
         let clean_email = validate_email(&body.email)?;
         state
             .repo
-            .consume_password_reset_otp(clean_email, body.otp_code.trim(), &body.new_password)
+            .consume_password_reset_otp(&clean_email, body.otp_code.trim(), &body.new_password)
             .await
             .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?
     } else if !body.token.trim().is_empty() {
@@ -1074,7 +1071,7 @@ pub async fn send_email_change_code_handler(
 
     if state
         .repo
-        .is_email_taken_by_other(clean_email, user.id)
+        .is_email_taken_by_other(&clean_email, user.id)
         .await
         .map_err(repo_err)?
     {
@@ -1123,7 +1120,7 @@ pub async fn send_email_change_code_handler(
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
-    let (raw_code, code_hash) = generate_email_verification_code(clean_email);
+    let (raw_code, code_hash) = generate_email_verification_code(&clean_email);
     send_email_change_code_email(
         &smtp_cfg,
         &smtp_pw,
@@ -1134,7 +1131,7 @@ pub async fn send_email_change_code_handler(
             locale: target_locale,
         },
         &user.display_name,
-        clean_email,
+        &clean_email,
         &raw_code,
         10,
     )
@@ -1151,7 +1148,7 @@ pub async fn send_email_change_code_handler(
         map.insert(
             user.id,
             PendingEmailChangeOtp {
-                new_email: clean_email.to_string(),
+                new_email: clean_email,
                 code_hash,
                 attempts: 0,
                 created_at: now,
@@ -1183,7 +1180,7 @@ pub async fn verify_email_change_handler(
     }
 
     let now = Utc::now();
-    let submitted_hash = hash_email_verification_code(clean_email, clean_code);
+    let submitted_hash = hash_email_verification_code(&clean_email, clean_code);
     {
         let mut map = state.email_change_otps.lock().await;
         let Some(entry) = map.get_mut(&user.id) else {
@@ -1199,7 +1196,7 @@ pub async fn verify_email_change_handler(
                 "Verification code has expired. Please request a new code.",
             ));
         }
-        if !entry.new_email.eq_ignore_ascii_case(clean_email) {
+        if !entry.new_email.eq_ignore_ascii_case(&clean_email) {
             return Err(ApiError::new(
                 ErrorCode::VerificationCodeInvalid,
                 "Email address does not match the verification code.",
@@ -1220,7 +1217,7 @@ pub async fn verify_email_change_handler(
 
     let updated = state
         .repo
-        .update_user_email(user.id, clean_email)
+        .update_user_email(user.id, &clean_email)
         .await
         .map_err(repo_err)?;
 
@@ -1600,7 +1597,7 @@ pub async fn oauth_callback_handler(
                 subject,
                 suggested_username,
                 display_name: onboarding_display_name,
-                email: email.trim().to_string(),
+                email: validate_and_normalize_email(&email).unwrap_or_default(),
                 oauth_avatar_url: avatar_url.trim().to_string(),
                 expires_at: now + 900,
             },
@@ -1697,7 +1694,7 @@ pub async fn oauth_complete_registration_handler(
             &onboarding.subject,
             clean_username,
             body.display_name.trim(),
-            clean_email,
+            &clean_email,
             chosen_role,
             &body.avatar_source,
             &onboarding.oauth_avatar_url,

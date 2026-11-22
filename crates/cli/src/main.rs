@@ -213,6 +213,11 @@ async fn main() -> Result<()> {
                 }
             };
 
+            let clean_email = icehandnote_core::auth::validate_and_normalize_email(&email)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("请输入有效的邮箱地址（例如 admin@example.com）")
+                })?;
+
             let db_url_opt = database_url
                 .or_else(|| env::var("DATABASE_URL").ok())
                 .map(|s| s.trim().to_string())
@@ -223,7 +228,7 @@ async fn main() -> Result<()> {
                 repo.upsert_local_account(
                     username.trim(),
                     display_name.as_deref().unwrap_or(username.trim()),
-                    email.trim(),
+                    &clean_email,
                     role,
                     &password,
                 )
@@ -248,7 +253,7 @@ async fn main() -> Result<()> {
                 repo.upsert_local_account(
                     username.trim(),
                     display_name.as_deref().unwrap_or(username.trim()),
-                    email.trim(),
+                    &clean_email,
                     role,
                     &password,
                 )

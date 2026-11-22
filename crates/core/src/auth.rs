@@ -171,6 +171,135 @@ pub fn normalize_supported_locale(raw: Option<&str>, fallback: &str) -> &'static
     pick(fallback).unwrap_or("en")
 }
 
+/// Maximum accepted email address length matching database `VARCHAR(180)` storage limits.
+pub const MAX_EMAIL_LEN: usize = 180;
+
+fn is_valid_email_atext(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'/'
+                | b'='
+                | b'?'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+        )
+}
+
+/// Validate a bare RFC 5321/5322/1035/5891 email `addr-spec` and canonicalize it
+/// (trims whitespace, preserves local-part case, lowercases the DNS domain).
+pub fn validate_and_normalize_email(raw: &str) -> Option<String> {
+    let clean = raw.trim();
+    if clean.is_empty() || clean.len() > MAX_EMAIL_LEN {
+        return None;
+    }
+    if clean.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+
+    let (local, domain) = clean.split_once('@')?;
+    if domain.contains('@') {
+        return None;
+    }
+
+    if local.is_empty()
+        || local.len() > 64
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || !local.bytes().all(|b| b == b'.' || is_valid_email_atext(b))
+    {
+        return None;
+    }
+
+    if domain.len() < 3
+        || domain.len() > 253
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+    {
+        return None;
+    }
+
+    let domain_lower = domain.to_ascii_lowercase();
+    let labels: Vec<&str> = domain_lower.split('.').collect();
+    if labels.len() < 2 {
+        return None;
+    }
+
+    for &label in &labels {
+        let bytes = label.as_bytes();
+        if bytes.is_empty() || bytes.len() > 63 {
+            return None;
+        }
+        if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+            return None;
+        }
+        if !bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-') {
+            return None;
+        }
+        if label.starts_with("xn--") && (label.len() < 6 || label[4..].starts_with('-')) {
+            return None;
+        }
+    }
+
+    let tld = *labels.last()?;
+    if tld.len() < 2 || tld.len() > 63 {
+        return None;
+    }
+    if matches!(tld, "localhost" | "local" | "invalid") {
+        return None;
+    }
+    let valid_tld = tld.bytes().all(|b| b.is_ascii_alphabetic())
+        || (tld.starts_with("xn--")
+            && tld.len() >= 6
+            && !tld[4..].starts_with('-')
+            && tld[4..].bytes().any(|b| b.is_ascii_alphabetic()));
+    if !valid_tld {
+        return None;
+    }
+
+    Some(format!("{local}@{domain_lower}"))
+}
+
+/// Returns `true` when `raw` parses as a syntactically valid routable `addr-spec` email.
+pub fn is_valid_email(raw: &str) -> bool {
+    validate_and_normalize_email(raw).is_some()
+}
+
+/// Returns `true` when an email is both valid AND not an RFC 2606 / RFC 6761 documentation,
+/// test, or Null-MX sinkhole address (`@localhost`, `.invalid`, `.test`, `example.com`, etc.),
+/// so automatic background notifications are skipped cleanly.
+pub fn is_deliverable_email(raw: &str) -> bool {
+    let Some(norm) = validate_and_normalize_email(raw) else {
+        return false;
+    };
+    let Some((_, domain_lower)) = norm.split_once('@') else {
+        return false;
+    };
+    let is_reserved_sinkhole = matches!(
+        domain_lower,
+        "example.com" | "example.net" | "example.org"
+    ) || domain_lower.ends_with(".example.com")
+        || domain_lower.ends_with(".example.net")
+        || domain_lower.ends_with(".example.org")
+        || domain_lower.ends_with(".example")
+        || domain_lower.ends_with(".test");
+    !is_reserved_sinkhole
+}
+
 /// Mask an email address for UI hints (e.g. `alice@example.com` -> `al***@example.com`).
 pub fn mask_email_address(email: &str) -> String {
     let trimmed = email.trim();
@@ -572,5 +701,93 @@ mod tests {
             sanitize_internal_return_path(Some("//evil.example.com"), "zh-CN"),
             "/zh-CN"
         );
+    }
+
+    #[test]
+    fn validates_normalizes_and_checks_deliverable_emails() {
+        // Valid formats & canonical normalization
+        assert_eq!(
+            validate_and_normalize_email("  Alice+notes@Example.COM  ").as_deref(),
+            Some("Alice+notes@example.com")
+        );
+        assert_eq!(
+            validate_and_normalize_email("user.name_1-2!#$%&'*+/=?^`{|}~@sub.domain.co.uk")
+                .as_deref(),
+            Some("user.name_1-2!#$%&'*+/=?^`{|}~@sub.domain.co.uk")
+        );
+        assert_eq!(
+            validate_and_normalize_email("a@x.com").as_deref(),
+            Some("a@x.com")
+        );
+        assert_eq!(
+            validate_and_normalize_email("hi@t.co").as_deref(),
+            Some("hi@t.co")
+        );
+        assert_eq!(
+            validate_and_normalize_email("dev@XN--55QX5D.XN--FIQS8S").as_deref(),
+            Some("dev@xn--55qx5d.xn--fiqs8s")
+        );
+
+        // Invalid syntax / non-routable sinkholes
+        let invalid_cases = [
+            "",
+            "   ",
+            "plainaddress",
+            "@example.com",
+            "alice@",
+            "a@b@example.com",
+            "user@localhost",
+            "user@gm",
+            "a@b",
+            "user@gmail.c",
+            "user@127.0.0.1",
+            "user@foo.123",
+            "user@gmail.c0m",
+            ".alice@example.com",
+            "alice.@example.com",
+            "al..ice@example.com",
+            "alice@.example.com",
+            "alice@example..com",
+            "alice@example.com.",
+            "alice@-example.com",
+            "alice@example-.com",
+            "alice@xn--.com",
+            "alice@sub.xn---123",
+            "wp-1@users.sso.invalid",
+            "alice@printer.local",
+            "alice@app.localhost",
+            "alice\r\nBcc:evil@example.com",
+            "alice bob@example.com",
+            "<alice@example.com>",
+            "alice＠example.com",
+            "alice@example。com",
+        ];
+        for bad in invalid_cases {
+            assert!(
+                !is_valid_email(bad),
+                "expected `{bad}` to be rejected as invalid email"
+            );
+        }
+
+        // Length limits
+        let ok_64_local = format!("{}@example.com", "a".repeat(64));
+        assert!(is_valid_email(&ok_64_local));
+        let bad_65_local = format!("{}@example.com", "a".repeat(65));
+        assert!(!is_valid_email(&bad_65_local));
+        let bad_64_label = format!("a@{}.com", "b".repeat(64));
+        assert!(!is_valid_email(&bad_64_label));
+        let over_180_total = format!("{}@{}.com", "a".repeat(50), "b".repeat(130));
+        assert!(over_180_total.len() > MAX_EMAIL_LEN);
+        assert!(!is_valid_email(&over_180_total));
+
+        // Deliverability filter
+        assert!(!is_deliverable_email("admin@example.com"));
+        assert!(!is_deliverable_email("sub@mail.example.org"));
+        assert!(!is_deliverable_email("qa@sandbox.example"));
+        assert!(!is_deliverable_email("qa@staging.test"));
+        assert!(!is_deliverable_email("admin@localhost"));
+        assert!(!is_deliverable_email("wp-1@users.sso.invalid"));
+        assert!(is_deliverable_email("noreply@icehandnote.dev"));
+        assert!(is_deliverable_email("Alice+tag@Gmail.COM"));
     }
 }

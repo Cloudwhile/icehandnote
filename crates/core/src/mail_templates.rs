@@ -1,4 +1,4 @@
-use crate::auth::normalize_supported_locale;
+use crate::auth::{normalize_supported_locale, validate_and_normalize_email};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +96,8 @@ impl SmtpSettingsDto {
         };
         self.username = self.username.trim().chars().take(255).collect();
         self.from_name = self.from_name.trim().chars().take(80).collect();
-        self.from_email = self.from_email.trim().chars().take(160).collect();
+        self.from_email = validate_and_normalize_email(&self.from_email)
+            .unwrap_or_else(|| self.from_email.trim().chars().take(180).collect());
         self.email_footer_text = crate::sanitize_email_footer_html(&self.email_footer_text, 1200);
         self.register_code_subject = self.register_code_subject.trim().to_string();
         self.register_code_html = self.register_code_html.trim().to_string();

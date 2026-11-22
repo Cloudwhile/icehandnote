@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use icehandnote_core::{
+    auth::is_valid_email,
     mail_templates::{
         build_email_logo_html, default_localized_template, localize_anomaly_reason,
         render_mail_html, render_mail_subject, resolve_email_footer_template, SmtpSettingsDto,
@@ -27,7 +28,7 @@ pub struct MailBrandContext<'a> {
 }
 
 pub fn is_smtp_ready(smtp: &SmtpSettingsDto) -> bool {
-    smtp.enabled && !smtp.host.trim().is_empty() && !smtp.from_email.trim().is_empty()
+    smtp.enabled && !smtp.host.trim().is_empty() && is_valid_email(&smtp.from_email)
 }
 
 /// Derive a strictly RFC 5321-compliant ASCII EHLO domain from the sender email so strict
