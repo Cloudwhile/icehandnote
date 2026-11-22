@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
+import { savePendingOAuthOtpChallenge } from '../../lib/passkeys';
 import type {
   AvatarSource,
   LocaleCode,
@@ -163,12 +164,19 @@ export function OAuthOnboardingPanel({
     if (submitting || !onboardingToken) return;
     setSubmitting(true);
     try {
-      const session = await api.bindExistingOAuth({
+      const res = await api.bindExistingOAuth({
         onboarding_token: onboardingToken,
         identifier: bindIdentifier.trim(),
         password: bindPassword,
+        locale,
       });
-      onSuccess(session.user, extAuth.oauthBoundSuccessMsg);
+      if (res.requires_otp) {
+        savePendingOAuthOtpChallenge(res);
+        toast.warning(extAuth.anomalyTitle);
+        navigate(`/${locale}/auth/login?otp_challenge=1`, { replace: true });
+        return;
+      }
+      onSuccess(res.user, extAuth.oauthBoundSuccessMsg);
     } catch (err) {
       toast.error(err);
     } finally {

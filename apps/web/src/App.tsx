@@ -328,11 +328,23 @@ function LocaleShellInner({
 
     let active = true;
     void api
-      .verifySsoToken(ssoToken)
-      .then((session) => {
+      .verifySsoToken(ssoToken, locale)
+      .then((res) => {
         if (!active) return;
-        updateUser(session.user);
-        toast.success(extAuth.signedInWelcomeMsg(session.user.display_name));
+        if (res.requires_otp) {
+          savePendingOAuthOtpChallenge(res);
+          toast.warning(extAuth.anomalyTitle);
+          const ret = location.pathname.startsWith(`/${locale}/auth`)
+            ? `/${locale}`
+            : location.pathname;
+          navigate(
+            `/${locale}/auth/login?otp_challenge=1&return_to=${encodeURIComponent(ret)}`,
+            { replace: true },
+          );
+          return;
+        }
+        updateUser(res.user);
+        toast.success(extAuth.signedInWelcomeMsg(res.user.display_name));
         stripQueryParams(['sso_token']);
       })
       .catch((err) => {
@@ -347,7 +359,7 @@ function LocaleShellInner({
     return () => {
       active = false;
     };
-  }, [location.search, extAuth, stripQueryParams, toast, updateUser]);
+  }, [location.pathname, location.search, locale, extAuth, navigate, stripQueryParams, toast, updateUser]);
 
   // 3. Handle OAuth callback query parameters (`oauth_ticket`, `oauth_onboarding`, `oauth_bound`, `oauth_error`)
   //    and password reset link (`reset_token`)

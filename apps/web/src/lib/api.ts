@@ -47,16 +47,33 @@ const LEGACY_USER_LEARNER_KEY = 'stepnote_user_learner_key';
 const USER_PROFILE_CACHE_KEY = 'icehandnote_user_profile_cache';
 const DEVICE_ID_KEY = 'icehandnote_device_id';
 
+function generateRandomHex16(): string {
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+  }
+  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.slice(0, 16);
+}
+
+let volatileDeviceId: string | null = null;
+
 export function getClientDeviceId(): string {
   try {
-    let existing = localStorage.getItem(DEVICE_ID_KEY);
-    if (!existing) {
-      existing = `dev_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    let existing = localStorage.getItem(DEVICE_ID_KEY)?.trim() ?? '';
+    if (!existing || existing === 'dev_browser') {
+      existing = `dev_${generateRandomHex16()}`;
       localStorage.setItem(DEVICE_ID_KEY, existing);
     }
     return existing;
   } catch {
-    return 'dev_browser';
+    volatileDeviceId ??= `dev_${generateRandomHex16()}`;
+    return volatileDeviceId;
   }
 }
 
@@ -640,8 +657,9 @@ export const api = {
     onboarding_token: string;
     identifier: string;
     password: string;
-  }) => {
-    const res = await fetchJson<AuthSessionResponse>(
+    locale?: LocaleCode;
+  }): Promise<LoginResultResponse> => {
+    const res = await fetchJson<LoginResultResponse>(
       '/api/v1/auth/oauth/bind-existing',
       {
         method: 'POST',
@@ -651,7 +669,9 @@ export const api = {
         }),
       },
     );
-    saveAuthSession(res);
+    if (!res.requires_otp) {
+      saveAuthSession(res);
+    }
     return res;
   },
 
@@ -747,15 +767,21 @@ export const api = {
     return res;
   },
 
-  verifySsoToken: async (ssoToken: string) => {
-    const res = await fetchJson<AuthSessionResponse>('/api/v1/auth/sso/verify', {
+  verifySsoToken: async (
+    ssoToken: string,
+    locale?: LocaleCode,
+  ): Promise<LoginResultResponse> => {
+    const res = await fetchJson<LoginResultResponse>('/api/v1/auth/sso/verify', {
       method: 'POST',
       body: JSON.stringify({
         sso_token: ssoToken,
         anonymous_learner_id: getAnonymousLearnerId(),
+        locale,
       }),
     });
-    saveAuthSession(res);
+    if (!res.requires_otp) {
+      saveAuthSession(res);
+    }
     return res;
   },
 
