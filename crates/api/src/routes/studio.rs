@@ -2,21 +2,23 @@ use crate::{
     error::ApiError,
     mailer::{is_smtp_ready, send_collaborator_invite_email, MailBrandContext},
     state::{
-        detect_external_origin, extract_bearer_token, internal_err, repo_err, repo_err_or,
-        require_admin, require_authenticated_user, require_author_or_admin,
+        check_invite_rate_limit, detect_external_origin, extract_bearer_token, internal_err,
+        optional_authenticated_user, repo_err, repo_err_or, require_admin,
+        require_authenticated_user, require_author_or_admin, require_studio_access,
         resolve_request_locale, AppState,
     },
 };
 use axum::{
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
 use icehandnote_core::{
     auth::{
-        format_step_markdown_file, percent_encode_component, CollaboratorInviteDto,
-        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, UserProfileDto,
+        format_step_markdown_file, normalize_collaborator_role, normalize_locale_scope,
+        percent_encode_component, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
+        SaveStudioStepInput, UserProfileDto,
     },
     compile_notebook_markdown,
     error::ErrorCode,
@@ -25,6 +27,33 @@ use icehandnote_db::TutorialRepository;
 use serde::{Deserialize, Serialize};
 use std::env;
 use uuid::Uuid;
+
+fn extract_if_match(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn if_none_match_matches(headers: &HeaderMap, current_etag: &str) -> bool {
+    if current_etag.is_empty() {
+        return false;
+    }
+    let Some(raw) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    fn strip_weak(s: &str) -> &str {
+        s.trim().strip_prefix("W/").unwrap_or(s.trim()).trim()
+    }
+    let cur = strip_weak(current_etag);
+    raw.split(',')
+        .map(str::trim)
+        .any(|c| c == "*" || strip_weak(c) == cur)
+}
 
 #[derive(Deserialize)]
 pub struct StudioPreviewBody {
@@ -48,6 +77,10 @@ pub struct UpdateCheckResponse {
 #[derive(Deserialize)]
 pub struct CreateInviteBody {
     pub email: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub locale_scope: Vec<String>,
     #[serde(default)]
     pub locale: Option<String>,
 }
@@ -76,15 +109,27 @@ pub struct AcceptInviteResponse {
     pub user: Option<UserProfileDto>,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateCollaboratorRoleBody {
+    pub role: String,
+    #[serde(default)]
+    pub locale_scope: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TransferOwnerBody {
+    pub target_user_id: Uuid,
+}
+
 pub async fn studio_overview_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(locale): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _author = require_author_or_admin(&state, &headers).await?;
+    let viewer = require_studio_access(&state, &headers).await?;
     let tracks = state
         .repo
-        .studio_list_tracks(&locale)
+        .studio_list_tracks(&viewer, &locale)
         .await
         .map_err(repo_err)?;
     Ok(Json(tracks))
@@ -94,34 +139,53 @@ pub async fn studio_get_step_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath((track, chapter, step, locale)): AxumPath<(String, String, String, String)>,
-) -> Result<impl IntoResponse, ApiError> {
-    let viewer = require_author_or_admin(&state, &headers).await?;
+) -> Result<axum::response::Response, ApiError> {
+    let viewer = require_studio_access(&state, &headers).await?;
     let dto = state
         .repo
         .studio_get_step_editor(&viewer, &track, &chapter, &step, &locale)
         .await
         .map_err(repo_err)?;
-    Ok(Json(dto))
+
+    let mut resp_headers = HeaderMap::new();
+    if !dto.etag.is_empty() {
+        if let Ok(hv) = HeaderValue::from_str(&dto.etag) {
+            resp_headers.insert(header::ETAG, hv);
+        }
+        if if_none_match_matches(&headers, &dto.etag) {
+            return Ok((StatusCode::NOT_MODIFIED, resp_headers).into_response());
+        }
+    }
+    Ok((StatusCode::OK, resp_headers, Json(dto)).into_response())
 }
 
 pub async fn studio_save_step_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<SaveStudioStepInput>,
-) -> Result<impl IntoResponse, ApiError> {
-    let author = require_author_or_admin(&state, &headers).await?;
+    Json(mut input): Json<SaveStudioStepInput>,
+) -> Result<axum::response::Response, ApiError> {
+    let author = require_studio_access(&state, &headers).await?;
     if input.title.trim().is_empty() || input.step_slug.trim().is_empty() {
         return Err(ApiError::new(
             ErrorCode::TitleOrSlugRequired,
             "Title and article slug are required.",
         ));
     }
+    if let Some(if_match) = extract_if_match(&headers) {
+        input.expected_etag = Some(if_match);
+    }
     let saved = state
         .repo
-        .studio_save_step(&author, input, &state.content_dir)
+        .studio_save_step(&author, input, &state.content_dir, true)
         .await
         .map_err(repo_err)?;
-    Ok(Json(saved))
+    let mut resp_headers = HeaderMap::new();
+    if !saved.etag.is_empty() {
+        if let Ok(hv) = HeaderValue::from_str(&saved.etag) {
+            resp_headers.insert(header::ETAG, hv);
+        }
+    }
+    Ok((StatusCode::OK, resp_headers, Json(saved)).into_response())
 }
 
 pub async fn studio_delete_step_handler(
@@ -199,7 +263,7 @@ pub async fn studio_preview_handler(
     headers: HeaderMap,
     Json(body): Json<StudioPreviewBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _author = require_author_or_admin(&state, &headers).await?;
+    let _member = require_studio_access(&state, &headers).await?;
     let formatted = format_step_markdown_file(
         &body.title,
         &body.summary,
@@ -221,11 +285,41 @@ pub async fn create_collaborator_invite_handler(
     headers: HeaderMap,
     AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
     Json(body): Json<CreateInviteBody>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let actor = require_author_or_admin(&state, &headers).await?;
+
+    let idem_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(|k| format!("{}:{track}/{chapter}/{step}:{k}", actor.id));
+
+    if let Some(ref cache_key) = idem_key {
+        let now = chrono::Utc::now();
+        let mut cache = state.invite_idempotency.lock().await;
+        cache.retain(|_, (_, exp)| *exp > now);
+        if let Some((cached_json, _)) = cache.get(cache_key) {
+            return Ok((StatusCode::CREATED, Json(cached_json.clone())).into_response());
+        }
+    }
+
+    check_invite_rate_limit(&state, actor.id).await?;
+
+    let role = normalize_collaborator_role(body.role.as_deref());
+    let locale_scope = normalize_locale_scope(&body.locale_scope);
+
     let (invite, raw_token, article_title) = state
         .repo
-        .create_collaborator_invite(&actor, &track, &chapter, &step, &body.email)
+        .create_collaborator_invite(
+            &actor,
+            &track,
+            &chapter,
+            &step,
+            &body.email,
+            &role,
+            &locale_scope,
+        )
         .await
         .map_err(repo_err)?;
 
@@ -237,8 +331,9 @@ pub async fn create_collaborator_invite_handler(
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
     let origin = detect_external_origin(&headers);
+    // RFC 9700 §4.3.2: Pass sensitive single-use invite token in URL Fragment (never query string / server logs / Referer)
     let invite_url = format!(
-        "{origin}/{target_locale}?collab_invite={}",
+        "{origin}/{target_locale}/invite#token={}",
         percent_encode_component(&raw_token)
     );
 
@@ -273,15 +368,35 @@ pub async fn create_collaborator_invite_handler(
         }
     }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateInviteResponse {
-            invite,
-            invite_url,
-            email_sent,
-            email_error,
-        }),
-    ))
+    let payload = CreateInviteResponse {
+        invite,
+        invite_url,
+        email_sent,
+        email_error,
+    };
+
+    if let Some(cache_key) = idem_key {
+        if let Ok(val) = serde_json::to_value(&payload) {
+            let mut cache = state.invite_idempotency.lock().await;
+            cache.insert(cache_key, (val, chrono::Utc::now() + chrono::Duration::hours(24)));
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(payload)).into_response())
+}
+
+pub async fn preview_collaborator_invite_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AcceptInviteBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let viewer = optional_authenticated_user(&state, &headers).await;
+    let preview = state
+        .repo
+        .preview_collaborator_invite(viewer.as_ref(), body.token.trim())
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(preview))
 }
 
 pub async fn revoke_collaborator_invite_handler(
@@ -308,7 +423,7 @@ pub async fn accept_collaborator_invite_handler(
         .repo
         .accept_collaborator_invite(&user, body.token.trim())
         .await
-        .map_err(|e| repo_err_or(e, ErrorCode::InviteInvalid))?;
+        .map_err(repo_err)?;
 
     let refreshed_user = if let Some(tok) = extract_bearer_token(&headers) {
         state.repo.get_user_by_session(&tok).await.ok().flatten()
@@ -337,6 +452,121 @@ pub async fn remove_step_collaborator_handler(
         .await
         .map_err(repo_err)?;
     Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+pub async fn update_step_collaborator_role_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step, user_id)): AxumPath<(String, String, String, Uuid)>,
+    Json(body): Json<UpdateCollaboratorRoleBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = require_author_or_admin(&state, &headers).await?;
+    let updated = state
+        .repo
+        .update_step_collaborator_role(
+            &actor,
+            &track,
+            &chapter,
+            &step,
+            user_id,
+            &body.role,
+            &body.locale_scope,
+        )
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
+pub async fn leave_step_collaboration_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let left = state
+        .repo
+        .leave_step_collaboration(&user, &track, &chapter, &step)
+        .await
+        .map_err(repo_err)?;
+    let refreshed_user = if let Some(tok) = extract_bearer_token(&headers) {
+        state.repo.get_user_by_session(&tok).await.ok().flatten()
+    } else {
+        None
+    };
+    Ok(Json(serde_json::json!({ "left": left, "user": refreshed_user })))
+}
+
+pub async fn transfer_step_ownership_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+    Json(body): Json<TransferOwnerBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = require_author_or_admin(&state, &headers).await?;
+    let transferred = state
+        .repo
+        .transfer_step_ownership(&actor, &track, &chapter, &step, body.target_user_id)
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(serde_json::json!({ "transferred": transferred })))
+}
+
+pub async fn list_step_revisions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step, locale)): AxumPath<(String, String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let viewer = require_studio_access(&state, &headers).await?;
+    let revisions = state
+        .repo
+        .list_step_revisions(&viewer, &track, &chapter, &step, &locale)
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(revisions))
+}
+
+pub async fn restore_step_revision_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step, locale, rev_id)): AxumPath<(String, String, String, String, Uuid)>,
+) -> Result<axum::response::Response, ApiError> {
+    let actor = require_studio_access(&state, &headers).await?;
+    let expected_etag = extract_if_match(&headers);
+    let saved = state
+        .repo
+        .restore_step_revision(
+            &actor,
+            &track,
+            &chapter,
+            &step,
+            &locale,
+            rev_id,
+            expected_etag.as_deref(),
+            &state.content_dir,
+        )
+        .await
+        .map_err(repo_err)?;
+    let mut resp_headers = HeaderMap::new();
+    if !saved.etag.is_empty() {
+        if let Ok(hv) = HeaderValue::from_str(&saved.etag) {
+            resp_headers.insert(header::ETAG, hv);
+        }
+    }
+    Ok((StatusCode::OK, resp_headers, Json(saved)).into_response())
+}
+
+pub async fn list_step_audit_logs_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let viewer = require_studio_access(&state, &headers).await?;
+    let logs = state
+        .repo
+        .list_step_audit_logs(&viewer, &track, &chapter, &step)
+        .await
+        .map_err(repo_err)?;
+    Ok(Json(logs))
 }
 
 pub(crate) fn parse_semver_key(

@@ -10,6 +10,7 @@ use crate::{
         require_authenticated_user, resolve_request_locale, resolve_webauthn_rp_and_origins,
         AppState, ClientContext, OneTimeOAuthTicket, PendingEmailChangeOtp,
         PendingOAuthAuthorization, PendingOAuthOnboarding, PendingPasskeyCeremony,
+        GUEST_COOKIE_NAME,
     },
 };
 use axum::{
@@ -570,6 +571,7 @@ pub async fn auth_login_handler(
 
 pub async fn auth_login_verify_otp_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoginVerifyOtpRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let clean_code = body.code.trim();
@@ -590,6 +592,7 @@ pub async fn auth_login_verify_otp_handler(
         user_agent,
         device_label,
         device_fingerprint,
+        guest_cookie_raw: extract_cookie_value(&headers, GUEST_COOKIE_NAME),
     };
     let session =
         finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &verified_ctx)

@@ -1,18 +1,20 @@
 use crate::error::ApiError;
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, HeaderValue};
 use icehandnote_core::{
     auth::{
         compute_device_fingerprint, normalize_supported_locale, parse_user_agent_device,
-        percent_encode_component, slugify_oauth_provider_id, BlogSsoClaims, CollaboratorInviteDto,
-        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, SiteSettingsDto,
+        percent_encode_component, slugify_oauth_provider_id, BlogSsoClaims,
+        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
+        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
         StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserProfileDto, UserRole,
         UserSessionDto,
     },
+    crypto::{sign_guest_learner_cookie, verify_guest_learner_cookie},
     error::ErrorCode,
     mail_templates::SmtpSettingsDto,
     webauthn::{StoredPasskeyCredential, UserPasskeyDto},
-    ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, SearchHitDto, StepDetailDto,
-    TrackSummaryDto, UserMarginNoteDto,
+    ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, ListMarginNotesFilter,
+    SearchHitDto, StepDetailDto, TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
 };
 use icehandnote_db::{content_loader::ContentBundle, TutorialRepository};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,12 @@ pub type OnboardingMap = HashMap<String, PendingOAuthOnboarding>;
 pub type CooldownMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 pub type EmailChangeOtpMap = HashMap<Uuid, PendingEmailChangeOtp>;
 pub type PasskeyCeremonyMap = HashMap<Uuid, PendingPasskeyCeremony>;
+pub type NoteIdempotencyMap = HashMap<String, (UserMarginNoteDto, chrono::DateTime<chrono::Utc>)>;
+pub type NoteRateLimitMap = HashMap<String, Vec<chrono::DateTime<chrono::Utc>>>;
+pub type InviteIdempotencyMap = HashMap<String, (serde_json::Value, chrono::DateTime<chrono::Utc>)>;
+pub type InviteRateLimitMap = HashMap<Uuid, Vec<chrono::DateTime<chrono::Utc>>>;
+
+pub const GUEST_COOKIE_NAME: &str = "ihn_guest";
 
 #[derive(Clone)]
 pub struct PendingPasskeyCeremony {
@@ -64,6 +72,11 @@ pub struct AppState {
     pub forgot_password_cooldowns: Arc<tokio::sync::Mutex<CooldownMap>>,
     pub email_change_otps: Arc<tokio::sync::Mutex<EmailChangeOtpMap>>,
     pub passkey_ceremonies: Arc<tokio::sync::Mutex<PasskeyCeremonyMap>>,
+    pub note_idempotency: Arc<tokio::sync::Mutex<NoteIdempotencyMap>>,
+    pub note_rate_limits: Arc<tokio::sync::Mutex<NoteRateLimitMap>>,
+    pub invite_idempotency: Arc<tokio::sync::Mutex<InviteIdempotencyMap>>,
+    pub invite_rate_limits: Arc<tokio::sync::Mutex<InviteRateLimitMap>>,
+    pub guest_cookie_secret: String,
     pub blog_sso_secret: String,
     pub blog_origin_url: String,
     pub blog_wp_api_url: Option<String>,
@@ -128,6 +141,9 @@ pub struct RuntimeSecretsConfig {
     pub smtp_password: String,
     #[serde(default)]
     pub smtp: SmtpSettingsDto,
+    /// HMAC-SHA256 signing key for HttpOnly anonymous guest learner cookies (`ihn_guest`).
+    #[serde(default)]
+    pub guest_cookie_secret: String,
 }
 
 impl RuntimeSecretsConfig {
@@ -395,6 +411,16 @@ impl TutorialRepository for DynamicRepository {
         self.current().list_margin_notes(step_id, learner_id).await
     }
 
+    async fn list_margin_notes_filtered(
+        &self,
+        learner_id: &str,
+        filter: &ListMarginNotesFilter,
+    ) -> anyhow::Result<(Vec<UserMarginNoteDto>, usize)> {
+        self.current()
+            .list_margin_notes_filtered(learner_id, filter)
+            .await
+    }
+
     async fn create_margin_note(
         &self,
         input: CreateMarginNoteInput,
@@ -402,8 +428,37 @@ impl TutorialRepository for DynamicRepository {
         self.current().create_margin_note(input).await
     }
 
-    async fn delete_margin_note(&self, note_id: Uuid, learner_id: &str) -> anyhow::Result<bool> {
-        self.current().delete_margin_note(note_id, learner_id).await
+    async fn update_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        input: UpdateMarginNoteInput,
+        expected_etag: Option<&str>,
+    ) -> anyhow::Result<UserMarginNoteDto> {
+        self.current()
+            .update_margin_note(note_id, learner_id, input, expected_etag)
+            .await
+    }
+
+    async fn delete_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+        expected_etag: Option<&str>,
+    ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+        self.current()
+            .delete_margin_note(note_id, learner_id, expected_etag)
+            .await
+    }
+
+    async fn restore_margin_note(
+        &self,
+        note_id: Uuid,
+        learner_id: &str,
+    ) -> anyhow::Result<UserMarginNoteDto> {
+        self.current()
+            .restore_margin_note(note_id, learner_id)
+            .await
     }
 
     async fn sync_bundle(&self, bundle: &ContentBundle) -> anyhow::Result<usize> {
@@ -794,8 +849,12 @@ impl TutorialRepository for DynamicRepository {
             .await
     }
 
-    async fn studio_list_tracks(&self, locale: &str) -> anyhow::Result<Vec<StudioTrackDto>> {
-        self.current().studio_list_tracks(locale).await
+    async fn studio_list_tracks(
+        &self,
+        viewer: &UserProfileDto,
+        locale: &str,
+    ) -> anyhow::Result<Vec<StudioTrackDto>> {
+        self.current().studio_list_tracks(viewer, locale).await
     }
 
     async fn studio_get_step_editor(
@@ -816,9 +875,10 @@ impl TutorialRepository for DynamicRepository {
         author: &UserProfileDto,
         input: SaveStudioStepInput,
         content_dir: &Path,
+        require_if_match: bool,
     ) -> anyhow::Result<StudioStepEditorDto> {
         self.current()
-            .studio_save_step(author, input, content_dir)
+            .studio_save_step(author, input, content_dir, require_if_match)
             .await
     }
 
@@ -881,9 +941,29 @@ impl TutorialRepository for DynamicRepository {
         chapter_slug: &str,
         step_slug: &str,
         email: &str,
+        role: &str,
+        locale_scope: &[String],
     ) -> anyhow::Result<(CollaboratorInviteDto, String, String)> {
         self.current()
-            .create_collaborator_invite(actor, track_slug, chapter_slug, step_slug, email)
+            .create_collaborator_invite(
+                actor,
+                track_slug,
+                chapter_slug,
+                step_slug,
+                email,
+                role,
+                locale_scope,
+            )
+            .await
+    }
+
+    async fn preview_collaborator_invite(
+        &self,
+        viewer: Option<&UserProfileDto>,
+        raw_token: &str,
+    ) -> anyhow::Result<InvitePreviewDto> {
+        self.current()
+            .preview_collaborator_invite(viewer, raw_token)
             .await
     }
 
@@ -917,6 +997,104 @@ impl TutorialRepository for DynamicRepository {
     ) -> anyhow::Result<bool> {
         self.current()
             .remove_step_collaborator(actor, track_slug, chapter_slug, step_slug, target_user_id)
+            .await
+    }
+
+    async fn update_step_collaborator_role(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+        role: &str,
+        locale_scope: &[String],
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .update_step_collaborator_role(
+                actor,
+                track_slug,
+                chapter_slug,
+                step_slug,
+                target_user_id,
+                role,
+                locale_scope,
+            )
+            .await
+    }
+
+    async fn leave_step_collaboration(
+        &self,
+        user: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .leave_step_collaboration(user, track_slug, chapter_slug, step_slug)
+            .await
+    }
+
+    async fn transfer_step_ownership(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        target_user_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .transfer_step_ownership(actor, track_slug, chapter_slug, step_slug, target_user_id)
+            .await
+    }
+
+    async fn list_step_revisions(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+    ) -> anyhow::Result<Vec<StepRevisionDto>> {
+        self.current()
+            .list_step_revisions(viewer, track_slug, chapter_slug, step_slug, locale)
+            .await
+    }
+
+    async fn restore_step_revision(
+        &self,
+        actor: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+        locale: &str,
+        revision_id: Uuid,
+        expected_etag: Option<&str>,
+        content_dir: &Path,
+    ) -> anyhow::Result<StudioStepEditorDto> {
+        self.current()
+            .restore_step_revision(
+                actor,
+                track_slug,
+                chapter_slug,
+                step_slug,
+                locale,
+                revision_id,
+                expected_etag,
+                content_dir,
+            )
+            .await
+    }
+
+    async fn list_step_audit_logs(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> anyhow::Result<Vec<CollaborationAuditLogDto>> {
+        self.current()
+            .list_step_audit_logs(viewer, track_slug, chapter_slug, step_slug)
             .await
     }
 
@@ -1052,6 +1230,111 @@ pub struct ClientContext {
     pub user_agent: String,
     pub device_label: String,
     pub device_fingerprint: String,
+    pub guest_cookie_raw: Option<String>,
+}
+
+pub fn extract_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    for val in headers.get_all(header::COOKIE) {
+        let Ok(raw) = val.to_str() else { continue };
+        for pair in raw.split(';') {
+            let trimmed = pair.trim();
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == cookie_name {
+                    let clean = v.trim();
+                    if !clean.is_empty() {
+                        return Some(clean.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the server-authoritative owner key for `/api/v1/me/*` endpoints (RFC 6750 + RFC 6265bis).
+/// - Authenticated Bearer token -> `Some("user:<uuid>")` (invalid Bearer returns 401).
+/// - Unauthenticated visitor -> verifies HMAC-signed `ihn_guest` HttpOnly cookie -> `Some("guest:<id>")`.
+/// - When `issue_guest_if_missing` is true and no valid cookie exists, mints a fresh signed cookie
+///   and returns its `Set-Cookie` header value.
+/// Never trusts client-supplied `learner_id` parameters.
+pub async fn resolve_me_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    issue_guest_if_missing: bool,
+) -> Result<(Option<String>, Option<HeaderValue>), ApiError> {
+    if let Some(token) = extract_bearer_token(headers) {
+        let user = state
+            .repo
+            .get_user_by_session(&token)
+            .await
+            .map_err(repo_err)?;
+        return match user {
+            Some(u) => {
+                let ip = extract_client_ip(headers, None);
+                let _ = state.repo.touch_session(&token, &ip).await;
+                Ok((Some(format!("user:{}", u.id)), None))
+            }
+            None => Err(ApiError::new(
+                ErrorCode::SessionExpired,
+                "Session has expired or is invalid. Please sign in again.",
+            )),
+        };
+    }
+
+    if let Some(raw_cookie) = extract_cookie_value(headers, GUEST_COOKIE_NAME) {
+        if let Some(guest_id) = verify_guest_learner_cookie(&raw_cookie, &state.guest_cookie_secret)
+        {
+            return Ok((Some(format!("guest:{guest_id}")), None));
+        }
+    }
+
+    if !issue_guest_if_missing {
+        return Ok((None, None));
+    }
+
+    let guest_id = Uuid::new_v4().simple().to_string();
+    let signed = sign_guest_learner_cookie(&guest_id, &state.guest_cookie_secret)
+        .map_err(internal_err)?;
+    let is_https = detect_external_origin(headers).starts_with("https://");
+    let cookie_str = if is_https {
+        format!(
+            "{GUEST_COOKIE_NAME}={signed}; Path=/api/v1; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
+        )
+    } else {
+        format!(
+            "{GUEST_COOKIE_NAME}={signed}; Path=/api/v1; HttpOnly; SameSite=Lax; Max-Age=31536000"
+        )
+    };
+    let set_cookie = HeaderValue::from_str(&cookie_str).map_err(internal_err)?;
+    Ok((Some(format!("guest:{guest_id}")), Some(set_cookie)))
+}
+
+/// Sliding-window write rate limiter for notes (30 writes per 60 seconds per owner; RFC 6585 429).
+pub async fn check_note_write_rate_limit(state: &AppState, owner_key: &str) -> Result<(), ApiError> {
+    const WINDOW_SECS: i64 = 60;
+    const MAX_WRITES: usize = 30;
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::seconds(WINDOW_SECS);
+    let mut map = state.note_rate_limits.lock().await;
+    if map.len() > 4096 {
+        map.retain(|_, hits| {
+            hits.retain(|t| *t > cutoff);
+            !hits.is_empty()
+        });
+    }
+    let hits = map.entry(owner_key.to_string()).or_default();
+    hits.retain(|t| *t > cutoff);
+    if hits.len() >= MAX_WRITES {
+        let oldest = hits.first().copied().unwrap_or(now);
+        let retry_after = (WINDOW_SECS - (now - oldest).num_seconds()).max(1);
+        return Err(ApiError::new(
+            ErrorCode::RateLimited,
+            "Too many note updates. Please wait a moment and try again.",
+        )
+        .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
+    }
+    hits.push(now);
+    Ok(())
 }
 
 pub fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
@@ -1088,11 +1371,13 @@ pub fn extract_client_context(
         .map(str::trim);
     let (device_label, _) = parse_user_agent_device(&user_agent);
     let device_fingerprint = compute_device_fingerprint(client_device_id, &user_agent);
+    let guest_cookie_raw = extract_cookie_value(headers, GUEST_COOKIE_NAME);
     ClientContext {
         ip_address,
         user_agent,
         device_label,
         device_fingerprint,
+        guest_cookie_raw,
     }
 }
 
@@ -1148,6 +1433,56 @@ pub async fn require_authenticated_user(
     }
 }
 
+/// Sliding-window rate limiter for collaboration invitations (10 invites per 10 minutes per actor; RFC 6585 429).
+pub async fn check_invite_rate_limit(state: &AppState, actor_id: Uuid) -> Result<(), ApiError> {
+    const WINDOW_SECS: i64 = 600;
+    const MAX_INVITES: usize = 10;
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::seconds(WINDOW_SECS);
+    let mut map = state.invite_rate_limits.lock().await;
+    if map.len() > 2048 {
+        map.retain(|_, hits| {
+            hits.retain(|t| *t > cutoff);
+            !hits.is_empty()
+        });
+    }
+    let hits = map.entry(actor_id).or_default();
+    hits.retain(|t| *t > cutoff);
+    if hits.len() >= MAX_INVITES {
+        let oldest = hits.first().copied().unwrap_or(now);
+        let retry_after = (WINDOW_SECS - (now - oldest).num_seconds()).max(1);
+        return Err(ApiError::new(
+            ErrorCode::RateLimited,
+            "Too many collaboration invitations sent. Please wait before sending another.",
+        )
+        .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
+    }
+    hits.push(now);
+    Ok(())
+}
+
+pub async fn optional_authenticated_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<UserProfileDto> {
+    let token = extract_bearer_token(headers)?;
+    state.repo.get_user_by_session(&token).await.ok().flatten()
+}
+
+pub async fn require_studio_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<UserProfileDto, ApiError> {
+    let user = require_authenticated_user(state, headers).await?;
+    if !user.can_access_studio() {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Author, collaborator, or administrator privileges required.",
+        ));
+    }
+    Ok(user)
+}
+
 pub async fn require_author_or_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -1183,12 +1518,28 @@ pub async fn finalize_login_session(
     ctx: &ClientContext,
 ) -> Result<AuthSessionResponse, ApiError> {
     let learner_key = format!("user:{}", user.id);
+    // 1. Merge server-verified HttpOnly guest cookie notes/progress first
+    if let Some(ref raw_cookie) = ctx.guest_cookie_raw {
+        if let Some(guest_id) = verify_guest_learner_cookie(raw_cookie, &state.guest_cookie_secret)
+        {
+            let guest_owner = format!("guest:{guest_id}");
+            state
+                .repo
+                .merge_anonymous_learner(&guest_owner, &learner_key)
+                .await
+                .map_err(repo_err)?;
+        }
+    }
+    // 2. Backwards-compatible merge for legacy anonymous learner_* IDs (never user:*)
     if let Some(anon_id) = anon_learner_id {
-        state
-            .repo
-            .merge_anonymous_learner(anon_id, &learner_key)
-            .await
-            .map_err(repo_err)?;
+        let clean_anon = anon_id.trim();
+        if clean_anon.starts_with("learner_") {
+            state
+                .repo
+                .merge_anonymous_learner(clean_anon, &learner_key)
+                .await
+                .map_err(repo_err)?;
+        }
     }
     let _ = state
         .repo

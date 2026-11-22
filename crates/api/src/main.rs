@@ -5,7 +5,7 @@ mod state;
 
 use axum::{
     extract::DefaultBodyLimit,
-    http::{HeaderValue, Method},
+    http::{header, HeaderName, HeaderValue, Method},
     routing::{any, delete, get, patch, post},
     Router,
 };
@@ -239,7 +239,21 @@ async fn main() -> anyhow::Result<()> {
     let uploads_dir = data_dir.join("uploads");
     let _ = std::fs::create_dir_all(&uploads_dir);
     let secrets_path = data_dir.join("runtime-secrets.json");
-    let initial_secrets = RuntimeSecretsConfig::load_or_default(&secrets_path);
+    let mut initial_secrets = RuntimeSecretsConfig::load_or_default(&secrets_path);
+    let guest_cookie_secret = env::var("GUEST_COOKIE_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() >= 24)
+        .unwrap_or_else(|| {
+            if initial_secrets.guest_cookie_secret.len() >= 24 {
+                initial_secrets.guest_cookie_secret.clone()
+            } else {
+                let generated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+                initial_secrets.guest_cookie_secret = generated.clone();
+                let _ = initial_secrets.save(&secrets_path);
+                generated
+            }
+        });
 
     let default_locale = env::var("DEFAULT_LOCALE")
         .ok()
@@ -316,6 +330,11 @@ async fn main() -> anyhow::Result<()> {
         forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        guest_cookie_secret,
         blog_sso_secret,
         blog_origin_url,
         blog_wp_api_url,
@@ -324,6 +343,13 @@ async fn main() -> anyhow::Result<()> {
         http_client: reqwest::Client::new(),
     };
 
+    let exposed_headers = [
+        header::ETAG,
+        header::LOCATION,
+        header::RETRY_AFTER,
+        header::CONTENT_DISPOSITION,
+        HeaderName::from_static("x-total-count"),
+    ];
     let cors = if let Ok(origin) = env::var("CORS_ORIGIN") {
         if let Ok(hv) = origin.parse::<HeaderValue>() {
             CorsLayer::new()
@@ -337,11 +363,12 @@ async fn main() -> anyhow::Result<()> {
                     Method::OPTIONS,
                 ])
                 .allow_headers(Any)
+                .expose_headers(exposed_headers)
         } else {
-            CorsLayer::permissive()
+            CorsLayer::permissive().expose_headers(exposed_headers)
         }
     } else {
-        CorsLayer::permissive()
+        CorsLayer::permissive().expose_headers(exposed_headers)
     };
 
     let web_dist_dir = resolve_web_dist_dir(env_dir.as_deref());
@@ -379,6 +406,10 @@ fn build_router(
         .route("/api/v1/settings", get(routes::public::get_site_settings_handler))
         .route("/api/v1/{locale}/tracks", get(routes::public::list_tracks_handler))
         .route(
+            "/api/v1/{locale}/series/{track}/{step}",
+            get(routes::public::get_series_article_handler),
+        )
+        .route(
             "/api/v1/{locale}/tracks/{track}/steps/{chapter}/{step}",
             get(routes::public::get_step_handler),
         )
@@ -399,8 +430,16 @@ fn build_router(
             get(routes::public::list_notes_handler).post(routes::public::create_note_handler),
         )
         .route(
+            "/api/v1/me/notes/export",
+            get(routes::public::export_notes_handler),
+        )
+        .route(
             "/api/v1/me/notes/{note_id}",
-            delete(routes::public::delete_note_handler),
+            patch(routes::public::update_note_handler).delete(routes::public::delete_note_handler),
+        )
+        .route(
+            "/api/v1/me/notes/{note_id}/restore",
+            post(routes::public::restore_note_handler),
         )
         // Media Upload (Authenticated users + active OAuth onboarding sessions)
         .route(
@@ -536,6 +575,14 @@ fn build_router(
             "/api/v1/studio/steps/{track}/{chapter}/{step}/{locale}",
             get(routes::studio::studio_get_step_handler),
         )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/{locale}/revisions",
+            get(routes::studio::list_step_revisions_handler),
+        )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/{locale}/revisions/{rev_id}/restore",
+            post(routes::studio::restore_step_revision_handler),
+        )
         .route("/api/v1/studio/steps", post(routes::studio::studio_save_step_handler))
         .route(
             "/api/v1/studio/steps/{track}/{chapter}/{step}",
@@ -546,8 +593,25 @@ fn build_router(
             post(routes::studio::create_collaborator_invite_handler),
         )
         .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/collaborators/me",
+            delete(routes::studio::leave_step_collaboration_handler),
+        )
+        .route(
             "/api/v1/studio/steps/{track}/{chapter}/{step}/collaborators/{user_id}",
-            delete(routes::studio::remove_step_collaborator_handler),
+            patch(routes::studio::update_step_collaborator_role_handler)
+                .delete(routes::studio::remove_step_collaborator_handler),
+        )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/transfer-owner",
+            post(routes::studio::transfer_step_ownership_handler),
+        )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/audit-logs",
+            get(routes::studio::list_step_audit_logs_handler),
+        )
+        .route(
+            "/api/v1/studio/invites/preview",
+            post(routes::studio::preview_collaborator_invite_handler),
         )
         .route(
             "/api/v1/studio/invites/accept",
@@ -819,6 +883,11 @@ mod tests {
             forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
             blog_wp_api_url: None,
@@ -1361,12 +1430,12 @@ mod tests {
         let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path.clone()).unwrap();
 
         let owner = repo
-            .register_local_account(
+            .upsert_local_account(
                 "invite_owner",
                 "Invite Owner",
                 "owner@icehandnote.dev",
+                UserRole::Admin,
                 "supersecret123",
-                UserRole::Author,
             )
             .await
             .unwrap();
@@ -1379,6 +1448,8 @@ mod tests {
                     "01-welcome",
                     "01-welcome-to-icehandnote",
                     bad,
+                    "editor",
+                    &[],
                 )
                 .await
                 .unwrap_err();
@@ -1396,11 +1467,913 @@ mod tests {
                 "01-welcome",
                 "01-welcome-to-icehandnote",
                 "  Collab+Notes@Example.COM ",
+                "translator",
+                &["en".to_string()],
             )
             .await
             .unwrap();
         assert_eq!(invite.email, "Collab+Notes@example.com");
+        assert_eq!(invite.role, "translator");
+        assert_eq!(invite.locale_scope, vec!["en".to_string()]);
 
         let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn series_two_level_lookup_and_article_timestamps_work() {
+        let content_dir = resolve_content_dir(None);
+        let store_path = env::temp_dir().join(format!(
+            "icehandnote-series-test-{}.json",
+            Uuid::new_v4()
+        ));
+        let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path.clone()).unwrap();
+
+        let detail = repo
+            .get_step_detail("zh-CN", "getting-started", "-", "01-welcome-to-icehandnote")
+            .await
+            .unwrap()
+            .expect("2-level series lookup must resolve starter chapter");
+        assert_eq!(detail.chapters.len(), 1);
+        assert_eq!(detail.author_name, "IceHandnote");
+        assert_eq!(detail.published_at.to_rfc3339(), "2026-11-22T00:00:00+00:00");
+        assert_eq!(detail.updated_at.to_rfc3339(), "2026-11-22T00:00:00+00:00");
+
+        let mut settings = SiteSettingsDto::default_with_env("zh-CN", "");
+        assert_eq!(settings.stale_article_days, 180);
+        settings.stale_article_days = 9999;
+        let sanitized = settings.sanitize().unwrap();
+        assert_eq!(sanitized.stale_article_days, 3650);
+
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[tokio::test]
+    async fn studio_save_renames_step_slug_on_disk_and_compiles_pixel_blocks() {
+        let src_content = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-slug-rename-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        let ch_dst = tmp_content.join("getting-started").join("01-welcome");
+        std::fs::create_dir_all(&ch_dst).unwrap();
+        std::fs::copy(
+            src_content.join("getting-started").join("track.toml"),
+            tmp_content.join("getting-started").join("track.toml"),
+        )
+        .unwrap();
+        for fname in [
+            "01-welcome-to-icehandnote.zh-CN.md",
+            "01-welcome-to-icehandnote.zh-TW.md",
+            "01-welcome-to-icehandnote.en.md",
+            "01-welcome-to-icehandnote.ja.md",
+        ] {
+            let src = src_content
+                .join("getting-started")
+                .join("01-welcome")
+                .join(fname);
+            if src.exists() {
+                std::fs::copy(&src, ch_dst.join(fname)).unwrap();
+            }
+        }
+
+        let store_path = tmp_root.join("store.json");
+        let repo =
+            LocalSeedRepository::from_content_dir(&tmp_content, store_path.clone()).unwrap();
+        let admin = repo
+            .upsert_local_account(
+                "slug_author",
+                "Slug Author",
+                "slugauthor@icehandnote.dev",
+                UserRole::Admin,
+                "supersecret123",
+            )
+            .await
+            .unwrap();
+
+        let saved = repo
+            .studio_save_step(
+                &admin,
+                icehandnote_core::auth::SaveStudioStepInput {
+                    track_slug: "getting-started".to_string(),
+                    chapter_slug: "-".to_string(),
+                    step_slug: "01-welcome-renamed".to_string(),
+                    previous_step_slug: Some("01-welcome-to-icehandnote".to_string()),
+                    locale: "zh-CN".to_string(),
+                    title: "重命名后的欢迎章".to_string(),
+                    summary: "测试贴纸与 URL Slug 修改".to_string(),
+                    step_number: 1,
+                    estimated_minutes: 3,
+                    synced_revision: 1,
+                    bump_canonical: false,
+                    status: "published".to_string(),
+                    license: "cc-by-4.0".to_string(),
+                    tags: vec!["welcome".to_string()],
+                    body_markdown:
+                        "正文章节。\n\n:::pixel[lightbulb]{align=\"right\" size=\"lg\" caption=\"像素灯泡\"}\n"
+                            .to_string(),
+                    write_to_content_dir: true,
+                    expected_etag: None,
+                    change_note: None,
+                },
+                &tmp_content,
+                false,
+            )
+            .await
+            .expect("renaming step slug must succeed");
+        assert_eq!(saved.step_slug, "01-welcome-renamed");
+
+        // Old slug no longer resolves; new slug resolves with compiled PixelSticker block
+        assert!(repo
+            .get_step_detail("zh-CN", "getting-started", "-", "01-welcome-to-icehandnote")
+            .await
+            .unwrap()
+            .is_none());
+        let detail = repo
+            .get_step_detail("zh-CN", "getting-started", "-", "01-welcome-renamed")
+            .await
+            .unwrap()
+            .expect("renamed slug must resolve");
+        assert!(detail.blocks.iter().any(|b| matches!(
+            b,
+            icehandnote_core::NotebookBlock::PixelSticker { sprite, .. } if sprite == "lightbulb"
+        )));
+
+        // Both active locale and sibling locale markdown files moved on disk
+        assert!(ch_dst.join("01-welcome-renamed.zh-CN.md").exists());
+        assert!(!ch_dst.join("01-welcome-to-icehandnote.zh-CN.md").exists());
+        if src_content
+            .join("getting-started")
+            .join("01-welcome")
+            .join("01-welcome-to-icehandnote.en.md")
+            .exists()
+        {
+            assert!(ch_dst.join("01-welcome-renamed.en.md").exists());
+            assert!(!ch_dst.join("01-welcome-to-icehandnote.en.md").exists());
+        }
+
+        // Creating a second chapter then attempting to steal the renamed slug returns Conflict
+        let _second = repo
+            .studio_save_step(
+                &admin,
+                icehandnote_core::auth::SaveStudioStepInput {
+                    track_slug: "getting-started".to_string(),
+                    chapter_slug: "-".to_string(),
+                    step_slug: "02-second-article".to_string(),
+                    previous_step_slug: None,
+                    locale: "zh-CN".to_string(),
+                    title: "第二章".to_string(),
+                    summary: "冲突测试".to_string(),
+                    step_number: 2,
+                    estimated_minutes: 1,
+                    synced_revision: 1,
+                    bump_canonical: false,
+                    status: "published".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                    body_markdown: "正文".to_string(),
+                    write_to_content_dir: true,
+                    expected_etag: None,
+                    change_note: None,
+                },
+                &tmp_content,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let conflict_err = repo
+            .studio_save_step(
+                &admin,
+                icehandnote_core::auth::SaveStudioStepInput {
+                    track_slug: "getting-started".to_string(),
+                    chapter_slug: "-".to_string(),
+                    step_slug: "01-welcome-renamed".to_string(),
+                    previous_step_slug: Some("02-second-article".to_string()),
+                    locale: "zh-CN".to_string(),
+                    title: "第二章".to_string(),
+                    summary: "冲突测试".to_string(),
+                    step_number: 2,
+                    estimated_minutes: 1,
+                    synced_revision: 1,
+                    bump_canonical: false,
+                    status: "published".to_string(),
+                    license: String::new(),
+                    tags: vec![],
+                    body_markdown: "正文".to_string(),
+                    write_to_content_dir: true,
+                    expected_etag: None,
+                    change_note: None,
+                },
+                &tmp_content,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            ApiError::from_anyhow(conflict_err).code,
+            ErrorCode::Conflict
+        );
+
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn notes_enforce_server_auth_idor_protection_rfc7396_if_match_undo_and_export() {
+        let content_dir = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-notes-rfc-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&content_dir, store_path.clone(), false)
+                .unwrap();
+        let victim = repo
+            .register_local_account("alice_note", "Alice", "alice@example.com", "StrongPass123!", UserRole::Reader)
+            .await
+            .unwrap();
+        let victim_session = repo.create_session(victim.id).await.unwrap();
+
+        let tracks = repo.list_tracks("zh-CN").await.unwrap();
+        let first_step = repo
+            .get_step_detail(
+                "zh-CN",
+                &tracks[0].slug,
+                &tracks[0].first_chapter_slug,
+                &tracks[0].first_step_slug,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let step_id = first_step.step_id;
+
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Authenticated user creates note with Idempotency-Key -> 201 + ETag + Location
+        let create_body = serde_json::json!({
+            "learner_id": "spoofed_client_value",
+            "step_id": step_id,
+            "locale_code": "zh-CN",
+            "block_anchor_id": "p-abc12345",
+            "tone": "violet",
+            "style": "pin",
+            "tag": "idea",
+            "content": "**重要** `cargo test` 笔记",
+            "target": {
+                "source": format!("urn:icehandnote:step:{step_id}:locale:zh-CN"),
+                "source_revision": 1,
+                "selector": [
+                    { "type": "FragmentSelector", "conformsTo": "https://icehandnote.dev/spec/block-id", "value": "p-abc12345" },
+                    { "type": "TextQuoteSelector", "exact": "原文摘录", "prefix": "", "suffix": "" }
+                ]
+            }
+        });
+        let create_resp = client
+            .post(format!("{base}/api/v1/me/notes"))
+            .bearer_auth(&victim_session)
+            .header("idempotency-key", "idem-test-001")
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), reqwest::StatusCode::CREATED);
+        let etag_v1 = create_resp
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(create_resp.headers().get(header::LOCATION).is_some());
+        let created_note: icehandnote_core::UserMarginNoteDto = create_resp.json().await.unwrap();
+        assert_eq!(created_note.learner_id, format!("user:{}", victim.id));
+        assert!(created_note.content_html.contains("<strong>重要</strong>"));
+        assert!(created_note.content_html.contains("<code>cargo test</code>"));
+
+        // 2. Replaying same Idempotency-Key returns the exact same note ID without duplicating
+        let replay_resp = client
+            .post(format!("{base}/api/v1/me/notes"))
+            .bearer_auth(&victim_session)
+            .header("idempotency-key", "idem-test-001")
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay_resp.status(), reqwest::StatusCode::CREATED);
+        let replay_note: icehandnote_core::UserMarginNoteDto = replay_resp.json().await.unwrap();
+        assert_eq!(replay_note.id, created_note.id);
+
+        // 3. IDOR Attack Defense: unauthenticated caller spoofing `learner_id=user:<victim.id>` sees 0 notes & gets 401 on DELETE
+        let idor_list: Vec<icehandnote_core::UserMarginNoteDto> = client
+            .get(format!("{base}/api/v1/me/notes?step_id={step_id}&learner_id=user:{}", victim.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(idor_list.is_empty(), "IDOR leak: unauthenticated caller must not read victim notes");
+
+        let idor_del = client
+            .delete(format!("{base}/api/v1/me/notes/{}?learner_id=user:{}", created_note.id, victim.id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(idor_del.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // 4. Oversized note returns RFC 9110 422 Unprocessable Content
+        let too_long = "a".repeat(icehandnote_core::MAX_NOTE_CHARS + 1);
+        let long_resp = client
+            .post(format!("{base}/api/v1/me/notes"))
+            .bearer_auth(&victim_session)
+            .json(&serde_json::json!({
+                "step_id": step_id,
+                "locale_code": "zh-CN",
+                "block_anchor_id": "p-abc12345",
+                "content": too_long,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(long_resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+
+        // 5. RFC 7396 PATCH with matching If-Match succeeds (v1 -> v2), stale If-Match returns 412
+        let patch_ok = client
+            .patch(format!("{base}/api/v1/me/notes/{}", created_note.id))
+            .bearer_auth(&victim_session)
+            .header(header::CONTENT_TYPE, "application/merge-patch+json")
+            .header(header::IF_MATCH, &etag_v1)
+            .body(serde_json::json!({ "content": "已编辑的笔记内容", "tag": "todo" }).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(patch_ok.status(), reqwest::StatusCode::OK);
+        let etag_v2 = patch_ok
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(etag_v1, etag_v2);
+
+        let patch_stale = client
+            .patch(format!("{base}/api/v1/me/notes/{}", created_note.id))
+            .bearer_auth(&victim_session)
+            .header(header::CONTENT_TYPE, "application/merge-patch+json")
+            .header(header::IF_MATCH, &etag_v1)
+            .body(serde_json::json!({ "content": "过期覆盖" }).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(patch_stale.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+
+        // 6. Collection ETag + If-None-Match -> 304 Not Modified
+        let list_resp = client
+            .get(format!("{base}/api/v1/me/notes?step_id={step_id}&locale=zh-CN"))
+            .bearer_auth(&victim_session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+        let coll_etag = list_resp
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let list_304 = client
+            .get(format!("{base}/api/v1/me/notes?step_id={step_id}&locale=zh-CN"))
+            .bearer_auth(&victim_session)
+            .header(header::IF_NONE_MATCH, &coll_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_304.status(), reqwest::StatusCode::NOT_MODIFIED);
+
+        // 7. Soft-Delete + Undo Restore
+        let del_resp = client
+            .delete(format!("{base}/api/v1/me/notes/{}", created_note.id))
+            .bearer_auth(&victim_session)
+            .header(header::IF_MATCH, &etag_v2)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), reqwest::StatusCode::OK);
+
+        let restore_resp = client
+            .post(format!("{base}/api/v1/me/notes/{}/restore", created_note.id))
+            .bearer_auth(&victim_session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restore_resp.status(), reqwest::StatusCode::OK);
+
+        // 8. Export W3C JSON-LD & RFC 7763 Markdown
+        let export_jsonld = client
+            .get(format!("{base}/api/v1/me/notes/export?format=w3c-jsonld"))
+            .bearer_auth(&victim_session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(export_jsonld.status(), reqwest::StatusCode::OK);
+        assert!(export_jsonld
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/ld+json"));
+
+        // 9. Signed HttpOnly guest cookie issuance & isolated guest access
+        let guest_resp = client
+            .post(format!("{base}/api/v1/me/notes"))
+            .json(&serde_json::json!({
+                "step_id": step_id,
+                "locale_code": "zh-CN",
+                "block_anchor_id": "p-guest001",
+                "content": "匿名访客笔记",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(guest_resp.status(), reqwest::StatusCode::CREATED);
+        let set_cookie = guest_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.starts_with("ihn_guest=v1."));
+        assert!(set_cookie.contains("HttpOnly"));
+        let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+
+        let guest_notes: Vec<icehandnote_core::UserMarginNoteDto> = client
+            .get(format!("{base}/api/v1/me/notes?step_id={step_id}&locale=zh-CN"))
+            .header(header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(guest_notes.len(), 1);
+        assert_eq!(guest_notes[0].raw_content, "匿名访客笔记");
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn collaboration_enforces_occ_etag_bola_email_bound_invites_roles_revisions_and_transfer() {
+        let src_content = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-collab-rfc-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        let ch_dst = tmp_content.join("getting-started").join("01-welcome");
+        std::fs::create_dir_all(&ch_dst).unwrap();
+        std::fs::copy(
+            src_content.join("getting-started").join("track.toml"),
+            tmp_content.join("getting-started").join("track.toml"),
+        )
+        .unwrap();
+        std::fs::copy(
+            src_content
+                .join("getting-started")
+                .join("01-welcome")
+                .join("01-welcome-to-icehandnote.zh-CN.md"),
+            ch_dst.join("01-welcome-to-icehandnote.zh-CN.md"),
+        )
+        .unwrap();
+
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&tmp_content, store_path.clone(), false)
+                .unwrap();
+
+        let author_a = repo
+            .register_local_account("author_a", "Author A", "alice@collab.example.org", "StrongPass123!", UserRole::Author)
+            .await
+            .unwrap();
+        let author_b = repo
+            .register_local_account("author_b", "Author B", "bob@collab.example.org", "StrongPass123!", UserRole::Author)
+            .await
+            .unwrap();
+        let reader_c = repo
+            .register_local_account("reader_c", "Reader C", "carol@collab.example.org", "StrongPass123!", UserRole::Reader)
+            .await
+            .unwrap();
+
+        let tok_a = repo.create_session(author_a.id).await.unwrap();
+        let tok_b = repo.create_session(author_b.id).await.unwrap();
+        let tok_c = repo.create_session(reader_c.id).await.unwrap();
+
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir: tmp_content.clone(),
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Author A creates a brand-new private draft article -> 200 OK + strong ETag
+        let create_resp = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&tok_a)
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "secret-rfc-draft",
+                "locale": "zh-CN",
+                "title": "私密协作草稿 v1",
+                "summary": "初始草稿摘要",
+                "step_number": 9,
+                "status": "draft",
+                "tags": ["rfc"],
+                "body_markdown": "初始内容：第一版正文。",
+                "write_to_content_dir": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), reqwest::StatusCode::OK);
+        let etag_v1 = create_resp
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(etag_v1.starts_with("\"st-1-"));
+        let dto_v1: icehandnote_core::auth::StudioStepEditorDto = create_resp.json().await.unwrap();
+        assert_eq!(dto_v1.edit_seq, 1);
+        assert_eq!(dto_v1.etag, etag_v1);
+        assert!(dto_v1.can_edit);
+        assert!(dto_v1.can_manage_collaborators);
+
+        // 2. C-03 BOLA Defense: Author B cannot read A's draft, cannot see it in overview, and cannot hijack unowned disk step
+        let bola_read = client
+            .get(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/zh-CN"))
+            .bearer_auth(&tok_b)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bola_read.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let b_overview: Vec<icehandnote_core::auth::StudioTrackDto> = client
+            .get(format!("{base}/api/v1/studio/zh-CN/overview"))
+            .bearer_auth(&tok_b)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let leaked_draft = b_overview
+            .iter()
+            .flat_map(|t| &t.chapters)
+            .flat_map(|c| &c.steps)
+            .any(|s| s.slug == "secret-rfc-draft");
+        assert!(!leaked_draft, "BOLA leak: Author B must not see Author A's unpublished draft");
+
+        let unowned_hijack = client
+            .post(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/01-welcome-to-icehandnote/invites"))
+            .bearer_auth(&tok_b)
+            .json(&serde_json::json!({ "email": "carol@collab.example.org" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unowned_hijack.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 3. C-01 OCC Defense: Missing If-Match -> 428; stale If-Match -> 412 with RFC 9457 meta; valid If-Match -> 200
+        let missing_if_match = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&tok_a)
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "secret-rfc-draft",
+                "locale": "zh-CN",
+                "title": "私密协作草稿 v2",
+                "summary": "摘要",
+                "step_number": 9,
+                "status": "draft",
+                "tags": ["rfc"],
+                "body_markdown": "无条件头覆盖尝试"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing_if_match.status(), reqwest::StatusCode::PRECONDITION_REQUIRED);
+
+        let stale_if_match = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&tok_a)
+            .header(header::IF_MATCH, "\"st-99-deadbeef0000\"")
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "secret-rfc-draft",
+                "locale": "zh-CN",
+                "title": "私密协作草稿 v2",
+                "summary": "摘要",
+                "step_number": 9,
+                "status": "draft",
+                "tags": ["rfc"],
+                "body_markdown": "过期 ETag 覆盖尝试"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale_if_match.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+        let conflict_body: serde_json::Value = stale_if_match.json().await.unwrap();
+        assert_eq!(conflict_body["code"], "REVISION_CONFLICT");
+        assert_eq!(conflict_body["meta"]["current_etag"], etag_v1);
+        assert_eq!(
+            conflict_body["meta"]["remote_body_markdown"]
+                .as_str()
+                .unwrap()
+                .trim(),
+            "初始内容：第一版正文。"
+        );
+
+        let valid_v2 = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&tok_a)
+            .header(header::IF_MATCH, &etag_v1)
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "secret-rfc-draft",
+                "locale": "zh-CN",
+                "title": "私密协作草稿 v2",
+                "summary": "更新摘要",
+                "step_number": 9,
+                "status": "draft",
+                "tags": ["rfc"],
+                "body_markdown": "第二版正文内容。",
+                "change_note": "补充第二节"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(valid_v2.status(), reqwest::StatusCode::OK);
+        let etag_v2 = valid_v2
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(etag_v2.starts_with("\"st-2-"));
+
+        // 4. C-02 & C-07 Invite Security: Fragment URL + Idempotency-Key + Preview + Strict Email Binding + Least Privilege
+        let inv_resp = client
+            .post(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/invites"))
+            .bearer_auth(&tok_a)
+            .header("idempotency-key", "inv-key-001")
+            .json(&serde_json::json!({
+                "email": "carol@collab.example.org",
+                "role": "reviewer",
+                "locale": "zh-CN"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(inv_resp.status(), reqwest::StatusCode::CREATED);
+        let inv_json: serde_json::Value = inv_resp.json().await.unwrap();
+        let invite_url = inv_json["invite_url"].as_str().unwrap();
+        assert!(invite_url.contains("/zh-CN/invite#token="), "invite token must use URL fragment");
+        assert!(!invite_url.contains("?collab_invite="));
+        let raw_token = invite_url.split("#token=").nth(1).unwrap().to_string();
+
+        // Idempotency replay returns identical invite id
+        let inv_replay: serde_json::Value = client
+            .post(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/invites"))
+            .bearer_auth(&tok_a)
+            .header("idempotency-key", "inv-key-001")
+            .json(&serde_json::json!({ "email": "carol@collab.example.org", "role": "reviewer" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(inv_replay["invite"]["id"], inv_json["invite"]["id"]);
+
+        // Non-consuming preview
+        let preview: icehandnote_core::auth::InvitePreviewDto = client
+            .post(format!("{base}/api/v1/studio/invites/preview"))
+            .bearer_auth(&tok_b)
+            .json(&serde_json::json!({ "token": &raw_token }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(preview.role, "reviewer");
+        assert_eq!(preview.email_matches_viewer, Some(false));
+
+        // Author B (wrong email) is rejected with 403 INVITE_EMAIL_MISMATCH and does NOT consume the token
+        let wrong_accept = client
+            .post(format!("{base}/api/v1/studio/invites/accept"))
+            .bearer_auth(&tok_b)
+            .json(&serde_json::json!({ "token": &raw_token }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_accept.status(), reqwest::StatusCode::FORBIDDEN);
+        let wrong_body: serde_json::Value = wrong_accept.json().await.unwrap();
+        assert_eq!(wrong_body["code"], "INVITE_EMAIL_MISMATCH");
+
+        // Reader C (rightful email) accepts -> stays UserRole::Reader + has_collaborations = true!
+        let ok_accept = client
+            .post(format!("{base}/api/v1/studio/invites/accept"))
+            .bearer_auth(&tok_c)
+            .json(&serde_json::json!({ "token": &raw_token }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok_accept.status(), reqwest::StatusCode::OK);
+        let accept_body: serde_json::Value = ok_accept.json().await.unwrap();
+        assert_eq!(accept_body["user"]["role"], "reader");
+        assert_eq!(accept_body["user"]["has_collaborations"], true);
+
+        // Consumed token now returns 410 Gone (INVITE_EXPIRED)
+        let replay_accept = client
+            .post(format!("{base}/api/v1/studio/invites/accept"))
+            .bearer_auth(&tok_c)
+            .json(&serde_json::json!({ "token": &raw_token }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay_accept.status(), reqwest::StatusCode::GONE);
+
+        // Reader C (reviewer) CAN view the draft, but gets 403 COLLABORATOR_ROLE_FORBIDDEN when attempting to save
+        let c_read: icehandnote_core::auth::StudioStepEditorDto = client
+            .get(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/zh-CN"))
+            .bearer_auth(&tok_c)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(c_read.viewer_role, "reviewer");
+        assert!(!c_read.can_edit);
+        assert!(c_read.can_leave);
+
+        let reviewer_save = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&tok_c)
+            .header(header::IF_MATCH, &etag_v2)
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "secret-rfc-draft",
+                "locale": "zh-CN",
+                "title": "审阅者越权改写",
+                "summary": "摘要",
+                "step_number": 9,
+                "status": "draft",
+                "tags": ["rfc"],
+                "body_markdown": "禁止覆盖"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reviewer_save.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 5. C-04 & C-05: Owner upgrades Carol to `editor` -> Carol restores v1 via immutable revision restore -> audit logs -> leave
+        let role_patch = client
+            .patch(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/collaborators/{}", reader_c.id))
+            .bearer_auth(&tok_a)
+            .json(&serde_json::json!({ "role": "editor", "locale_scope": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(role_patch.status(), reqwest::StatusCode::OK);
+
+        let revs: Vec<icehandnote_core::auth::StepRevisionDto> = client
+            .get(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/zh-CN/revisions"))
+            .bearer_auth(&tok_c)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(revs.len(), 2);
+        let rev_v1 = revs.iter().find(|r| r.edit_seq == 1).unwrap();
+
+        let restored: icehandnote_core::auth::StudioStepEditorDto = client
+            .post(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/zh-CN/revisions/{}/restore", rev_v1.id))
+            .bearer_auth(&tok_c)
+            .header(header::IF_MATCH, &etag_v2)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(restored.edit_seq, 3);
+        assert_eq!(restored.body_markdown.trim(), "初始内容：第一版正文。");
+
+        let logs: Vec<icehandnote_core::auth::CollaborationAuditLogDto> = client
+            .get(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/audit-logs"))
+            .bearer_auth(&tok_a)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(logs.iter().any(|l| l.action == "revision_restored"));
+        assert!(logs.iter().any(|l| l.action == "role_updated"));
+
+        let leave_resp = client
+            .delete(format!("{base}/api/v1/studio/steps/getting-started/01-welcome/secret-rfc-draft/collaborators/me"))
+            .bearer_auth(&tok_c)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(leave_resp.status(), reqwest::StatusCode::OK);
+        let leave_json: serde_json::Value = leave_resp.json().await.unwrap();
+        assert_eq!(leave_json["left"], true);
+        assert_eq!(leave_json["user"]["has_collaborations"], false);
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
     }
 }
