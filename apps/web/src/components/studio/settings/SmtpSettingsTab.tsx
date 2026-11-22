@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../../lib/api';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../../lib/email';
 import { EXT_COPY, getEnabledLocaleMetas } from '../../../lib/i18n';
 import type {
   LocaleCode,
@@ -180,10 +181,21 @@ export function SmtpSettingsTab({
 
   const handleSaveSmtp = useCallback(async () => {
     if (savingSmtp || !loaded) return;
+    let nextDraft = smtpDraft;
+    if (smtpDraft.enabled || smtpDraft.from_email.trim()) {
+      const normalizedFrom = normalizeEmail(smtpDraft.from_email);
+      if (!normalizedFrom) {
+        toast.error('INVALID_EMAIL');
+        return;
+      }
+      if (normalizedFrom !== smtpDraft.from_email) {
+        nextDraft = { ...smtpDraft, from_email: normalizedFrom };
+      }
+    }
     setSavingSmtp(true);
     try {
       const res = await api.adminUpdateSmtp({
-        settings: smtpDraft,
+        settings: nextDraft,
         password: passwordInput.trim() || undefined,
       });
       const savedMerged = { ...DEFAULT_SMTP_STATE, ...res.settings };
@@ -225,12 +237,22 @@ export function SmtpSettingsTab({
   };
 
   const handleTestSmtp = async () => {
-    if (!testEmailAddr.trim() || testingSmtp) return;
+    const normalizedTo = normalizeEmail(testEmailAddr);
+    if (!normalizedTo) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    const normalizedFrom = normalizeEmail(smtpDraft.from_email);
+    if (!normalizedFrom) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (testingSmtp) return;
     setTestingSmtp(true);
     try {
       await api.adminTestSmtp({
-        to_email: testEmailAddr.trim(),
-        settings: smtpDraft,
+        to_email: normalizedTo,
+        settings: { ...smtpDraft, from_email: normalizedFrom },
         password: passwordInput.trim() || undefined,
         locale,
       });
@@ -573,6 +595,11 @@ export function SmtpSettingsTab({
               <input
                 id="smtp-from-email"
                 type="email"
+                maxLength={MAX_EMAIL_LENGTH}
+                autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
                 value={smtpDraft.from_email}
                 onChange={(e) =>
                   setSmtpDraft({ ...smtpDraft, from_email: e.target.value })
@@ -625,6 +652,11 @@ export function SmtpSettingsTab({
               <input
                 id="smtp-test-to"
                 type="email"
+                maxLength={MAX_EMAIL_LENGTH}
+                autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
                 value={testEmailAddr}
                 onChange={(e) => setTestEmailAddr(e.target.value)}
                 placeholder="you@example.com"

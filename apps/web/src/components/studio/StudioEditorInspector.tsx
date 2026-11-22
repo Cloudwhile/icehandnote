@@ -3,7 +3,8 @@
  * Cleanly separated from the Editor Toolbar (`工具栏`) and Writing Canvas (`编辑区`).
  */
 
-import type { FormEvent } from 'react';
+import { type FormEvent, useRef } from 'react';
+import { MAX_EMAIL_LENGTH } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import { ALL_LICENSE_OPTIONS, normalizeLicenseId } from '../../lib/licenses';
 import type {
@@ -13,6 +14,8 @@ import type {
   LocaleCode,
   SiteSettingsDto,
 } from '../../lib/types';
+import { useAccessibleFormValidation } from '../../lib/useFormValidation';
+import { FieldErrorText } from '../ui/FormControls';
 import { IconClose, IconCopy } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { UserAvatar } from '../ui/UserAvatar';
@@ -89,16 +92,19 @@ export function StudioEditorInspector({
   const copy = UI_COPY[locale];
   const s = copy.studio;
   const extCopy = EXT_COPY[locale];
+  const inviteFormRef = useRef<HTMLFormElement | null>(null);
 
   const parsedTags = docTagsText
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
 
+  useAccessibleFormValidation(inviteFormRef, [docExists, canManageCollaborators]);
+
   return (
     <aside
       aria-label={extCopy.studio.editorInspectorTitle}
-      className="studio-editor-inspector studio-panel studio-scroll-pane overflow-hidden"
+      className="studio-editor-inspector studio-panel overflow-hidden"
     >
       {/* Inspector Header */}
       <div className="px-4 py-3 border-b border-border-subtle bg-surface-raised/50 flex items-center justify-between gap-2">
@@ -324,24 +330,41 @@ export function StudioEditorInspector({
             {canManageCollaborators && (
               <div className="space-y-2.5 pt-1">
                 <form
+                  ref={inviteFormRef}
                   onSubmit={onInviteCollaborator}
-                  className="flex items-center gap-1.5"
+                  className="auth-field"
                 >
-                  <input
-                    type="email"
-                    required
-                    value={inviteEmail}
-                    onChange={(e) => onChangeInviteEmail(e.target.value)}
-                    placeholder={extCopy.studio.inviteEmailPlaceholder}
-                    className="ink-field-input flex-1 min-w-0 text-xs py-1.5"
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      id="collab-invite-email"
+                      name="email"
+                      type="email"
+                      required
+                      maxLength={MAX_EMAIL_LENGTH}
+                      autoComplete="email"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      data-error="collab-invite-email-err"
+                      data-invalid-message={extCopy.auth.errEmailInvalid}
+                      value={inviteEmail}
+                      onChange={(e) => onChangeInviteEmail(e.target.value)}
+                      placeholder={extCopy.studio.inviteEmailPlaceholder}
+                      className="ink-field-input flex-1 min-w-0 text-xs py-1.5"
+                    />
+                    <button
+                      type="submit"
+                      disabled={inviting}
+                      className="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-60 shrink-0"
+                    >
+                      {inviting ? extCopy.studio.invitingBtn : extCopy.studio.inviteBtn}
+                    </button>
+                  </div>
+                  <FieldErrorText
+                    id="collab-invite-email-err"
+                    prefixLabel={extCopy.auth.errorPrefixLabel}
+                    message={extCopy.auth.errEmailInvalid}
                   />
-                  <button
-                    type="submit"
-                    disabled={inviting}
-                    className="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-60 shrink-0"
-                  >
-                    {inviting ? extCopy.studio.invitingBtn : extCopy.studio.inviteBtn}
-                  </button>
                 </form>
 
                 {lastInviteUrl && (

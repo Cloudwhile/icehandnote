@@ -152,7 +152,7 @@ export function RoughDiagram({ spec, caption, theme }: RoughDiagramProps) {
   }, [spec, theme]);
 
   return (
-    <figure className="my-7 mx-0 rounded-xl border border-border-subtle bg-surface-raised/60 p-4 overflow-x-auto studio-scroll-pane">
+    <figure className="my-7 mx-0 rounded-xl border border-border-subtle bg-surface-raised/60 p-4 overflow-x-auto overscroll-x-contain ink-thin-scrollbar">
       <svg
         ref={svgRef}
         viewBox={`0 0 ${maxX} ${maxY}`}

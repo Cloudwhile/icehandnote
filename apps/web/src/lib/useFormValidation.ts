@@ -11,6 +11,7 @@
  */
 
 import { type RefObject, useEffect } from 'react';
+import { isValidEmail } from './email';
 
 let sharedAnnouncer: HTMLDivElement | null = null;
 let sharedAnnounceTimer: number | undefined;
@@ -145,10 +146,29 @@ export function useAccessibleFormValidation(
       syncParentHasFallback(el);
     };
 
+    const syncEmailCustomValidity = (
+      el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+    ) => {
+      if (!(el instanceof HTMLInputElement) || el.type !== 'email') return;
+      const trimmed = el.value.trim();
+      if (!trimmed || isValidEmail(trimmed)) {
+        el.setCustomValidity('');
+        return;
+      }
+      const errorId = el.dataset.error;
+      const errorEl = errorId ? document.getElementById(errorId) : null;
+      const msg =
+        (errorEl ? spokenText(errorEl) : '') ||
+        el.dataset.invalidMessage ||
+        'Please enter a valid email address.';
+      el.setCustomValidity(msg);
+    };
+
     const updateFallbackValidity = (
       el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
       announce = false,
     ) => {
+      syncEmailCustomValidity(el);
       if (supportsUserInvalid) {
         syncAria(el, announce);
         return;
@@ -162,12 +182,14 @@ export function useAccessibleFormValidation(
     // Initialize every control in the form to aria-invalid="false"
     form.querySelectorAll('input, select, textarea').forEach((node) => {
       if (isFormControl(node)) {
+        syncEmailCustomValidity(node);
         syncAria(node, false);
       }
     });
 
     const onBlur = (e: Event) => {
       if (!isFormControl(e.target)) return;
+      syncEmailCustomValidity(e.target);
       if (!supportsUserInvalid) {
         const state = dirtyState.get(e.target) ?? {
           hasInteracted: false,
@@ -185,6 +207,7 @@ export function useAccessibleFormValidation(
 
     const onInput = (e: Event) => {
       if (!isFormControl(e.target)) return;
+      syncEmailCustomValidity(e.target);
       if (!supportsUserInvalid) {
         const state = dirtyState.get(e.target) ?? {
           hasInteracted: false,
@@ -209,6 +232,7 @@ export function useAccessibleFormValidation(
 
     const onInvalid = (e: Event) => {
       if (!isFormControl(e.target)) return;
+      syncEmailCustomValidity(e.target);
       announced.add(e.target);
       if (!supportsUserInvalid) {
         dirtyState.set(e.target, { hasInteracted: true, hasBlurred: true });
@@ -222,6 +246,9 @@ export function useAccessibleFormValidation(
           if (!isFormControl(node)) return;
           dirtyState.delete(node);
           node.classList.remove('user-invalid-fallback', 'user-valid-fallback');
+          if (node instanceof HTMLInputElement && node.type === 'email') {
+            node.setCustomValidity('');
+          }
           syncAria(node, false);
         });
       });

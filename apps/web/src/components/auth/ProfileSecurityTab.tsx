@@ -6,6 +6,7 @@
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSessionToken } from '../../lib/api';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY } from '../../lib/i18n';
 import {
   detectPasskeyCapabilities,
@@ -22,6 +23,7 @@ import {
   type UserProfileDto,
 } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
+import { FieldErrorText } from '../ui/FormControls';
 import { IconCheck, IconKey, IconPen, IconTrash } from '../ui/Icons';
 import { PasswordInput } from '../ui/PasswordInput';
 import { StatusBadge } from '../ui/StatusBadge';
@@ -67,6 +69,7 @@ export function ProfileSecurityTab({
   const extAuth = EXT_COPY[locale].auth;
   const toast = useToast();
   const pwFormRef = useRef<HTMLFormElement | null>(null);
+  const emailFormRef = useRef<HTMLFormElement | null>(null);
 
   const [changingEmail, setChangingEmail] = useState(initialOpenEmailChange);
   const [newEmailInput, setNewEmailInput] = useState('');
@@ -99,6 +102,7 @@ export function ProfileSecurityTab({
   const [deletingPasskeyId, setDeletingPasskeyId] = useState<string | null>(null);
 
   useAccessibleFormValidation(pwFormRef, [open]);
+  useAccessibleFormValidation(emailFormRef, [open, changingEmail, Boolean(emailCodeSentTo)]);
 
   useEffect(() => {
     if (initialOpenEmailChange) {
@@ -137,8 +141,13 @@ export function ProfileSecurityTab({
   }, [open, siteSettings.enable_passkeys, loadPasskeys]);
 
   const handleSendEmailChangeCode = async () => {
-    const clean = newEmailInput.trim();
-    if (!clean || !clean.includes('@') || sendingEmailCode || emailCooldownSecs > 0) {
+    const clean = normalizeEmail(newEmailInput);
+    if (!clean) {
+      emailFormRef.current?.reportValidity();
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (sendingEmailCode || emailCooldownSecs > 0) {
       return;
     }
     if (clean.toLowerCase() === (user.email || '').trim().toLowerCase()) {
@@ -162,9 +171,13 @@ export function ProfileSecurityTab({
 
   const handleVerifyEmailChange = async (e: FormEvent) => {
     e.preventDefault();
-    const targetEmail = (emailCodeSentTo || newEmailInput).trim();
+    const targetEmail = normalizeEmail(emailCodeSentTo || newEmailInput);
     const cleanCode = emailOtpCode.trim();
-    if (!targetEmail || cleanCode.length < 6 || verifyingEmail) return;
+    if (!targetEmail) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (cleanCode.length < 6 || verifyingEmail) return;
     setVerifyingEmail(true);
     try {
       const updated = await api.verifyEmailChange(targetEmail, cleanCode);
@@ -377,20 +390,35 @@ export function ProfileSecurityTab({
 
         {changingEmail && (
           <form
+            ref={emailFormRef}
             method="POST"
-            onSubmit={(e) => void handleVerifyEmailChange(e)}
+            onSubmit={(e) => {
+              if (!emailCodeSentTo) {
+                e.preventDefault();
+                void handleSendEmailChangeCode();
+                return;
+              }
+              void handleVerifyEmailChange(e);
+            }}
             className="pt-3 border-t border-dashed border-border-subtle space-y-3.5 ui-panel-enter"
           >
-            <div>
+            <div className="auth-field">
               <label htmlFor="sec-new-email" className="ink-field-label">
                 {p.newEmailLabel}
               </label>
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   id="sec-new-email"
+                  name="email"
                   type="email"
                   required
+                  maxLength={MAX_EMAIL_LENGTH}
                   autoComplete="email"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  enterKeyHint="next"
+                  data-error="sec-new-email-err"
                   value={newEmailInput}
                   onChange={(e) => {
                     setNewEmailInput(e.target.value);
@@ -408,11 +436,7 @@ export function ProfileSecurityTab({
                 />
                 <button
                   type="button"
-                  disabled={
-                    sendingEmailCode ||
-                    emailCooldownSecs > 0 ||
-                    !newEmailInput.trim().includes('@')
-                  }
+                  disabled={sendingEmailCode || emailCooldownSecs > 0}
                   onClick={() => void handleSendEmailChangeCode()}
                   className="min-h-9 px-3 py-1.5 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer shrink-0 disabled:opacity-50 disabled:cursor-not-allowed tabular-nums"
                 >
@@ -423,6 +447,11 @@ export function ProfileSecurityTab({
                       : p.sendEmailCodeBtn}
                 </button>
               </div>
+              <FieldErrorText
+                id="sec-new-email-err"
+                prefixLabel={extAuth.errorPrefixLabel}
+                message={extAuth.errEmailInvalid}
+              />
             </div>
 
             {emailCodeSentTo && (

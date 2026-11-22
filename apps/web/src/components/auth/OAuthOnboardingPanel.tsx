@@ -6,6 +6,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import type {
   AvatarSource,
@@ -129,13 +130,18 @@ export function OAuthOnboardingPanel({
       usernameRef.current?.focus();
       return;
     }
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
     setSubmitting(true);
     try {
       const session = await api.completeOAuthRegistration({
         onboarding_token: onboardingToken,
         username: username.trim(),
         display_name: displayName.trim() || username.trim(),
-        email: email.trim(),
+        email: normalizedEmail,
         role: info.allow_author_registration ? role : 'reader',
         avatar_source: avatarSource,
         uploaded_avatar_url: uploadedAvatar,
@@ -258,7 +264,10 @@ export function OAuthOnboardingPanel({
                 name="email"
                 type="email"
                 required
+                maxLength={MAX_EMAIL_LENGTH}
                 autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
                 spellCheck={false}
                 enterKeyHint="done"
                 data-error="onb-email-err"

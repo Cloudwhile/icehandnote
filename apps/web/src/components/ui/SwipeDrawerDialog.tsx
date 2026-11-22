@@ -35,20 +35,77 @@ export function SwipeDrawerDialog({
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const sheetRef = useRef<HTMLElement | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const isClosingRef = useRef(false);
+  const hasEnteredRef = useRef(false);
+  const didEmitCloseRef = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const openRafRef = useRef<number | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const hideOnDesktopRef = useRef(className.includes('lg:hidden'));
+  hideOnDesktopRef.current = className.includes('lg:hidden');
+
+  const clearTimers = useCallback(() => {
+    if (openRafRef.current !== null) {
+      cancelAnimationFrame(openRafRef.current);
+      openRafRef.current = null;
+    }
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+
+  const finishClose = useCallback(() => {
+    clearTimers();
+    const dialog = dialogRef.current;
+    isClosingRef.current = false;
+    hasEnteredRef.current = false;
+    didEmitCloseRef.current = true;
+    if (dialog && dialog.open) {
+      dialog.close();
+    }
+    onCloseRef.current();
+  }, [clearTimers]);
 
   const slideClose = useCallback(() => {
-    const scroller = scrollerRef.current;
     const dialog = dialogRef.current;
+    const scroller = scrollerRef.current;
+    const sheet = sheetRef.current;
     if (!dialog || !dialog.open) return;
-    isClosingRef.current = true;
-    if (scroller) {
-      scroller.scrollTo({ left: scroller.offsetWidth, behavior: 'auto' });
-    } else {
-      dialog.close();
-      onClose();
+
+    if (openRafRef.current !== null) {
+      cancelAnimationFrame(openRafRef.current);
+      openRafRef.current = null;
     }
-  }, [onClose]);
+    isClosingRef.current = true;
+
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+    if (
+      !scroller ||
+      !sheet ||
+      reducedMotion ||
+      scroller.scrollLeft >= sheet.offsetWidth - 2
+    ) {
+      finishClose();
+      return;
+    }
+
+    scroller.scrollTo({ left: scroller.offsetWidth, behavior: 'auto' });
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      if (dialog.open && isClosingRef.current) {
+        finishClose();
+      }
+    }, 420);
+  }, [finishClose]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -60,14 +117,20 @@ export function SwipeDrawerDialog({
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries.at(-1);
-        if (!entry) return;
-        if (entry.intersectionRatio < visibleThreshold && dialog.open) {
-          dialog.close();
-          isClosingRef.current = false;
-          onClose();
+        if (!entry || !dialog.open) return;
+        if (entry.intersectionRatio >= 0.25) {
+          hasEnteredRef.current = true;
+        }
+        // Only dismiss after the sheet has actually entered view or an explicit close was started,
+        // ignoring the initial off-screen snap frame (`scroll-initial-target` / jump-scroll) on open.
+        if (
+          entry.intersectionRatio < visibleThreshold &&
+          (hasEnteredRef.current || isClosingRef.current)
+        ) {
+          finishClose();
         }
       },
-      { root: dialog, threshold: [visibleThreshold, 1] },
+      { root: dialog, threshold: [visibleThreshold, 0.25, 1] },
     );
     observer.observe(sheet);
 
@@ -93,43 +156,91 @@ export function SwipeDrawerDialog({
         slideClose();
       }
     };
+    const onNativeClose = () => {
+      if (dialog.open) return;
+      clearTimers();
+      isClosingRef.current = false;
+      hasEnteredRef.current = false;
+      if (!didEmitCloseRef.current) {
+        didEmitCloseRef.current = true;
+        onCloseRef.current();
+      }
+    };
     dialog.addEventListener('cancel', onCancel);
+    dialog.addEventListener('close', onNativeClose);
+
+    const desktopMq =
+      typeof window !== 'undefined'
+        ? window.matchMedia('(min-width: 1024px)')
+        : null;
+    const onBreakpointChange = (e: MediaQueryListEvent) => {
+      if (hideOnDesktopRef.current && e.matches && dialog.open) {
+        finishClose();
+      }
+    };
+    desktopMq?.addEventListener('change', onBreakpointChange);
 
     return () => {
+      clearTimers();
       observer.disconnect();
       if (!supportsScrollTimeline) {
         scroller.removeEventListener('scroll', onScrollFallback);
       }
       dialog.removeEventListener('cancel', onCancel);
+      dialog.removeEventListener('close', onNativeClose);
+      desktopMq?.removeEventListener('change', onBreakpointChange);
     };
-  }, [onClose, slideClose]);
+  }, [clearTimers, finishClose, slideClose]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     const scroller = scrollerRef.current;
+    const sheet = sheetRef.current;
     if (!dialog || !scroller) return;
 
     if (open && !dialog.open) {
+      clearTimers();
       isClosingRef.current = false;
+      hasEnteredRef.current = false;
+      didEmitCloseRef.current = false;
       dialog.showModal();
-      const supportsInitialTarget =
-        typeof CSS !== 'undefined' &&
-        CSS.supports('scroll-initial-target', 'nearest');
+      closeBtnRef.current?.focus({ preventScroll: true });
 
-      if (!supportsInitialTarget) {
-        scroller.scrollTo({ left: scroller.offsetWidth, behavior: 'instant' });
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            scroller.scrollTo({ left: 0, behavior: 'auto' });
+      const supportsScrollTimeline =
+        typeof CSS !== 'undefined' &&
+        CSS.supports('animation-timeline', 'scroll()');
+      const reducedMotion =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+      if (reducedMotion) {
+        scroller.scrollTo({ left: 0, behavior: 'instant' });
+        if (!supportsScrollTimeline) {
+          dialog.style.setProperty('--drawer-backdrop', '1');
+        }
+        hasEnteredRef.current = true;
+      } else {
+        const closedLeft = scroller.offsetWidth;
+        const sheetWidth = sheet?.offsetWidth ?? closedLeft;
+        if (scroller.scrollLeft < sheetWidth - 2) {
+          scroller.scrollTo({ left: closedLeft, behavior: 'instant' });
+        }
+        if (!supportsScrollTimeline) {
+          dialog.style.setProperty('--drawer-backdrop', '0');
+        }
+        openRafRef.current = requestAnimationFrame(() => {
+          openRafRef.current = requestAnimationFrame(() => {
+            openRafRef.current = null;
+            if (dialog.open && !isClosingRef.current) {
+              scroller.scrollTo({ left: 0, behavior: 'auto' });
+            }
           });
         });
-      } else {
-        scroller.scrollTo({ left: 0, behavior: 'auto' });
       }
     } else if (!open && dialog.open && !isClosingRef.current) {
       slideClose();
     }
-  }, [open, slideClose]);
+  }, [clearTimers, open, slideClose]);
 
   return (
     <dialog
@@ -158,8 +269,8 @@ export function SwipeDrawerDialog({
               <span>{title}</span>
             </span>
             <button
+              ref={closeBtnRef}
               type="button"
-              autoFocus
               aria-label={closeAriaLabel}
               onClick={slideClose}
               className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer transition-colors"

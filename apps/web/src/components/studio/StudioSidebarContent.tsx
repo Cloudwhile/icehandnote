@@ -163,7 +163,7 @@ export function StudioSidebarContent({
                 aria-current={activeSection === 'editor' ? 'page' : undefined}
                 onClick={() => {
                   setEditorTreeOpen(true);
-                  onSelectSection('editor');
+                  navigateSection('editor');
                 }}
                 className="studio-nav-item flex-1 min-w-0"
               >
@@ -178,7 +178,7 @@ export function StudioSidebarContent({
                 aria-expanded={editorTreeOpen}
                 aria-label={s.explorerHeading}
                 onClick={() => setEditorTreeOpen((v) => !v)}
-                className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
+                className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
               >
                 <IconChevronDown
                   className={`w-3.5 h-3.5 transition-transform ${
@@ -384,7 +384,7 @@ export function StudioSidebarContent({
                     aria-current={activeSection === 'settings' ? 'page' : undefined}
                     onClick={() => {
                       setSettingsTreeOpen(true);
-                      onSelectSection('settings');
+                      navigateSection('settings');
                     }}
                     className="studio-nav-item flex-1 min-w-0"
                   >
@@ -399,7 +399,7 @@ export function StudioSidebarContent({
                     aria-expanded={settingsTreeOpen}
                     aria-label={s.sections.settings}
                     onClick={() => setSettingsTreeOpen((v) => !v)}
-                    className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
+                    className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
                   >
                     <IconChevronDown
                       className={`w-3.5 h-3.5 transition-transform ${

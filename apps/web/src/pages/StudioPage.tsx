@@ -197,10 +197,18 @@ export function StudioPage({
     [siteSettings],
   );
 
-  const handleSelectSettingsTab = useCallback((tab: StudioSettingsTabId) => {
-    setActiveSettingsTab(tab);
+  const scrollWorkspaceToTop = useCallback(() => {
     mainScrollRef.current?.scrollTo({ top: 0 });
+    window.scrollTo({ top: 0 });
   }, []);
+
+  const handleSelectSettingsTab = useCallback(
+    (tab: StudioSettingsTabId) => {
+      setActiveSettingsTab(tab);
+      scrollWorkspaceToTop();
+    },
+    [scrollWorkspaceToTop],
+  );
 
   // Guard admin-only sections once auth resolves for non-admin authors
   useEffect(() => {
@@ -234,10 +242,10 @@ export function StudioPage({
     siteSettings.enabled_locales,
   ]);
 
-  // Reset main pane scroll position when switching Studio sections
+  // Reset main pane / window scroll position when switching Studio sections
   useEffect(() => {
-    mainScrollRef.current?.scrollTo({ top: 0 });
-  }, [activeSection]);
+    scrollWorkspaceToTop();
+  }, [activeSection, scrollWorkspaceToTop]);
 
   // Honor external URL changes (e.g., browser Back/Forward or co-author invite redirect)
   useEffect(() => {
@@ -612,7 +620,7 @@ export function StudioPage({
         />
       </StudioMobileDrawer>
 
-      <main ref={mainScrollRef} className="studio-main studio-scroll-pane">
+      <main ref={mainScrollRef} className="studio-main">
         <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16 space-y-6">
           {activeSection === 'overview' && (
             <div key="studio-sec-overview" className="ui-panel-enter">

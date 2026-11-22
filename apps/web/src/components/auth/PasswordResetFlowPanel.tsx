@@ -6,6 +6,7 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import type { LocaleCode, UserProfileDto } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
@@ -106,8 +107,12 @@ export function PasswordResetFlowPanel({
 
   const handleForgotSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    const cleanEmail = forgotEmail.trim();
-    if (!cleanEmail || submitting) return;
+    const cleanEmail = normalizeEmail(forgotEmail);
+    if (!cleanEmail) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (submitting) return;
     const targetUrl = `/${locale}/auth/reset-password?email=${encodeURIComponent(cleanEmail)}${returnQuerySuffix ? `&${returnQuerySuffix.slice(1)}` : ''}`;
     const existingCooldown = readOtpCooldown('reset', cleanEmail);
     if (existingCooldown > 0) {
@@ -136,8 +141,8 @@ export function PasswordResetFlowPanel({
   };
 
   const handleResendResetCode = async () => {
-    const cleanEmail = resetEmail.trim();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    const cleanEmail = normalizeEmail(resetEmail);
+    if (!cleanEmail) {
       toast.error('INVALID_EMAIL');
       return;
     }
@@ -158,9 +163,9 @@ export function PasswordResetFlowPanel({
   const handleVerifyResetOtpSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (verifyingOtp) return;
-    const cleanEmail = resetEmail.trim();
+    const cleanEmail = normalizeEmail(resetEmail);
     const cleanCode = resetOtpCode.trim();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    if (!cleanEmail) {
       toast.error('INVALID_EMAIL');
       return;
     }
@@ -229,7 +234,10 @@ export function PasswordResetFlowPanel({
               type="email"
               required
               autoFocus
+              maxLength={MAX_EMAIL_LENGTH}
               autoComplete="email"
+              autoCorrect="off"
+              autoCapitalize="none"
               spellCheck={false}
               enterKeyHint="done"
               data-error="auth-forgot-email-err"
@@ -307,7 +315,10 @@ export function PasswordResetFlowPanel({
                 type="email"
                 required
                 autoFocus
+                maxLength={MAX_EMAIL_LENGTH}
                 autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
                 spellCheck={false}
                 enterKeyHint="next"
                 data-error="auth-reset-email-err"

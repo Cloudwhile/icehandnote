@@ -12,6 +12,7 @@ import {
   useState,
 } from 'react';
 import { api } from '../../lib/api';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import type {
   LocaleCode,
@@ -96,12 +97,21 @@ export function StudioUsersPanel({
   const handleCreateUser = async (e: FormEvent) => {
     e.preventDefault();
     if (!newUsername.trim() || !newUserPassword || creatingUser) return;
+    let normalizedEmail = '';
+    if (newEmail.trim()) {
+      const parsed = normalizeEmail(newEmail);
+      if (!parsed) {
+        toast.error('INVALID_EMAIL');
+        return;
+      }
+      normalizedEmail = parsed;
+    }
     setCreatingUser(true);
     try {
       const created = await api.adminCreateUser({
         username: newUsername.trim(),
         display_name: newDisplayName.trim() || newUsername.trim(),
-        email: newEmail.trim(),
+        email: normalizedEmail,
         role: newUserRole,
         password: newUserPassword,
       });
@@ -438,6 +448,11 @@ export function StudioUsersPanel({
               <input
                 id="admin-new-email"
                 type="email"
+                maxLength={MAX_EMAIL_LENGTH}
+                autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
                 value={newEmail}
                 onChange={(e) => setNewEmail(e.target.value)}
                 className="ink-field-input"

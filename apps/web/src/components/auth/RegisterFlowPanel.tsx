@@ -7,6 +7,7 @@ import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { resolveLocalizedError } from '../../lib/apiError';
+import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import type { LocaleCode, SiteSettingsDto, UserProfileDto } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
@@ -68,8 +69,8 @@ export function RegisterFlowPanel({
   }, [step, onStepChange]);
 
   const requestRegisterCode = async (targetEmail: string): Promise<boolean> => {
-    const cleanEmail = targetEmail.trim();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
+    const cleanEmail = normalizeEmail(targetEmail);
+    if (!cleanEmail) {
       toast.error('INVALID_EMAIL');
       return false;
     }
@@ -130,7 +131,7 @@ export function RegisterFlowPanel({
     try {
       const session = await api.registerAccount({
         username: username.trim(),
-        email: email.trim(),
+        email: normalizeEmail(email) ?? email.trim(),
         password,
         verification_code: code,
         display_name: displayName.trim() || username.trim(),
@@ -227,7 +228,10 @@ export function RegisterFlowPanel({
                 name="email"
                 type="email"
                 required
+                maxLength={MAX_EMAIL_LENGTH}
                 autoComplete="email"
+                autoCorrect="off"
+                autoCapitalize="none"
                 spellCheck={false}
                 enterKeyHint="next"
                 data-error="auth-reg-email-err"

@@ -79,7 +79,7 @@ export function TopNavbar({
         menuTriggerRef.current?.focus();
       }
     };
-    const onPointerDown = (e: MouseEvent) => {
+    const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node;
       if (
         mobileMenuRef.current &&
@@ -91,10 +91,10 @@ export function TopNavbar({
       }
     };
     document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('pointerdown', onPointerDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('pointerdown', onPointerDown);
     };
   }, [mobileMenuOpen]);
 
@@ -224,7 +224,7 @@ export function TopNavbar({
             id={mobileMenuId}
             role="region"
             aria-label={copy.navPrimaryAria}
-            className="ui-popover-enter origin-top-right md:hidden absolute end-0 mt-2 w-[min(20rem,calc(100vw-1.5rem))] rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-40"
+            className="ui-popover-enter origin-top-right md:hidden absolute end-0 mt-2 w-[min(20rem,calc(100dvw-1.5rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-40"
           >
             <nav aria-label={copy.navPrimaryAria} className="space-y-1">
               <Link

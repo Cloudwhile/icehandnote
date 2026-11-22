@@ -65,7 +65,7 @@ export function ChapterSidebarAndDrawer({
         tocTriggerRef.current?.focus();
       }
     };
-    const onMouseDown = (e: MouseEvent) => {
+    const onPointerDown = (e: PointerEvent) => {
       if (
         tocContainerRef.current &&
         !tocContainerRef.current.contains(e.target as Node)
@@ -74,10 +74,10 @@ export function ChapterSidebarAndDrawer({
       }
     };
     document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('pointerdown', onPointerDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('pointerdown', onPointerDown);
     };
   }, [tocOpen]);
 
@@ -247,7 +247,7 @@ export function ChapterSidebarAndDrawer({
     <>
       <aside
         aria-label={copy.chapterOutlineAria}
-        className="hidden lg:block w-64 shrink-0 sticky top-24 self-start max-h-[calc(100dvh-7rem)] pe-2 studio-scroll-pane space-y-6"
+        className="hidden lg:block w-64 shrink-0 sticky top-24 self-start max-h-[calc(100dvh-7rem)] pe-2 overflow-y-auto ink-thin-scrollbar space-y-6"
       >
         {renderNavTree()}
 
@@ -287,7 +287,10 @@ export function ChapterSidebarAndDrawer({
         surface="sheet"
         className="lg:hidden"
       >
-        <nav aria-label={copy.chapterOutlineAria} className="p-5 flex-1">
+        <nav
+          aria-label={copy.chapterOutlineAria}
+          className="p-5 flex-1 min-h-0 overflow-y-auto overscroll-contain"
+        >
           {renderNavTree(onCloseMobile)}
         </nav>
       </SwipeDrawerDialog>
@@ -313,7 +316,7 @@ export function ChapterSidebarAndDrawer({
             <div
               role="region"
               aria-label={copy.tocHeading}
-              className="ui-popover-enter origin-bottom-right lg:origin-bottom-left mt-2 absolute bottom-14 end-0 lg:start-0 lg:end-auto w-72 sm:w-80 rounded-2xl p-4 bg-surface-raised space-y-2.5 ink-surface-floating"
+              className="ui-popover-enter origin-bottom-right lg:origin-bottom-left mt-2 absolute bottom-14 end-0 lg:start-0 lg:end-auto w-[min(18rem,calc(100dvw-2rem))] sm:w-80 rounded-2xl p-4 bg-surface-raised space-y-2.5 ink-surface-floating"
             >
               <div className="flex items-center justify-between pb-2 border-b border-dashed border-border-subtle">
                 <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-ink-primary">
@@ -332,7 +335,7 @@ export function ChapterSidebarAndDrawer({
                   <IconClose className="w-3.5 h-3.5" />
                 </button>
               </div>
-              <ul className="list-none m-0 p-0 space-y-1.5 max-h-64 overflow-y-auto studio-scroll-pane">
+              <ul className="list-none m-0 p-0 space-y-1.5 max-h-[min(16rem,calc(100dvh-7rem))] overflow-y-auto studio-scroll-pane">
                 {toc.map((item) => (
                   <li
                     key={item.id}

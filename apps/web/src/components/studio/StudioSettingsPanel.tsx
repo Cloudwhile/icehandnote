@@ -93,7 +93,7 @@ export function StudioSettingsPanel({
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Sticky Top Header + Contextual Primary Action */}
-      <div className="sticky top-0 z-10 -mx-2 px-2 pt-2 pb-3 bg-surface-page/95 backdrop-blur border-b border-border-subtle">
+      <div className="sticky top-14 lg:top-0 z-10 -mx-2 px-2 pt-2 pb-3 bg-surface-page/95 backdrop-blur border-b border-border-subtle">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-baseline gap-2.5 min-w-0">
             <h1
