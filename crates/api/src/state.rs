@@ -2,10 +2,10 @@ use crate::error::ApiError;
 use axum::http::{header, HeaderMap, HeaderValue};
 use icehandnote_core::{
     auth::{
-        compute_device_fingerprint, normalize_supported_locale, parse_user_agent_device,
-        percent_encode_component, slugify_oauth_provider_id, BlogSsoClaims,
-        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
+        compute_device_fingerprint, normalize_ip_candidate, normalize_supported_locale,
+        parse_user_agent_device, percent_encode_component, slugify_oauth_provider_id,
+        BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
+        CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
         StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserProfileDto, UserRole,
         UserSessionDto,
     },
@@ -1337,19 +1337,59 @@ pub async fn check_note_write_rate_limit(state: &AppState, owner_key: &str) -> R
     Ok(())
 }
 
-pub fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next().map(str::trim).filter(|s| !s.is_empty()) {
-            return first.chars().take(64).collect();
+fn extract_forwarded_for_ip(headers: &HeaderMap) -> Option<String> {
+    for val in headers.get_all(header::FORWARDED) {
+        let Ok(raw) = val.to_str() else { continue };
+        for entry in raw.split(',') {
+            for pair in entry.split(';') {
+                let trimmed = pair.trim();
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    if k.trim().eq_ignore_ascii_case("for") {
+                        if let Some(ip) = normalize_ip_candidate(v) {
+                            return Some(ip);
+                        }
+                    }
+                }
+            }
         }
     }
-    if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let clean = xri.trim();
-        if !clean.is_empty() {
-            return clean.chars().take(64).collect();
+    None
+}
+
+pub fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
+    for single_hdr in [
+        "cf-connecting-ip",
+        "true-client-ip",
+        "eo-connecting-ip",
+        "ali-cdn-real-ip",
+    ] {
+        if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
+            if let Some(ip) = normalize_ip_candidate(val) {
+                return ip;
+            }
         }
+    }
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        for candidate in xff.split(',') {
+            if let Some(ip) = normalize_ip_candidate(candidate) {
+                return ip;
+            }
+        }
+    }
+    for single_hdr in ["x-real-ip", "x-client-ip"] {
+        if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
+            if let Some(ip) = normalize_ip_candidate(val) {
+                return ip;
+            }
+        }
+    }
+    if let Some(ip) = extract_forwarded_for_ip(headers) {
+        return ip;
     }
     if let Some(ip) = peer_ip {
+        if let Some(norm) = normalize_ip_candidate(&ip.to_string()) {
+            return norm;
+        }
         return ip.to_string();
     }
     "127.0.0.1".to_string()
@@ -1516,6 +1556,7 @@ pub async fn finalize_login_session(
     user: UserProfileDto,
     anon_learner_id: Option<&str>,
     ctx: &ClientContext,
+    trust_device: bool,
 ) -> Result<AuthSessionResponse, ApiError> {
     let learner_key = format!("user:{}", user.id);
     // 1. Merge server-verified HttpOnly guest cookie notes/progress first
@@ -1541,15 +1582,26 @@ pub async fn finalize_login_session(
                 .map_err(repo_err)?;
         }
     }
-    let _ = state
-        .repo
-        .record_trusted_device(
-            user.id,
-            &ctx.ip_address,
-            &ctx.device_fingerprint,
-            &ctx.device_label,
-        )
-        .await;
+    if trust_device {
+        if let Err(err) = state
+            .repo
+            .record_trusted_device(
+                user.id,
+                &ctx.ip_address,
+                &ctx.device_fingerprint,
+                &ctx.device_label,
+            )
+            .await
+        {
+            tracing::warn!(
+                user_id = %user.id,
+                ip = %ctx.ip_address,
+                device = %ctx.device_label,
+                error = %err,
+                "Failed to persist trusted device record after sign-in"
+            );
+        }
+    }
     let session_token = state
         .repo
         .create_session_with_meta(

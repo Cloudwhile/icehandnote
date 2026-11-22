@@ -25,7 +25,7 @@ use icehandnote_core::{
     auth::{
         build_gravatar_url, constant_time_str_eq, encode_basic_client_credentials, form_urlencode,
         generate_email_verification_code, generate_oauth_flow_tokens, hash_email_verification_code,
-        is_deliverable_email, mask_email_address, percent_encode_component,
+        is_deliverable_email, is_valid_email, mask_email_address, percent_encode_component,
         sanitize_internal_return_path, sign_blog_sso_token, validate_and_normalize_email,
         verify_blog_sso_token, BlogSsoClaims, SiteSettingsDto, UpdateUserProfileInput,
         UserProfileDto, UserRole,
@@ -164,6 +164,8 @@ pub struct SsoVerifyRequest {
     pub sso_token: String,
     #[serde(default)]
     pub anonymous_learner_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -270,6 +272,8 @@ pub struct BindExistingOAuthRequest {
     pub password: String,
     #[serde(default)]
     pub anonymous_learner_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 fn validate_username(raw: &str) -> Result<&str, ApiError> {
@@ -426,6 +430,7 @@ async fn complete_password_login_or_challenge(
         .await
         .map_err(repo_err)?;
 
+    let mut trust_device = true;
     if let Some(anomaly_reason) = anomaly {
         let (smtp_cfg, smtp_pw) = {
             let secrets = state.runtime_secrets.read().await;
@@ -496,16 +501,25 @@ async fn complete_password_login_or_challenge(
             }))
             .into_response());
         } else {
+            // Never permanently trust an unverified anomalous device/IP when OTP was skipped.
+            trust_device = false;
             tracing::warn!(
                 user_id = %user.id,
+                username = %user.username,
                 reason = %anomaly_reason,
                 ip = %ctx.ip_address,
-                "Anomalous login detected but SMTP is unconfigured or user has no deliverable email; proceeding without email OTP challenge."
+                device = %ctx.device_label,
+                smtp_enabled = smtp_cfg.enabled,
+                smtp_host_set = !smtp_cfg.host.trim().is_empty(),
+                smtp_from_valid = is_valid_email(&smtp_cfg.from_email),
+                email_deliverable = email_deliverable,
+                "Anomalous login detected but SMTP is unconfigured or user has no deliverable email; proceeding without email OTP challenge (device not marked trusted)."
             );
         }
     }
 
-    let session = finalize_login_session(state, user, anon_learner_id, ctx).await?;
+    let session =
+        finalize_login_session(state, user, anon_learner_id, ctx, trust_device).await?;
     Ok(Json(serde_json::json!({
         "requires_otp": false,
         "session_token": session.session_token,
@@ -594,9 +608,14 @@ pub async fn auth_login_verify_otp_handler(
         device_fingerprint,
         guest_cookie_raw: extract_cookie_value(&headers, GUEST_COOKIE_NAME),
     };
-    let session =
-        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &verified_ctx)
-            .await?;
+    let session = finalize_login_session(
+        &state,
+        user,
+        body.anonymous_learner_id.as_deref(),
+        &verified_ctx,
+        true,
+    )
+    .await?;
     Ok(Json(session))
 }
 
@@ -828,8 +847,14 @@ pub async fn auth_register_handler(
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
-    let session =
-        finalize_login_session(&state, created, body.anonymous_learner_id.as_deref(), &ctx).await?;
+    let session = finalize_login_session(
+        &state,
+        created,
+        body.anonymous_learner_id.as_deref(),
+        &ctx,
+        true,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(session)))
 }
 
@@ -991,7 +1016,8 @@ pub async fn reset_password_handler(
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
     let session =
-        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx).await?;
+        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx, true)
+            .await?;
     Ok(Json(session))
 }
 
@@ -1716,7 +1742,8 @@ pub async fn oauth_complete_registration_handler(
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
     let session =
-        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx).await?;
+        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx, true)
+            .await?;
     Ok((StatusCode::CREATED, Json(session)))
 }
 
@@ -1771,10 +1798,15 @@ pub async fn oauth_bind_existing_handler(
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
-    let session =
-        finalize_login_session(&state, bound_user, body.anonymous_learner_id.as_deref(), &ctx)
-            .await?;
-    Ok(Json(session))
+    complete_password_login_or_challenge(
+        &state,
+        &headers,
+        bound_user,
+        body.anonymous_learner_id.as_deref(),
+        body.locale.as_deref(),
+        &ctx,
+    )
+    .await
 }
 
 pub async fn oauth_exchange_handler(
@@ -1836,9 +1868,15 @@ pub async fn auth_sso_verify_handler(
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
-    let session =
-        finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx).await?;
-    Ok(Json(session))
+    complete_password_login_or_challenge(
+        &state,
+        &headers,
+        user,
+        body.anonymous_learner_id.as_deref(),
+        body.locale.as_deref(),
+        &ctx,
+    )
+    .await
 }
 
 pub async fn auth_dev_sso_ticket_handler(
@@ -2369,7 +2407,7 @@ pub async fn passkey_register_verify_handler(
         .save_user_passkey(stored)
         .await
         .map_err(repo_err)?;
-    let _ = state
+    if let Err(err) = state
         .repo
         .record_trusted_device(
             user.id,
@@ -2377,7 +2415,15 @@ pub async fn passkey_register_verify_handler(
             &ctx.device_fingerprint,
             &ctx.device_label,
         )
-        .await;
+        .await
+    {
+        tracing::warn!(
+            user_id = %user.id,
+            ip = %ctx.ip_address,
+            error = %err,
+            "Failed to persist trusted device record after passkey registration"
+        );
+    }
 
     Ok((StatusCode::CREATED, Json(saved)))
 }

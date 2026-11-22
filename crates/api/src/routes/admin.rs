@@ -5,14 +5,14 @@ use crate::{
         MailBrandContext,
     },
     state::{
-        build_postgres_url, detect_external_origin, internal_err, mask_database_url,
-        parse_postgres_url, repo_err, repo_err_or, require_admin, resolve_request_locale,
-        AppState, PostgresConnectionFields,
+        build_postgres_url, detect_external_origin, extract_client_context, internal_err,
+        mask_database_url, parse_postgres_url, repo_err, repo_err_or, require_admin,
+        resolve_request_locale, AppState, PostgresConnectionFields,
     },
 };
 use axum::{
-    extract::{Path as AxumPath, State},
-    http::{HeaderMap, StatusCode},
+    extract::{ConnectInfo, Path as AxumPath, State},
+    http::{Extensions, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -29,7 +29,7 @@ use icehandnote_db::{
     TutorialRepository,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use uuid::Uuid;
 
 // ============================================================================
@@ -243,10 +243,15 @@ pub async fn admin_test_storage_handler(
 
 pub async fn admin_update_storage_handler(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     Json(body): Json<SwitchStorageBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let current_admin = require_admin(&state, &headers).await?;
+    let ctx = extract_client_context(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
     let current_settings = state
         .repo
         .get_site_settings(&state.default_settings)
@@ -329,7 +334,32 @@ pub async fn admin_update_storage_handler(
     let _ = next_repo
         .update_site_settings(target_admin_id, current_settings)
         .await;
-    if let Ok(tok) = next_repo.create_session(target_admin_id).await {
+    if let Err(err) = next_repo
+        .record_trusted_device(
+            target_admin_id,
+            &ctx.ip_address,
+            &ctx.device_fingerprint,
+            &ctx.device_label,
+        )
+        .await
+    {
+        tracing::warn!(
+            user_id = %target_admin_id,
+            ip = %ctx.ip_address,
+            error = %err,
+            "Failed to seed trusted device during storage backend switch"
+        );
+    }
+    if let Ok(tok) = next_repo
+        .create_session_with_meta(
+            target_admin_id,
+            &ctx.ip_address,
+            &ctx.user_agent,
+            &ctx.device_label,
+            &ctx.device_fingerprint,
+        )
+        .await
+    {
         new_session_token = Some(tok);
     }
 

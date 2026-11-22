@@ -2376,4 +2376,330 @@ mod tests {
         server_task.abort();
         let _ = std::fs::remove_dir_all(tmp_root);
     }
+
+    #[tokio::test]
+    async fn login_anomaly_http_and_smtp_risk_control_end_to_end() {
+        use icehandnote_core::mail_templates::SmtpSettingsDto;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // 1. Local multi-message SMTP sink capturing all delivered alert/OTP emails
+        let smtp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let smtp_port = smtp_listener.local_addr().unwrap().port();
+        let delivered_mails: Arc<tokio::sync::Mutex<Vec<String>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let sink_store = delivered_mails.clone();
+        let smtp_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = smtp_listener.accept().await {
+                let store = sink_store.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut reader = BufReader::new(r);
+                    let _ = w.write_all(b"220 sink.local ESMTP Ready\r\n").await;
+                    let mut in_data = false;
+                    let mut body_buf = String::new();
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        if in_data {
+                            if line.trim_end_matches(['\r', '\n']) == "." {
+                                in_data = false;
+                                store.lock().await.push(std::mem::take(&mut body_buf));
+                                let _ = w.write_all(b"250 OK queued\r\n").await;
+                            } else {
+                                body_buf.push_str(&line);
+                            }
+                            continue;
+                        }
+                        let upper = line.to_ascii_uppercase();
+                        if upper.starts_with("EHLO ") || upper.starts_with("HELO ") {
+                            let _ = w.write_all(b"250-sink.local\r\n250 OK\r\n").await;
+                        } else if upper.starts_with("MAIL FROM:") || upper.starts_with("RCPT TO:") {
+                            let _ = w.write_all(b"250 OK\r\n").await;
+                        } else if upper.starts_with("DATA") {
+                            in_data = true;
+                            let _ = w.write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n").await;
+                        } else if upper.starts_with("QUIT") {
+                            let _ = w.write_all(b"221 Bye\r\n").await;
+                            break;
+                        } else {
+                            let _ = w.write_all(b"250 OK\r\n").await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let content_dir = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-risk-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&content_dir, store_path.clone(), false)
+                .unwrap();
+        let alice = repo
+            .register_local_account(
+                "alice_risk",
+                "Alice Risk",
+                "alice@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Reader,
+            )
+            .await
+            .unwrap();
+        let legacy_bob = repo
+            .register_local_account(
+                "bob_legacy",
+                "Bob Legacy",
+                "bob@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Reader,
+            )
+            .await
+            .unwrap();
+        // Simulate pre-0010 legacy session in user_sessions with empty user_trusted_devices
+        let _bob_legacy_tok = repo
+            .create_session_with_meta(legacy_bob.id, "198.51.100.55", "Chrome/135", "Chrome · Windows", "")
+            .await
+            .unwrap();
+
+        let runtime_secrets = Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default()));
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: runtime_secrets.clone(),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Step 1: First login establishes baseline (CF-Connecting-IP + X-Device-Id)
+        let first_login: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("cf-connecting-ip", "198.51.100.10")
+            .header("x-device-id", "dev_pc_alpha")
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0) Chrome/136.0")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!",
+                "locale": "zh-CN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(first_login["requires_otp"], false);
+        let pc_token = first_login["session_token"].as_str().unwrap().to_string();
+
+        // Step 2: Same IP via IPv4-mapped IPv6 + same device -> still trusted
+        let repeat_login: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("x-forwarded-for", "::ffff:198.51.100.10")
+            .header("x-device-id", "dev_pc_alpha")
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0) Chrome/136.0")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(repeat_login["requires_otp"], false);
+
+        // Step 3: Anomalous login while SMTP is OFF proceeds without OTP, and MUST NOT trust the unverified device
+        let unverified_bypass: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("cf-connecting-ip", "203.0.113.77")
+            .header("x-device-id", "dev_phone_beta")
+            .header(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(unverified_bypass["requires_otp"], false);
+
+        // Step 4: Enable SMTP -> logging in again from Phone + new IP MUST trigger OTP & send email
+        {
+            let mut sec = runtime_secrets.write().await;
+            sec.smtp = SmtpSettingsDto {
+                enabled: true,
+                host: "127.0.0.1".to_string(),
+                port: smtp_port,
+                encryption: "none".to_string(),
+                username: String::new(),
+                from_name: "IceHandnote".to_string(),
+                from_email: "noreply@icehandnote.dev".to_string(),
+                ..Default::default()
+            };
+        }
+
+        let phone_challenge: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("cf-connecting-ip", "203.0.113.77")
+            .header("x-device-id", "dev_phone_beta")
+            .header(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!",
+                "locale": "zh-CN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(phone_challenge["requires_otp"], true);
+        assert_eq!(phone_challenge["anomaly_reason"], "new_ip_and_device");
+        assert_eq!(phone_challenge["ip_address"], "203.0.113.77");
+        let chal_id = phone_challenge["challenge_id"].as_str().unwrap().to_string();
+
+        // Confirm SMTP sink received the anomaly OTP email and extract 6-digit OTP
+        let mail_raw = {
+            let mails = delivered_mails.lock().await;
+            assert_eq!(mails.len(), 1);
+            mails[0].clone()
+        };
+        let unfolded = mail_raw.replace("=\r\n", "").replace("=\n", "");
+        let otp_code = unfolded
+            .split('>')
+            .filter_map(|seg| seg.split('<').next())
+            .map(str::trim)
+            .find(|tok| tok.len() == 6 && tok.bytes().all(|b| b.is_ascii_digit()))
+            .expect("6-digit OTP code in anomaly email")
+            .to_string();
+
+        // Step 5: Verify OTP -> issues session and trusts (203.0.113.77, dev_phone_beta)
+        let verify_resp = client
+            .post(format!("{base}/api/v1/auth/login/verify-otp"))
+            .json(&serde_json::json!({
+                "challenge_id": chal_id,
+                "code": otp_code
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(verify_resp.status(), reqwest::StatusCode::OK);
+
+        // Step 6: Cross-pair login (PC IP + Phone device) MUST still trigger OTP!
+        let cross_pair: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("cf-connecting-ip", "198.51.100.10")
+            .header("x-device-id", "dev_phone_beta")
+            .header(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(cross_pair["requires_otp"], true);
+        assert_eq!(cross_pair["anomaly_reason"], "new_ip_and_device");
+        assert_eq!(delivered_mails.lock().await.len(), 2);
+
+        // Step 7: Revoking other sessions from PC also revokes Phone's trust -> Phone triggers OTP again!
+        let revoke_resp = client
+            .post(format!("{base}/api/v1/auth/sessions/revoke-others"))
+            .bearer_auth(&pc_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoke_resp.status(), reqwest::StatusCode::OK);
+
+        let after_revoke: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("cf-connecting-ip", "203.0.113.77")
+            .header("x-device-id", "dev_phone_beta")
+            .header(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1")
+            .json(&serde_json::json!({
+                "identifier": alice.username,
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(after_revoke["requires_otp"], true);
+        assert_eq!(delivered_mails.lock().await.len(), 3);
+
+        // Step 8: Cold-start fallback for legacy user (only user_sessions, empty user_trusted_devices)
+        // using RFC 7239 Forwarded header
+        let legacy_anomaly: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .header(header::FORWARDED, r#"for="203.0.113.88:5555";proto=https"#)
+            .header("x-device-id", "dev_new_tablet")
+            .header(header::USER_AGENT, "Mozilla/5.0 (iPad; CPU OS 18_0) Safari/604.1")
+            .json(&serde_json::json!({
+                "identifier": legacy_bob.username,
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(legacy_anomaly["requires_otp"], true);
+        assert_eq!(legacy_anomaly["anomaly_reason"], "new_ip_and_device");
+        assert_eq!(legacy_anomaly["ip_address"], "203.0.113.88");
+        assert_eq!(delivered_mails.lock().await.len(), 4);
+
+        server_task.abort();
+        smtp_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
 }
