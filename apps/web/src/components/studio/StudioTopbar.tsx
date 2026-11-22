@@ -65,7 +65,7 @@ export function StudioTopbar({
           aria-expanded={mobileDrawerOpen}
           aria-controls="studio-sidebar-drawer"
           onClick={onOpenMobileDrawer}
-          className="lg:hidden inline-flex items-center justify-center w-8 h-8 rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
+          className="lg:hidden inline-flex items-center justify-center w-9 h-9 ink-icon-target rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
         >
           <IconMenu className="w-4 h-4" />
         </button>
@@ -85,14 +85,14 @@ export function StudioTopbar({
           aria-label={sidebarCollapsed ? s.expandSidebarAria : s.collapseSidebarAria}
           title={sidebarCollapsed ? s.expandSidebarAria : s.collapseSidebarAria}
           onClick={onToggleSidebarCollapsed}
-          className="hidden lg:inline-flex items-center justify-center w-8 h-8 rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
+          className="hidden lg:inline-flex items-center justify-center w-9 h-9 ink-icon-target rounded-lg bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary cursor-pointer shrink-0 transition-colors"
         >
           <IconSidebarToggle className="w-4 h-4" />
         </button>
       </div>
 
       {/* Right: Search + Locale + Theme + Account */}
-      <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 shrink-0">
+      <div className="flex items-center gap-2 min-w-0 shrink-0">
         <SearchTriggerButton
           locale={locale}
           onOpenSearch={onOpenSearch}

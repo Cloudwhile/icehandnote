@@ -10,6 +10,7 @@
 import {
   type ClipboardEvent as ReactClipboardEvent,
   type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -19,9 +20,15 @@ import {
 } from 'react';
 import { api } from '../../lib/api';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
-import type { ResolvedTheme } from '../../lib/theme';
-import type { LocaleCode } from '../../lib/types';
+import { runLayoutTransition, toViewTransitionIdent } from '../../lib/motion';
 import {
+  inspectActiveInlineFormats,
+  setPersistentSelectionHighlight,
+} from '../../lib/richInline';
+import type { ResolvedTheme } from '../../lib/theme';
+import type { LocaleCode, TextAlign, TextSizePreset } from '../../lib/types';
+import {
+  type AttachedPixelSticker,
   createDefaultVisualBlock,
   createVisualId,
   parseMarkdownToVisualBlocks,
@@ -34,12 +41,28 @@ import {
   IconCode,
   IconDiagram,
   IconImage,
+  IconInlineCode,
+  IconKeyboardKey,
+  IconPixelSticker,
 } from '../ui/Icons';
 import { useToast } from '../ui/ToastProvider';
 import {
   BlockGutterHandle,
   convertBlockType,
+  InlineFormatToolbar,
+  KbdComboComposer,
 } from './blocks/BlockFloatingControls';
+import { BlockStickerLayer } from './blocks/BlockStickerLayer';
+import {
+  type ContextMenuTarget,
+  EditorContextMenu,
+} from './blocks/EditorContextMenu';
+import { PixelStickerBlockBody } from './blocks/PixelStickerBlockBody';
+import {
+  executeRichCommandOnElement,
+  focusRichEditable,
+  type RichSelectionReport,
+} from './blocks/RichEditable';
 import { RoughDiagramBlockBody } from './blocks/RoughDiagramBlockBody';
 import {
   AlertBlockBody,
@@ -89,15 +112,25 @@ const COMMON_LANGUAGES = [
 
 function cloneVisualBlock(block: VisualBlock): VisualBlock {
   const id = createVisualId();
+  const clonedStickers = block.stickers?.map((st) => ({
+    ...st,
+    id: createVisualId('stk'),
+  }));
   switch (block.type) {
     case 'steps':
       return {
         ...block,
         id,
         items: block.items.map((it) => ({ ...it, id: createVisualId('st') })),
+        ...(clonedStickers ? { stickers: clonedStickers } : {}),
       };
     case 'list':
-      return { ...block, id, items: [...block.items] };
+      return {
+        ...block,
+        id,
+        items: [...block.items],
+        ...(clonedStickers ? { stickers: clonedStickers } : {}),
+      };
     case 'rough_diagram':
       return {
         ...block,
@@ -106,9 +139,14 @@ function cloneVisualBlock(block: VisualBlock): VisualBlock {
           nodes: block.spec.nodes.map((n) => ({ ...n })),
           edges: block.spec.edges.map((e) => ({ ...e })),
         },
+        ...(clonedStickers ? { stickers: clonedStickers } : {}),
       };
     default:
-      return { ...block, id };
+      return {
+        ...block,
+        id,
+        ...(clonedStickers ? { stickers: clonedStickers } : {}),
+      };
   }
 }
 
@@ -121,7 +159,17 @@ export function VisualBlockToolStrip({
 }: VisualBlockToolStripProps) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
+  const extRich = EXT_COPY[locale].studio.richFormat;
   const extFlow = EXT_COPY[locale].studio.flowEditor;
+
+  const dispatchRichQuickAction = (action: 'inline-code' | 'kbd-combo') => {
+    window.dispatchEvent(
+      new CustomEvent<'inline-code' | 'kbd-combo'>(
+        'icehandnote:rich-quick-action',
+        { detail: action },
+      ),
+    );
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -171,6 +219,42 @@ export function VisualBlockToolStrip({
         <span>{v.types.rough_diagram}</span>
       </button>
 
+      <button
+        type="button"
+        data-testid="insert-pixel-sticker-btn"
+        onClick={() => onInsertBlock('pixel_sticker')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconPixelSticker className="w-3.5 h-3.5 text-accent-amber" />
+        <span>+ {v.types.pixel_sticker}</span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="toolstrip-inline-code-btn"
+        onPointerDown={(e) => {
+          if (e.button === 0) e.preventDefault();
+        }}
+        onClick={() => dispatchRichQuickAction('inline-code')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconInlineCode className="w-3.5 h-3.5 text-ink-secondary" />
+        <span>+ {extRich.inlineCode}</span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="toolstrip-kbd-btn"
+        onPointerDown={(e) => {
+          if (e.button === 0) e.preventDefault();
+        }}
+        onClick={() => dispatchRichQuickAction('kbd-combo')}
+        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+      >
+        <IconKeyboardKey className="w-3.5 h-3.5 text-link-ink" />
+        <span>+ {extRich.kbdCombo}</span>
+      </button>
+
       <span className="hidden xl:inline text-xs text-ink-muted ps-1">
         {extFlow.quickToolbarHint}
       </span>
@@ -213,6 +297,26 @@ export function VisualBlockEditor({
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dropGapIndex, setDropGapIndex] = useState<number | null>(null);
   const [uploadingQuickImg, setUploadingQuickImg] = useState(false);
+  const [selectedSticker, setSelectedSticker] = useState<{
+    blockId: string;
+    stickerId: string;
+  } | null>(null);
+  const [contextMenuTarget, setContextMenuTarget] =
+    useState<ContextMenuTarget | null>(null);
+  const [activeSelection, setActiveSelection] =
+    useState<RichSelectionReport | null>(null);
+  const [standaloneKbdTarget, setStandaloneKbdTarget] = useState<{
+    blockId: string;
+    el: HTMLElement;
+    range: Range | null;
+    rect: { top: number; bottom: number; left: number };
+  } | null>(null);
+  const lastFocusedBlockIdRef = useRef<string | null>(null);
+  const savedRightClickRangeRef = useRef<{
+    blockId: string;
+    el: HTMLElement;
+    range: Range;
+  } | null>(null);
 
   const displayBlocks: VisualBlock[] =
     blocks.length > 0
@@ -226,6 +330,535 @@ export function VisualBlockEditor({
           },
         ];
   blocksRef.current = displayBlocks;
+
+  // Deselect active sticker gizmo when clicking outside stickers, toolbar, or context menu
+  useEffect(() => {
+    if (!selectedSticker) return;
+    const onPointerDown = (ev: PointerEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (
+        target?.closest('[data-sticker-id]') ||
+        target?.closest('[data-testid="sticker-floating-toolbar"]') ||
+        target?.closest('[data-testid="editor-context-menu"]')
+      ) {
+        return;
+      }
+      setSelectedSticker(null);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [selectedSticker]);
+
+  const commitBlocks = useCallback(
+    (next: VisualBlock[]) => {
+      blocksRef.current = next;
+      onChange(next);
+    },
+    [onChange],
+  );
+
+  const updateBlockAlign = useCallback(
+    (blockId: string, align: TextAlign) => {
+      const next = blocksRef.current.map((b) => {
+        if (
+          b.id === blockId &&
+          (b.type === 'paragraph' ||
+            b.type === 'heading' ||
+            b.type === 'alert' ||
+            b.type === 'quote')
+        ) {
+          return { ...b, align };
+        }
+        return b;
+      });
+      commitBlocks(next);
+    },
+    [commitBlocks],
+  );
+
+  const updateBlockSize = useCallback(
+    (blockId: string, size: TextSizePreset) => {
+      const next = blocksRef.current.map((b) => {
+        if (
+          b.id === blockId &&
+          (b.type === 'paragraph' || b.type === 'alert' || b.type === 'quote')
+        ) {
+          return { ...b, size };
+        }
+        return b;
+      });
+      commitBlocks(next);
+    },
+    [commitBlocks],
+  );
+
+  // Listen to ZONE 1B toolstrip rich quick actions (`+ Inline code`, `+ Keyboard keys`)
+  useEffect(() => {
+    const onQuickAction = (ev: Event) => {
+      const action = (ev as CustomEvent<'inline-code' | 'kbd-combo'>).detail;
+      const root = containerRef.current;
+      if (!root) return;
+
+      const activeEl = document.activeElement as HTMLElement | null;
+      const focusedRich =
+        activeEl?.closest<HTMLElement>('[data-rich-editable="true"]');
+      const targetEl =
+        (focusedRich && root.contains(focusedRich) ? focusedRich : null) ??
+        (lastFocusedBlockIdRef.current
+          ? root.querySelector<HTMLElement>(
+              `[data-flow-block-id="${lastFocusedBlockIdRef.current}"] [data-rich-editable="true"]`,
+            )
+          : null) ??
+        root.querySelector<HTMLElement>('[data-rich-editable="true"]');
+      if (!targetEl) return;
+
+      const blockId = targetEl.getAttribute('data-rich-block-id') ?? '';
+      const sel = window.getSelection();
+      const liveRange =
+        sel &&
+        sel.rangeCount > 0 &&
+        targetEl.contains(sel.getRangeAt(0).commonAncestorContainer)
+          ? sel.getRangeAt(0).cloneRange()
+          : null;
+
+      if (action === 'inline-code') {
+        const nextRange = executeRichCommandOnElement(
+          targetEl,
+          liveRange,
+          { type: 'inline-code' },
+        );
+        if (nextRange && !nextRange.collapsed) {
+          const box = nextRange.getBoundingClientRect();
+          setActiveSelection({
+            blockId,
+            el: targetEl,
+            range: nextRange,
+            rect: {
+              top: box.top,
+              bottom: box.bottom,
+              left: box.left,
+              width: box.width,
+            },
+            formats: inspectActiveInlineFormats(targetEl, nextRange),
+          });
+        } else {
+          setActiveSelection(null);
+        }
+        return;
+      }
+
+      if (action === 'kbd-combo') {
+        const box = targetEl.getBoundingClientRect();
+        setStandaloneKbdTarget({
+          blockId,
+          el: targetEl,
+          range: liveRange,
+          rect: { top: box.top, bottom: box.bottom, left: box.left },
+        });
+      }
+    };
+    window.addEventListener('icehandnote:rich-quick-action', onQuickAction);
+    return () =>
+      window.removeEventListener('icehandnote:rich-quick-action', onQuickAction);
+  }, []);
+
+  // Dismiss floating selection toolbar / standalone `<kbd>` composer on outside click
+  useEffect(() => {
+    if (!activeSelection && !standaloneKbdTarget) return;
+    const onOutsidePointer = (ev: PointerEvent) => {
+      const t = ev.target as HTMLElement | null;
+      if (
+        t?.closest('[data-testid="flow-inline-toolbar"]') ||
+        t?.closest('[data-testid="editor-context-menu"]') ||
+        t?.closest('[data-testid="kbd-composer-panel"]') ||
+        t?.closest('.ink-menu-popover')
+      ) {
+        return;
+      }
+      if (standaloneKbdTarget) {
+        setStandaloneKbdTarget(null);
+      }
+      if (
+        activeSelection &&
+        (!activeSelection.el.isConnected || !containerRef.current?.contains(t))
+      ) {
+        setActiveSelection(null);
+      }
+    };
+    document.addEventListener('pointerdown', onOutsidePointer, true);
+    return () =>
+      document.removeEventListener('pointerdown', onOutsidePointer, true);
+  }, [activeSelection, standaloneKbdTarget]);
+
+  // Keep selected range highlighted via CSS Custom Highlight while context menu / kbd panel holds focus
+  useEffect(() => {
+    if (
+      contextMenuTarget?.kind === 'block' &&
+      contextMenuTarget.hasTextSelection &&
+      savedRightClickRangeRef.current
+    ) {
+      setPersistentSelectionHighlight(savedRightClickRangeRef.current.range);
+      return () => setPersistentSelectionHighlight(null);
+    }
+    if (standaloneKbdTarget?.range) {
+      setPersistentSelectionHighlight(standaloneKbdTarget.range);
+      return () => setPersistentSelectionHighlight(null);
+    }
+    return undefined;
+  }, [contextMenuTarget, standaloneKbdTarget]);
+
+  const attachStickerToBlock = (
+    targetBlockId: string,
+    coords?: { x: number; y: number },
+    sprite = 'cat',
+    extraUpdate?: (b: VisualBlock) => VisualBlock,
+  ) => {
+    const curBlocks = blocksRef.current;
+    const resolvedId = curBlocks.some((b) => b.id === targetBlockId)
+      ? targetBlockId
+      : curBlocks[0]?.id;
+    if (!resolvedId) return;
+
+    const existingCount =
+      curBlocks.find((b) => b.id === resolvedId)?.stickers?.length ?? 0;
+    const newSticker: AttachedPixelSticker = {
+      id: createVisualId('stk'),
+      sprite,
+      x:
+        coords?.x ??
+        Math.max(12, Math.min(92, 86 - (existingCount % 4) * 9)),
+      y:
+        coords?.y ??
+        Math.max(12, Math.min(88, 20 + (existingCount % 3) * 18)),
+      rotate: -6,
+      scale: 1,
+    };
+
+    const next = curBlocks.map((b) => {
+      if (b.id !== resolvedId) return b;
+      const updated = extraUpdate ? extraUpdate(b) : b;
+      return {
+        ...updated,
+        stickers: [...(updated.stickers ?? []), newSticker],
+      };
+    });
+    onChange(next);
+    setSelectedSticker({ blockId: resolvedId, stickerId: newSticker.id });
+  };
+
+  const updateStickerOnBlock = (
+    targetBlockId: string,
+    stickerId: string,
+    patch: Partial<AttachedPixelSticker>,
+  ) => {
+    const next = blocksRef.current.map((b) => {
+      if (b.id !== targetBlockId || !b.stickers) return b;
+      return {
+        ...b,
+        stickers: b.stickers.map((st) =>
+          st.id === stickerId ? { ...st, ...patch } : st,
+        ),
+      };
+    });
+    onChange(next);
+  };
+
+  const moveStickerBetweenBlocks = (
+    fromBlockId: string,
+    toBlockId: string,
+    stickerId: string,
+    coords: { x: number; y: number },
+  ) => {
+    const cur = blocksRef.current;
+    const sourceBlock = cur.find((b) => b.id === fromBlockId);
+    const moving = sourceBlock?.stickers?.find((s) => s.id === stickerId);
+    if (!moving) return;
+
+    const updatedSticker: AttachedPixelSticker = {
+      ...moving,
+      x: coords.x,
+      y: coords.y,
+    };
+
+    const next = cur.map((b) => {
+      if (b.id === fromBlockId && b.id === toBlockId) {
+        return {
+          ...b,
+          stickers: (b.stickers ?? []).map((s) =>
+            s.id === stickerId ? updatedSticker : s,
+          ),
+        };
+      }
+      if (b.id === fromBlockId) {
+        return {
+          ...b,
+          stickers: (b.stickers ?? []).filter((s) => s.id !== stickerId),
+        };
+      }
+      if (b.id === toBlockId) {
+        return {
+          ...b,
+          stickers: [...(b.stickers ?? []), updatedSticker],
+        };
+      }
+      return b;
+    });
+    onChange(next);
+    setSelectedSticker({ blockId: toBlockId, stickerId });
+  };
+
+  const duplicateStickerOnBlock = (targetBlockId: string, stickerId: string) => {
+    const cur = blocksRef.current;
+    const host = cur.find((b) => b.id === targetBlockId);
+    const orig = host?.stickers?.find((s) => s.id === stickerId);
+    if (!orig) return;
+    const copySt: AttachedPixelSticker = {
+      ...orig,
+      id: createVisualId('stk'),
+      locked: false,
+      x: Math.min(96, orig.x + 6),
+      y: Math.min(96, orig.y + 8),
+    };
+    const next = cur.map((b) =>
+      b.id === targetBlockId
+        ? { ...b, stickers: [...(b.stickers ?? []), copySt] }
+        : b,
+    );
+    onChange(next);
+    setSelectedSticker({ blockId: targetBlockId, stickerId: copySt.id });
+  };
+
+  const deleteStickerOnBlock = (targetBlockId: string, stickerId: string) => {
+    const next = blocksRef.current.map((b) =>
+      b.id === targetBlockId && b.stickers
+        ? { ...b, stickers: b.stickers.filter((s) => s.id !== stickerId) }
+        : b,
+    );
+    onChange(next);
+    setSelectedSticker((prev) =>
+      prev && prev.stickerId === stickerId ? null : prev,
+    );
+  };
+
+  const handleStickerMenuAction = (
+    targetBlockId: string,
+    stickerId: string,
+    action:
+      | 'toggle-lock'
+      | 'rotate-left'
+      | 'rotate-right'
+      | 'flip'
+      | 'scale-up'
+      | 'scale-down'
+      | 'reset'
+      | 'toggle-layer'
+      | 'duplicate'
+      | 'delete',
+  ) => {
+    const host = blocksRef.current.find((b) => b.id === targetBlockId);
+    const st = host?.stickers?.find((s) => s.id === stickerId);
+    if (!st) return;
+
+    const normDeg = (deg: number) => {
+      let d = ((deg + 180) % 360 + 360) % 360 - 180;
+      if (Object.is(d, -180)) d = 180;
+      return Number(d.toFixed(1));
+    };
+
+    switch (action) {
+      case 'toggle-lock': {
+        const nextLocked = !st.locked;
+        updateStickerOnBlock(targetBlockId, stickerId, { locked: nextLocked });
+        if (nextLocked) {
+          setSelectedSticker(null);
+        } else {
+          setSelectedSticker({ blockId: targetBlockId, stickerId });
+        }
+        break;
+      }
+      case 'rotate-left':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          rotate: normDeg(st.rotate - 15),
+        });
+        break;
+      case 'rotate-right':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          rotate: normDeg(st.rotate + 15),
+        });
+        break;
+      case 'flip':
+        updateStickerOnBlock(targetBlockId, stickerId, { flip: !st.flip });
+        break;
+      case 'scale-up':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          scale: Number(Math.min(3.0, st.scale + 0.2).toFixed(2)),
+        });
+        break;
+      case 'scale-down':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          scale: Number(Math.max(0.4, st.scale - 0.2).toFixed(2)),
+        });
+        break;
+      case 'toggle-layer':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          layer: st.layer === 'behind' ? 'front' : 'behind',
+        });
+        break;
+      case 'reset':
+        updateStickerOnBlock(targetBlockId, stickerId, {
+          rotate: 0,
+          scale: 1,
+          flip: false,
+        });
+        break;
+      case 'duplicate':
+        duplicateStickerOnBlock(targetBlockId, stickerId);
+        break;
+      case 'delete':
+        deleteStickerOnBlock(targetBlockId, stickerId);
+        break;
+    }
+  };
+
+  const handleContainerContextMenu = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const root = containerRef.current;
+    if (!root) return;
+
+    // 1. Hit-test all stickers by bounding box so even locked (`pointer-events: none`) stickers are caught
+    const stickerEls = Array.from(
+      root.querySelectorAll<HTMLElement>('[data-sticker-id]'),
+    );
+    for (let i = stickerEls.length - 1; i >= 0; i -= 1) {
+      const el = stickerEls[i];
+      const r = el.getBoundingClientRect();
+      if (
+        e.clientX >= r.left - 4 &&
+        e.clientX <= r.right + 4 &&
+        e.clientY >= r.top - 4 &&
+        e.clientY <= r.bottom + 4
+      ) {
+        const stId = el.getAttribute('data-sticker-id');
+        const bId = el.getAttribute('data-sticker-block-id');
+        const host = blocksRef.current.find((b) => b.id === bId);
+        const st = host?.stickers?.find((s) => s.id === stId);
+        if (bId && st) {
+          e.preventDefault();
+          setContextMenuTarget({
+            kind: 'sticker',
+            x: e.clientX,
+            y: e.clientY,
+            blockId: bId,
+            sticker: st,
+          });
+          return;
+        }
+      }
+    }
+
+    // 2. Hit-test block row (or fallback to last block when clicking canvas whitespace)
+    const rowEl =
+      (e.target as HTMLElement | null)?.closest<HTMLElement>(
+        '[data-flow-block-id]',
+      ) ?? root.querySelector<HTMLElement>('[data-flow-block-id]:last-of-type');
+    if (!rowEl) return;
+
+    const targetBlockId = rowEl.getAttribute('data-flow-block-id');
+    const blockIdx = blocksRef.current.findIndex((b) => b.id === targetBlockId);
+    const blk = blocksRef.current[blockIdx];
+    if (!targetBlockId || !blk) return;
+
+    const r = rowEl.getBoundingClientRect();
+    const relX = Number(
+      Math.max(
+        6,
+        Math.min(94, ((e.clientX - r.left) / Math.max(1, r.width)) * 100),
+      ).toFixed(1),
+    );
+    const relY = Number(
+      Math.max(
+        10,
+        Math.min(90, ((e.clientY - r.top) / Math.max(1, r.height)) * 100),
+      ).toFixed(1),
+    );
+
+    const saved = savedRightClickRangeRef.current;
+    let richSel = saved && rowEl.contains(saved.el) && !saved.range.collapsed
+      ? saved
+      : null;
+
+    if (!richSel) {
+      const liveSel = window.getSelection();
+      if (liveSel && liveSel.rangeCount > 0 && !liveSel.isCollapsed) {
+        const rng = liveSel.getRangeAt(0);
+        const anc = rng.commonAncestorContainer;
+        const richEl = (
+          anc.nodeType === Node.ELEMENT_NODE
+            ? (anc as HTMLElement)
+            : anc.parentElement
+        )?.closest<HTMLElement>('[data-rich-editable="true"]');
+        if (richEl && rowEl.contains(richEl)) {
+          richSel = {
+            blockId: blk.id,
+            el: richEl,
+            range: rng.cloneRange(),
+          };
+          savedRightClickRangeRef.current = richSel;
+        }
+      }
+    }
+
+    const hasTextSelection = Boolean(richSel);
+    const activeFormats = richSel
+      ? inspectActiveInlineFormats(richSel.el, richSel.range)
+      : undefined;
+    if (richSel) {
+      setPersistentSelectionHighlight(richSel.range);
+    }
+
+    const supportsAlign =
+      blk.type === 'paragraph' ||
+      blk.type === 'heading' ||
+      blk.type === 'alert' ||
+      blk.type === 'quote';
+    const blockAlign: TextAlign =
+      'align' in blk && blk.align ? blk.align : 'left';
+    const supportsFontSize =
+      blk.type === 'paragraph' || blk.type === 'alert' || blk.type === 'quote';
+    const blockSize: TextSizePreset =
+      (blk.type === 'paragraph' || blk.type === 'alert' || blk.type === 'quote') &&
+      blk.size
+        ? blk.size
+        : 'base';
+
+    const supportsMarginToggle =
+      blk.type === 'paragraph' ||
+      blk.type === 'code_card' ||
+      blk.type === 'image';
+    const hasMarginOpen =
+      ('marginNote' in blk && Boolean(blk.marginNote.trim())) ||
+      openMarginIds.has(blk.id);
+
+    e.preventDefault();
+    setContextMenuTarget({
+      kind: 'block',
+      x: e.clientX,
+      y: e.clientY,
+      blockId: blk.id,
+      blockIndex: blockIdx,
+      totalBlocks: blocksRef.current.length,
+      blockType: blk.type,
+      relX,
+      relY,
+      hasTextSelection,
+      activeFormats,
+      supportsAlign,
+      blockAlign,
+      supportsFontSize,
+      blockSize,
+      supportsMarginToggle,
+      hasMarginOpen,
+    });
+  };
 
   const scheduleFocus = useCallback(
     (blockId: string, caret: number | 'start' | 'end' = 'start') => {
@@ -243,13 +876,18 @@ export function VisualBlockEditor({
       const row = containerRef.current?.querySelector<HTMLElement>(
         `[data-flow-block-id="${req.blockId}"]`,
       );
-      const input = row?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+      const input = row?.querySelector<HTMLElement>(
         '[data-flow-input="primary"]',
       );
       if (!input) return;
+      if (input.getAttribute('data-rich-editable') === 'true') {
+        focusRichEditable(input, req.caret);
+        return;
+      }
       input.focus({ preventScroll: true });
       if (
-        'setSelectionRange' in input &&
+        (input instanceof HTMLInputElement ||
+          input instanceof HTMLTextAreaElement) &&
         typeof input.setSelectionRange === 'function'
       ) {
         const len = input.value.length;
@@ -267,14 +905,6 @@ export function VisualBlockEditor({
       }
     });
   }, [displayBlocks]);
-
-  const commitBlocks = useCallback(
-    (next: VisualBlock[]) => {
-      blocksRef.current = next;
-      onChange(next);
-    },
-    [onChange],
-  );
 
   const uploadAndInsertImage = useCallback(
     async (file: File, targetIndex: number, replaceEmptyTarget: boolean) => {
@@ -365,7 +995,9 @@ export function VisualBlockEditor({
         e.preventDefault();
         const next = [...displayBlocks];
         next.splice(idx, 1, ...parsed);
-        commitBlocks(next);
+        runLayoutTransition(containerRef.current, () => {
+          commitBlocks(next);
+        });
         const last = parsed[parsed.length - 1];
         if (last) scheduleFocus(last.id, 'end');
       }
@@ -468,7 +1100,9 @@ export function VisualBlockEditor({
           const [moved] = next.splice(sourceIdx, 1);
           const targetIdx = gap > sourceIdx ? gap - 1 : gap;
           next.splice(targetIdx, 0, moved);
-          commitBlocks(next);
+          runLayoutTransition(containerRef.current, () => {
+            commitBlocks(next);
+          });
           scheduleFocus(moved.id, 'start');
         }
       }
@@ -497,6 +1131,33 @@ export function VisualBlockEditor({
   let runningTaskOffset = 0;
   let runningSectionNumber = 0;
 
+  const selectedSelectionBlock = activeSelection
+    ? displayBlocks.find((b) => b.id === activeSelection.blockId)
+    : undefined;
+  const selectionSupportsAlign =
+    selectedSelectionBlock?.type === 'paragraph' ||
+    selectedSelectionBlock?.type === 'heading' ||
+    selectedSelectionBlock?.type === 'alert' ||
+    selectedSelectionBlock?.type === 'quote';
+  const selectionBlockAlign: TextAlign =
+    selectedSelectionBlock &&
+    'align' in selectedSelectionBlock &&
+    selectedSelectionBlock.align
+      ? selectedSelectionBlock.align
+      : 'left';
+  const selectionSupportsFontSize =
+    selectedSelectionBlock?.type === 'paragraph' ||
+    selectedSelectionBlock?.type === 'alert' ||
+    selectedSelectionBlock?.type === 'quote';
+  const selectionBlockSize: TextSizePreset =
+    selectedSelectionBlock &&
+    (selectedSelectionBlock.type === 'paragraph' ||
+      selectedSelectionBlock.type === 'alert' ||
+      selectedSelectionBlock.type === 'quote') &&
+    selectedSelectionBlock.size
+      ? selectedSelectionBlock.size
+      : 'base';
+
   return (
     <div
       ref={containerRef}
@@ -511,10 +1172,135 @@ export function VisualBlockEditor({
         }
       }}
       onDrop={handleContainerDrop}
+      onPointerDownCapture={(e) => {
+        if (e.button !== 2) return;
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+          const rng = sel.getRangeAt(0);
+          const anc = rng.commonAncestorContainer;
+          const richEl = (
+            anc.nodeType === Node.ELEMENT_NODE
+              ? (anc as HTMLElement)
+              : anc.parentElement
+          )?.closest<HTMLElement>('[data-rich-editable="true"]');
+          if (richEl && containerRef.current?.contains(richEl)) {
+            savedRightClickRangeRef.current = {
+              blockId: richEl.getAttribute('data-rich-block-id') ?? '',
+              el: richEl,
+              range: rng.cloneRange(),
+            };
+            return;
+          }
+        }
+        savedRightClickRangeRef.current = null;
+      }}
+      onContextMenu={handleContainerContextMenu}
       className={`relative md:ps-11 space-y-2 rounded-xl transition-colors ${
         fileDragOver ? 'ring-2 ring-dashed ring-action-bg bg-action-subtle/20' : ''
       }`}
     >
+      {activeSelection && !contextMenuTarget && !standaloneKbdTarget && (
+        <InlineFormatToolbar
+          locale={locale}
+          rect={activeSelection.rect}
+          formats={activeSelection.formats}
+          supportsAlign={selectionSupportsAlign}
+          blockAlign={selectionBlockAlign}
+          supportsFontSize={selectionSupportsFontSize}
+          blockSize={selectionBlockSize}
+          savedRange={activeSelection.range}
+          onCommand={(cmd) => {
+            const nextRange = executeRichCommandOnElement(
+              activeSelection.el,
+              activeSelection.range,
+              cmd,
+            );
+            if (nextRange && !nextRange.collapsed) {
+              const box = nextRange.getBoundingClientRect();
+              setActiveSelection({
+                ...activeSelection,
+                range: nextRange,
+                rect:
+                  box.width > 0 || box.height > 0
+                    ? {
+                        top: box.top,
+                        bottom: box.bottom,
+                        left: box.left,
+                        width: box.width,
+                      }
+                    : activeSelection.rect,
+                formats: inspectActiveInlineFormats(
+                  activeSelection.el,
+                  nextRange,
+                ),
+              });
+            } else {
+              setActiveSelection(null);
+            }
+          }}
+          onChangeAlign={(align) =>
+            updateBlockAlign(activeSelection.blockId, align)
+          }
+          onChangeBlockSize={(size) =>
+            updateBlockSize(activeSelection.blockId, size)
+          }
+          onRequestDismiss={() => setActiveSelection(null)}
+        />
+      )}
+
+      {standaloneKbdTarget && (
+        <div
+          className="fixed z-60 ui-popover-enter"
+          style={{
+            top: `${Math.round(
+              Math.max(
+                12,
+                Math.min(
+                  (typeof window !== 'undefined' ? window.innerHeight : 800) - 220,
+                  standaloneKbdTarget.rect.bottom + 8,
+                ),
+              ),
+            )}px`,
+            left: `${Math.round(
+              Math.max(
+                12,
+                Math.min(
+                  (typeof window !== 'undefined' ? window.innerWidth : 1280) - 332,
+                  standaloneKbdTarget.rect.left,
+                ),
+              ),
+            )}px`,
+          }}
+        >
+          <KbdComboComposer
+            locale={locale}
+            onInsert={(keys) => {
+              const target = standaloneKbdTarget;
+              const nextRange = executeRichCommandOnElement(
+                target.el,
+                target.range,
+                { type: 'kbd-combo', keys },
+              );
+              setStandaloneKbdTarget(null);
+              requestAnimationFrame(() => {
+                target.el.focus({ preventScroll: true });
+                if (nextRange) {
+                  const sel = window.getSelection();
+                  sel?.removeAllRanges();
+                  sel?.addRange(nextRange);
+                }
+              });
+            }}
+            onCancel={() => {
+              const target = standaloneKbdTarget;
+              setStandaloneKbdTarget(null);
+              requestAnimationFrame(() =>
+                target.el.focus({ preventScroll: true }),
+              );
+            }}
+          />
+        </div>
+      )}
       <datalist id={langListId}>
         {COMMON_LANGUAGES.map((lang) => (
           <option key={lang} value={lang} />
@@ -536,6 +1322,17 @@ export function VisualBlockEditor({
             blockCount={displayBlocks.length}
             uploadingImage={uploadingQuickImg}
             onInsertBlock={(kind) => {
+              if (kind === 'pixel_sticker') {
+                const targetId =
+                  (lastFocusedBlockIdRef.current &&
+                  displayBlocks.some(
+                    (b) => b.id === lastFocusedBlockIdRef.current,
+                  )
+                    ? lastFocusedBlockIdRef.current
+                    : displayBlocks[0]?.id) ?? '';
+                attachStickerToBlock(targetId);
+                return;
+              }
               const created = createDefaultVisualBlock(kind);
               if (created.type === 'rough_diagram') {
                 setFreshDiagramIds((prev) => new Set(prev).add(created.id));
@@ -572,49 +1369,90 @@ export function VisualBlockEditor({
 
           const flowHandlers: FlowBlockHandlers = {
             onCommitAndInsertAfter: (updatedCurrent, newAfter, caret = 'start') => {
+              if (newAfter.type === 'pixel_sticker') {
+                attachStickerToBlock(
+                  updatedCurrent.id,
+                  undefined,
+                  newAfter.sprite,
+                  () => updatedCurrent,
+                );
+                scheduleFocus(updatedCurrent.id, 'end');
+                return;
+              }
               const next = [...displayBlocks];
               next[idx] = updatedCurrent;
               next.splice(idx + 1, 0, newAfter);
               if (newAfter.type === 'rough_diagram') {
                 setFreshDiagramIds((prev) => new Set(prev).add(newAfter.id));
               }
-              commitBlocks(next);
+              runLayoutTransition(containerRef.current, () => {
+                commitBlocks(next);
+              });
               scheduleFocus(newAfter.id, caret);
             },
             onReplaceBlock: (nextBlock, focus) => {
+              if (nextBlock.type === 'pixel_sticker') {
+                const restored: VisualBlock =
+                  block.type === 'paragraph' ? { ...block, text: '' } : block;
+                attachStickerToBlock(
+                  block.id,
+                  undefined,
+                  nextBlock.sprite,
+                  () => restored,
+                );
+                return;
+              }
               const next = [...displayBlocks];
               next[idx] = nextBlock;
               if (nextBlock.type === 'rough_diagram') {
                 setFreshDiagramIds((prev) => new Set(prev).add(nextBlock.id));
               }
-              commitBlocks(next);
+              runLayoutTransition(containerRef.current, () => {
+                commitBlocks(next);
+              });
               scheduleFocus(nextBlock.id, focus?.caret ?? 'start');
             },
             onBackspaceAtStart: (remainingText) => {
               if (idx === 0) return;
               const prev = displayBlocks[idx - 1];
               if (prev.type === 'paragraph') {
-                const caretPos = prev.text.length;
+                const prevRichEl = containerRef.current?.querySelector<HTMLElement>(
+                  `[data-flow-block-id="${prev.id}"] [data-flow-input="primary"]`,
+                );
+                const caretPos = prevRichEl
+                  ? (prevRichEl.textContent ?? '').replace(/\u200B/g, '').length
+                  : prev.text.length;
                 const next = displayBlocks.filter((_, i) => i !== idx);
                 next[idx - 1] = { ...prev, text: `${prev.text}${remainingText}` };
-                commitBlocks(next);
+                runLayoutTransition(containerRef.current, () => {
+                  commitBlocks(next);
+                });
                 scheduleFocus(prev.id, caretPos);
                 return;
               }
               if (prev.type === 'heading') {
-                const caretPos = prev.text.length;
+                const prevRichEl = containerRef.current?.querySelector<HTMLElement>(
+                  `[data-flow-block-id="${prev.id}"] [data-flow-input="primary"]`,
+                );
+                const caretPos = prevRichEl
+                  ? (prevRichEl.textContent ?? '').replace(/\u200B/g, '').length
+                  : prev.text.length;
                 const next = displayBlocks.filter((_, i) => i !== idx);
                 next[idx - 1] = {
                   ...prev,
                   text: `${prev.text}${remainingText.replace(/\n+/g, ' ')}`,
                 };
-                commitBlocks(next);
+                runLayoutTransition(containerRef.current, () => {
+                  commitBlocks(next);
+                });
                 scheduleFocus(prev.id, caretPos);
                 return;
               }
               if (!remainingText.trim()) {
                 const next = displayBlocks.filter((_, i) => i !== idx);
-                commitBlocks(next);
+                runLayoutTransition(containerRef.current, () => {
+                  commitBlocks(next);
+                });
                 scheduleFocus(prev.id, 'end');
               } else {
                 scheduleFocus(prev.id, 'end');
@@ -628,6 +1466,23 @@ export function VisualBlockEditor({
                 direction < 0 ? 'end' : 'start',
               );
             },
+            onSelectionReport: setActiveSelection,
+            onOpenKbdComposer: (bId, el) => {
+              const sel = window.getSelection();
+              const rng =
+                sel &&
+                sel.rangeCount > 0 &&
+                el.contains(sel.getRangeAt(0).commonAncestorContainer)
+                  ? sel.getRangeAt(0).cloneRange()
+                  : null;
+              const box = el.getBoundingClientRect();
+              setStandaloneKbdTarget({
+                blockId: bId,
+                el,
+                range: rng,
+                rect: { top: box.top, bottom: box.bottom, left: box.left },
+              });
+            },
             marginNoteOpen: marginOpen,
             onOpenMarginNote: () => {
               setOpenMarginIds((prev) => new Set(prev).add(block.id));
@@ -639,6 +1494,12 @@ export function VisualBlockEditor({
                 return next;
               });
             },
+          };
+
+          const commitBlocksAnimated = (nextBlocks: VisualBlock[]) => {
+            runLayoutTransition(containerRef.current, () => {
+              commitBlocks(nextBlocks);
+            });
           };
 
           const updateCurrent = (nextBlock: VisualBlock) => {
@@ -656,7 +1517,7 @@ export function VisualBlockEditor({
             };
             const next = [...displayBlocks];
             next.splice(idx + 1, 0, nextPara);
-            commitBlocks(next);
+            commitBlocksAnimated(next);
             scheduleFocus(nextPara.id, 0);
           };
 
@@ -678,14 +1539,51 @@ export function VisualBlockEditor({
             block.type === 'image';
 
           return (
-            <div key={block.id} className="space-y-2">
+            <div
+              key={block.id}
+              className="space-y-2 vt-layout-item"
+              style={{
+                viewTransitionName: draggingBlockId
+                  ? undefined
+                  : toViewTransitionIdent('blk', block.id),
+              }}
+            >
               {isDropBefore && <div className="flow-drop-line" aria-hidden="true" />}
 
               <div
                 data-flow-block-id={block.id}
                 data-dragging={draggingBlockId === block.id ? 'true' : undefined}
-                className="flow-block-row"
+                onFocusCapture={() => {
+                  lastFocusedBlockIdRef.current = block.id;
+                }}
+                className="flow-block-row relative group/block"
               >
+                <BlockStickerLayer
+                  blockId={block.id}
+                  stickers={block.stickers ?? []}
+                  locale={locale}
+                  selectedStickerId={
+                    selectedSticker?.blockId === block.id
+                      ? selectedSticker.stickerId
+                      : null
+                  }
+                  onSelectSticker={(stId) =>
+                    setSelectedSticker(
+                      stId ? { blockId: block.id, stickerId: stId } : null,
+                    )
+                  }
+                  onUpdateSticker={(stId, patch) =>
+                    updateStickerOnBlock(block.id, stId, patch)
+                  }
+                  onMoveStickerToBlock={moveStickerBetweenBlocks}
+                  onDuplicateSticker={(stId) =>
+                    duplicateStickerOnBlock(block.id, stId)
+                  }
+                  onDeleteSticker={(stId) =>
+                    deleteStickerOnBlock(block.id, stId)
+                  }
+                />
+
                 <BlockGutterHandle
                   index={idx}
                   total={displayBlocks.length}
@@ -700,20 +1598,20 @@ export function VisualBlockEditor({
                     const next = [...displayBlocks];
                     const [m] = next.splice(idx, 1);
                     next.splice(idx - 1, 0, m);
-                    commitBlocks(next);
+                    commitBlocksAnimated(next);
                   }}
                   onMoveDown={() => {
                     if (idx >= displayBlocks.length - 1) return;
                     const next = [...displayBlocks];
                     const [m] = next.splice(idx, 1);
                     next.splice(idx + 1, 0, m);
-                    commitBlocks(next);
+                    commitBlocksAnimated(next);
                   }}
                   onDuplicate={() => {
                     const cloned = cloneVisualBlock(block);
                     const next = [...displayBlocks];
                     next.splice(idx + 1, 0, cloned);
-                    commitBlocks(next);
+                    commitBlocksAnimated(next);
                     scheduleFocus(cloned.id, 'end');
                   }}
                   onDelete={() => {
@@ -724,19 +1622,21 @@ export function VisualBlockEditor({
                         text: '',
                         marginNote: '',
                       };
-                      commitBlocks([reset]);
+                      commitBlocksAnimated([reset]);
                       scheduleFocus(reset.id, 0);
                     } else {
                       const prevTarget =
                         displayBlocks[Math.max(0, idx - 1)]?.id ??
                         displayBlocks[1]?.id;
-                      commitBlocks(displayBlocks.filter((_, i) => i !== idx));
+                      commitBlocksAnimated(displayBlocks.filter((_, i) => i !== idx));
                       if (prevTarget) scheduleFocus(prevTarget, 'end');
                     }
                   }}
                   onTurnInto={(target) => {
                     const converted = convertBlockType(block, target);
-                    updateCurrent(converted);
+                    const next = [...displayBlocks];
+                    next[idx] = converted;
+                    commitBlocksAnimated(next);
                     scheduleFocus(converted.id, 'end');
                   }}
                   onToggleMarginNote={
@@ -794,6 +1694,7 @@ export function VisualBlockEditor({
                     block={block}
                     locale={locale}
                     onUpdate={(next) => updateCurrent(next)}
+                    flow={flowHandlers}
                   />
                 )}
                 {block.type === 'code_card' && (
@@ -830,6 +1731,13 @@ export function VisualBlockEditor({
                     onUpdate={(next) => updateCurrent(next)}
                   />
                 )}
+                {block.type === 'pixel_sticker' && (
+                  <PixelStickerBlockBody
+                    block={block}
+                    locale={locale}
+                    onUpdate={(next) => updateCurrent(next)}
+                  />
+                )}
                 {block.type === 'image' && (
                   <ImageBlockBody
                     block={block}
@@ -863,9 +1771,16 @@ export function VisualBlockEditor({
             const row = containerRef.current?.querySelector<HTMLElement>(
               `[data-flow-block-id="${last.id}"]`,
             );
-            row
-              ?.querySelector<HTMLTextAreaElement>('[data-flow-input="primary"]')
-              ?.focus({ preventScroll: true });
+            const primary = row?.querySelector<HTMLElement>(
+              '[data-flow-input="primary"]',
+            );
+            if (primary) {
+              if (primary.getAttribute('data-rich-editable') === 'true') {
+                focusRichEditable(primary, 0);
+              } else {
+                primary.focus({ preventScroll: true });
+              }
+            }
             return;
           }
           const created: VisualBlock = {
@@ -874,10 +1789,203 @@ export function VisualBlockEditor({
             text: '',
             marginNote: '',
           };
-          commitBlocks([...displayBlocks, created]);
+          runLayoutTransition(containerRef.current, () => {
+            commitBlocks([...displayBlocks, created]);
+          });
           scheduleFocus(created.id, 0);
         }}
         className="min-h-20 cursor-text"
+      />
+
+      <EditorContextMenu
+        locale={locale}
+        target={contextMenuTarget}
+        onClose={() => setContextMenuTarget(null)}
+        onPasteStickerHere={(blockId, coords) =>
+          attachStickerToBlock(blockId, coords)
+        }
+        onStickerAction={handleStickerMenuAction}
+        onRichCommand={(cmd) => {
+          const saved = savedRightClickRangeRef.current;
+          const rowEl =
+            contextMenuTarget?.kind === 'block'
+              ? containerRef.current?.querySelector<HTMLElement>(
+                  `[data-flow-block-id="${contextMenuTarget.blockId}"]`,
+                )
+              : null;
+          const richEl =
+            (saved?.el?.isConnected ? saved.el : null) ??
+            rowEl?.querySelector<HTMLElement>('[data-rich-editable="true"]');
+          if (!richEl) return;
+
+          const nextRange = executeRichCommandOnElement(
+            richEl,
+            saved?.range ?? null,
+            cmd,
+          );
+          savedRightClickRangeRef.current = nextRange
+            ? {
+                blockId: richEl.getAttribute('data-rich-block-id') ?? '',
+                el: richEl,
+                range: nextRange,
+              }
+            : null;
+          requestAnimationFrame(() => {
+            richEl.focus({ preventScroll: true });
+            if (nextRange) {
+              const sel = window.getSelection();
+              sel?.removeAllRanges();
+              sel?.addRange(nextRange);
+              if (!nextRange.collapsed) {
+                const box = nextRange.getBoundingClientRect();
+                setActiveSelection({
+                  blockId: richEl.getAttribute('data-rich-block-id') ?? '',
+                  el: richEl,
+                  range: nextRange,
+                  rect:
+                    box.width > 0 || box.height > 0
+                      ? {
+                          top: box.top,
+                          bottom: box.bottom,
+                          left: box.left,
+                          width: box.width,
+                        }
+                      : richEl.getBoundingClientRect(),
+                  formats: inspectActiveInlineFormats(richEl, nextRange),
+                });
+              } else {
+                setActiveSelection(null);
+              }
+            } else {
+              setActiveSelection(null);
+            }
+          });
+        }}
+        onOpenKbdComposer={() => {
+          const saved = savedRightClickRangeRef.current;
+          const targetBlockId =
+            contextMenuTarget?.kind === 'block'
+              ? contextMenuTarget.blockId
+              : saved?.blockId ?? displayBlocks[0]?.id ?? '';
+          const richEl =
+            (saved?.el?.isConnected ? saved.el : null) ??
+            containerRef.current?.querySelector<HTMLElement>(
+              `[data-flow-block-id="${targetBlockId}"] [data-rich-editable="true"]`,
+            );
+          if (!richEl) return;
+          const box = richEl.getBoundingClientRect();
+          setStandaloneKbdTarget({
+            blockId: targetBlockId,
+            el: richEl,
+            range: saved?.range ?? null,
+            rect: { top: box.top, bottom: box.bottom, left: box.left },
+          });
+        }}
+        onChangeBlockAlign={(blockId, align) =>
+          updateBlockAlign(blockId, align)
+        }
+        onChangeBlockSize={(blockId, size) => updateBlockSize(blockId, size)}
+        onInsertBlockBelow={(afterBlockId, kind) => {
+          const cur = blocksRef.current;
+          const foundIdx = cur.findIndex((b) => b.id === afterBlockId);
+          const idx = foundIdx >= 0 ? foundIdx : cur.length - 1;
+          const created = createDefaultVisualBlock(kind);
+          if (created.type === 'rough_diagram') {
+            setFreshDiagramIds((prev) => new Set(prev).add(created.id));
+          }
+          const next = [...cur];
+          next.splice(idx + 1, 0, created);
+          runLayoutTransition(containerRef.current, () => {
+            commitBlocks(next);
+          });
+          scheduleFocus(created.id, 'start');
+        }}
+        onBlockAction={(blockId, action) => {
+          const cur = blocksRef.current;
+          const idx = cur.findIndex((b) => b.id === blockId);
+          const blk = cur[idx];
+          if (idx < 0 || !blk) return;
+
+          if (action === 'move-up') {
+            if (idx === 0) return;
+            const next = [...cur];
+            const [moved] = next.splice(idx, 1);
+            next.splice(idx - 1, 0, moved);
+            runLayoutTransition(containerRef.current, () => {
+              commitBlocks(next);
+            });
+            return;
+          }
+          if (action === 'move-down') {
+            if (idx >= cur.length - 1) return;
+            const next = [...cur];
+            const [moved] = next.splice(idx, 1);
+            next.splice(idx + 1, 0, moved);
+            runLayoutTransition(containerRef.current, () => {
+              commitBlocks(next);
+            });
+            return;
+          }
+          if (action === 'duplicate') {
+            const cloned = cloneVisualBlock(blk);
+            const next = [...cur];
+            next.splice(idx + 1, 0, cloned);
+            runLayoutTransition(containerRef.current, () => {
+              commitBlocks(next);
+            });
+            scheduleFocus(cloned.id, 'end');
+            return;
+          }
+          if (action === 'delete') {
+            if (cur.length <= 1) {
+              const reset: VisualBlock = {
+                id: blk.id,
+                type: 'paragraph',
+                text: '',
+                marginNote: '',
+              };
+              runLayoutTransition(containerRef.current, () => {
+                commitBlocks([reset]);
+              });
+              scheduleFocus(reset.id, 0);
+            } else {
+              const prevTarget = cur[Math.max(0, idx - 1)]?.id ?? cur[1]?.id;
+              const next = cur.filter((_, i) => i !== idx);
+              runLayoutTransition(containerRef.current, () => {
+                commitBlocks(next);
+              });
+              if (prevTarget) scheduleFocus(prevTarget, 'end');
+            }
+            return;
+          }
+          if (
+            action === 'toggle-margin' &&
+            (blk.type === 'paragraph' ||
+              blk.type === 'code_card' ||
+              blk.type === 'image')
+          ) {
+            const isOpen =
+              Boolean(blk.marginNote.trim()) || openMarginIds.has(blk.id);
+            if (isOpen) {
+              setOpenMarginIds((prev) => {
+                const next = new Set(prev);
+                next.delete(blk.id);
+                return next;
+              });
+              if (blk.marginNote) {
+                commitBlocks(
+                  cur.map((b) =>
+                    b.id === blk.id && 'marginNote' in b
+                      ? { ...b, marginNote: '' }
+                      : b,
+                  ),
+                );
+              }
+            } else {
+              setOpenMarginIds((prev) => new Set(prev).add(blk.id));
+            }
+          }
+        }}
       />
     </div>
   );

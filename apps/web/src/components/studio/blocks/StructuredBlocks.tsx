@@ -11,6 +11,7 @@
 
 import { type KeyboardEvent as ReactKeyboardEvent, useRef, useState } from 'react';
 import { EXT_COPY, UI_COPY } from '../../../lib/i18n';
+import { blockAlignClass, blockSizeClass } from '../../../lib/richInline';
 import type { LocaleCode } from '../../../lib/types';
 import {
   createVisualId,
@@ -20,15 +21,15 @@ import {
 } from '../../../lib/visualBlocks';
 import { StickerCardFrame } from '../../notebook/NotebookAlert';
 import { WashiCodeFrame } from '../../notebook/WashiCodeCard';
-import { IconPlus, IconTrash } from '../../ui/Icons';
+import { IconPlus, IconSparkBullet, IconTrash } from '../../ui/Icons';
 import { SegmentedControl } from '../../ui/Tabs';
 import {
   AlertStylePopover,
   CodeStylePopover,
   InlineAuthorMarginSticky,
-  isImeComposing,
   useAutoResizeTextarea,
 } from './BlockFloatingControls';
+import { focusRichEditable, RichEditable } from './RichEditable';
 import type { FlowBlockHandlers } from './TextAndMediaBlocks';
 
 export function StepsBlockBody({
@@ -46,7 +47,6 @@ export function StepsBlockBody({
 }) {
   const v = UI_COPY[locale].studio.visual;
   const extFlow = EXT_COPY[locale].studio.flowEditor;
-  const lastCompEndRef = useRef<number | null>(null);
   const [expandedDetailIds, setExpandedDetailIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -56,13 +56,11 @@ export function StepsBlockBody({
       const container = document.querySelector<HTMLElement>(
         `[data-flow-block-id="${block.id}"]`,
       );
-      const input = container?.querySelector<HTMLInputElement>(
+      const input = container?.querySelector<HTMLElement>(
         `[data-flow-step-idx="${idx}"]`,
       );
       if (input) {
-        input.focus({ preventScroll: true });
-        const pos = caret === 'end' ? input.value.length : caret;
-        input.setSelectionRange(pos, pos);
+        focusRichEditable(input, caret);
       }
     });
   };
@@ -125,73 +123,58 @@ export function StepsBlockBody({
               </span>
 
               <div className="flex-1 min-w-0 space-y-1">
-                <input
-                  type="text"
-                  size={1}
-                  data-flow-input={sIdx === 0 ? 'primary' : undefined}
-                  data-flow-step-idx={sIdx}
+                <RichEditable
+                  blockId={block.id}
+                  multiline={false}
+                  flowInputRole={sIdx === 0 ? 'primary' : undefined}
+                  extraDataAttrs={{ 'data-flow-step-idx': sIdx }}
                   value={stepItem.title}
-                  onCompositionEnd={(e) => {
-                    lastCompEndRef.current = e.timeStamp;
-                  }}
-                  onChange={(e) => updateStepItem({ title: e.target.value })}
-                  onKeyDown={(e) => {
-                    if (isImeComposing(e, lastCompEndRef.current)) return;
-                    const start = e.currentTarget.selectionStart ?? 0;
-                    const end = e.currentTarget.selectionEnd ?? 0;
-
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      if (!stepItem.title.trim()) {
-                        if (block.items.length === 1) {
-                          flow.onReplaceBlock(
-                            {
-                              id: block.id,
-                              type: 'paragraph',
-                              text: '',
-                              marginNote: '',
-                            },
-                            { caret: 0 },
-                          );
-                        } else {
-                          const nextItems = block.items.filter((_, i) => i !== sIdx);
-                          flow.onCommitAndInsertAfter(
-                            { ...block, items: nextItems },
-                            {
-                              id: createVisualId(),
-                              type: 'paragraph',
-                              text: '',
-                              marginNote: '',
-                            },
-                            0,
-                          );
-                        }
-                        return;
+                  placeholder={v.stepItemTitlePlaceholder}
+                  onChange={(val) => updateStepItem({ title: val })}
+                  onSelectionReport={flow.onSelectionReport}
+                  onEnterKey={(e, { beforeMd, afterMd }) => {
+                    e.preventDefault();
+                    if (!beforeMd.trim() && !afterMd.trim()) {
+                      if (block.items.length === 1) {
+                        flow.onReplaceBlock(
+                          {
+                            id: block.id,
+                            type: 'paragraph',
+                            text: '',
+                            marginNote: '',
+                          },
+                          { caret: 0 },
+                        );
+                      } else {
+                        const nextItems = block.items.filter((_, i) => i !== sIdx);
+                        flow.onCommitAndInsertAfter(
+                          { ...block, items: nextItems },
+                          {
+                            id: createVisualId(),
+                            type: 'paragraph',
+                            text: '',
+                            marginNote: '',
+                          },
+                          0,
+                        );
                       }
-
-                      const head = stepItem.title.slice(0, start);
-                      const tail = stepItem.title.slice(end);
-                      const nextItems = [...block.items];
-                      nextItems[sIdx] = { ...stepItem, title: head };
-                      nextItems.splice(sIdx + 1, 0, {
-                        id: createVisualId('st'),
-                        title: tail,
-                        detail: '',
-                        defaultChecked: false,
-                      });
-                      onUpdate({ ...block, items: nextItems });
-                      scheduleItemFocus(sIdx + 1, 0);
-                      return;
+                      return true;
                     }
 
-                    if (
-                      e.key === 'Backspace' &&
-                      start === 0 &&
-                      end === 0 &&
-                      !stepItem.title &&
-                      !stepItem.detail
-                    ) {
-                      e.preventDefault();
+                    const nextItems = [...block.items];
+                    nextItems[sIdx] = { ...stepItem, title: beforeMd };
+                    nextItems.splice(sIdx + 1, 0, {
+                      id: createVisualId('st'),
+                      title: afterMd,
+                      detail: '',
+                      defaultChecked: false,
+                    });
+                    onUpdate({ ...block, items: nextItems });
+                    scheduleItemFocus(sIdx + 1, 0);
+                    return true;
+                  }}
+                  onBackspaceAtStart={(remainingMd) => {
+                    if (!remainingMd.trim() && !stepItem.detail.trim()) {
                       if (block.items.length <= 1) {
                         flow.onReplaceBlock(
                           {
@@ -208,42 +191,42 @@ export function StepsBlockBody({
                         onUpdate({ ...block, items: nextItems });
                         scheduleItemFocus(prevIdx, 'end');
                       }
-                      return;
+                      return true;
                     }
-
-                    if (e.key === 'ArrowUp' && sIdx > 0) {
-                      e.preventDefault();
-                      scheduleItemFocus(sIdx - 1, 'end');
-                    } else if (e.key === 'ArrowUp' && sIdx === 0 && start === 0) {
-                      e.preventDefault();
-                      flow.onMoveFocusVertical(-1);
-                    } else if (
-                      e.key === 'ArrowDown' &&
-                      sIdx < block.items.length - 1
-                    ) {
-                      e.preventDefault();
-                      scheduleItemFocus(sIdx + 1, 0);
-                    } else if (
-                      e.key === 'ArrowDown' &&
-                      sIdx === block.items.length - 1 &&
-                      start === stepItem.title.length
-                    ) {
-                      e.preventDefault();
-                      flow.onMoveFocusVertical(1);
-                    }
+                    return false;
                   }}
-                  placeholder={v.stepItemTitlePlaceholder}
-                  className="w-full min-w-0 bg-transparent border-0 p-0 text-sm text-ink-primary font-semibold placeholder:font-normal placeholder:text-ink-muted/65 focus:outline-none"
+                  onMoveVertical={(dir) => {
+                    if (dir < 0 && sIdx > 0) {
+                      scheduleItemFocus(sIdx - 1, 'end');
+                      return true;
+                    }
+                    if (dir < 0 && sIdx === 0) {
+                      flow.onMoveFocusVertical(-1);
+                      return true;
+                    }
+                    if (dir > 0 && sIdx < block.items.length - 1) {
+                      scheduleItemFocus(sIdx + 1, 0);
+                      return true;
+                    }
+                    if (dir > 0 && sIdx === block.items.length - 1) {
+                      flow.onMoveFocusVertical(1);
+                      return true;
+                    }
+                    return false;
+                  }}
+                  className="w-full min-w-0 text-sm text-ink-primary font-semibold"
                 />
 
                 {showDetail && (
-                  <input
-                    type="text"
-                    size={1}
+                  <RichEditable
+                    blockId={block.id}
+                    multiline={false}
+                    flowInputRole={undefined}
                     value={stepItem.detail}
-                    onChange={(e) => updateStepItem({ detail: e.target.value })}
                     placeholder={v.stepItemDetailPlaceholder}
-                    className="w-full min-w-0 bg-transparent border-0 p-0 text-xs text-ink-secondary placeholder:text-ink-muted/65 focus:outline-none"
+                    onChange={(val) => updateStepItem({ detail: val })}
+                    onSelectionReport={flow.onSelectionReport}
+                    className="w-full min-w-0 text-xs text-ink-secondary"
                   />
                 )}
               </div>
@@ -314,15 +297,15 @@ export function AlertBlockBody({
   block,
   locale,
   onUpdate,
+  flow,
 }: {
   block: Extract<VisualBlock, { type: 'alert' }>;
   locale: LocaleCode;
   onUpdate: (next: Extract<VisualBlock, { type: 'alert' }>) => void;
+  flow?: FlowBlockHandlers;
 }) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
-  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
-  const detailRef = useRef<HTMLTextAreaElement | null>(null);
   const [detailForcedOpen, setDetailForcedOpen] = useState(false);
 
   const hasDetailContent = Boolean(
@@ -330,9 +313,6 @@ export function AlertBlockBody({
   );
   const showDetail = detailForcedOpen || hasDetailContent;
   const displayBadge = block.badge.trim() || copy.alertStamps[block.kind];
-
-  useAutoResizeTextarea(bodyRef, block.body);
-  useAutoResizeTextarea(detailRef, block.detailBody);
 
   return (
     <StickerCardFrame
@@ -360,8 +340,18 @@ export function AlertBlockBody({
       }
     >
       {({ tokens }) => (
-        <div className="space-y-1.5 pe-9 sm:pe-20">
-          <div className="flex flex-wrap items-baseline gap-2">
+        <div
+          className={`space-y-1.5 pe-9 sm:pe-20 ${blockAlignClass(block.align)} ${blockSizeClass(block.size)}`.trim()}
+        >
+          <div
+            className={`flex flex-wrap items-baseline gap-2 ${
+              block.align === 'center'
+                ? 'justify-center'
+                : block.align === 'right'
+                  ? 'justify-end'
+                  : ''
+            }`.trim()}
+          >
             <span
               className="font-hand text-xs sm:text-sm font-semibold tracking-wide px-2 py-0.5 rounded border border-dashed shrink-0"
               style={{
@@ -384,16 +374,26 @@ export function AlertBlockBody({
             />
           </div>
 
-          <textarea
-            ref={bodyRef}
-            data-flow-input="primary"
-            rows={2}
-            value={block.body}
-            onChange={(e) => onUpdate({ ...block, body: e.target.value })}
-            placeholder={v.alertBodyPlaceholder}
-            className="flow-editor-textarea text-sm leading-relaxed placeholder:opacity-60"
-            style={{ color: tokens.body }}
-          />
+          <div style={{ color: tokens.body }}>
+            <RichEditable
+              blockId={block.id}
+              value={block.body}
+              multiline={true}
+              flowInputRole="primary"
+              placeholder={v.alertBodyPlaceholder}
+              onChange={(val) => onUpdate({ ...block, body: val })}
+              onSelectionReport={flow?.onSelectionReport}
+              onMoveVertical={
+                flow
+                  ? (dir) => {
+                      flow.onMoveFocusVertical(dir);
+                      return true;
+                    }
+                  : undefined
+              }
+              className={`text-sm leading-relaxed ${blockAlignClass(block.align)} ${blockSizeClass(block.size)}`.trim()}
+            />
+          </div>
 
           {showDetail && (
             <div
@@ -410,17 +410,18 @@ export function AlertBlockBody({
                 className="w-full bg-transparent border-0 p-0 text-xs font-semibold focus:outline-none placeholder:opacity-65"
                 style={{ color: tokens.title }}
               />
-              <textarea
-                ref={detailRef}
-                rows={2}
-                value={block.detailBody}
-                onChange={(e) =>
-                  onUpdate({ ...block, detailBody: e.target.value })
-                }
-                placeholder={v.alertDetailBodyPlaceholder}
-                className="flow-editor-textarea text-xs sm:text-sm leading-relaxed placeholder:opacity-60"
-                style={{ color: tokens.body }}
-              />
+              <div style={{ color: tokens.body }}>
+                <RichEditable
+                  blockId={block.id}
+                  value={block.detailBody}
+                  multiline={true}
+                  flowInputRole={undefined}
+                  placeholder={v.alertDetailBodyPlaceholder}
+                  onChange={(val) => onUpdate({ ...block, detailBody: val })}
+                  onSelectionReport={flow?.onSelectionReport}
+                  className="text-xs sm:text-sm leading-relaxed"
+                />
+              </div>
             </div>
           )}
         </div>
@@ -573,20 +574,17 @@ export function ListBlockBody({
   flow: FlowBlockHandlers;
 }) {
   const v = UI_COPY[locale].studio.visual;
-  const lastCompEndRef = useRef<number | null>(null);
 
   const scheduleItemFocus = (idx: number, caret: number | 'end' = 0) => {
     requestAnimationFrame(() => {
       const container = document.querySelector<HTMLElement>(
         `[data-flow-block-id="${block.id}"]`,
       );
-      const input = container?.querySelector<HTMLInputElement>(
+      const input = container?.querySelector<HTMLElement>(
         `[data-flow-list-idx="${idx}"]`,
       );
       if (input) {
-        input.focus({ preventScroll: true });
-        const pos = caret === 'end' ? input.value.length : caret;
-        input.setSelectionRange(pos, pos);
+        focusRichEditable(input, caret);
       }
     });
   };
@@ -611,21 +609,28 @@ export function ListBlockBody({
       <div className="space-y-1">
         {block.items.map((itemText, lIdx) => (
           <div key={lIdx} className="flex items-baseline gap-2.5">
-            <span className="font-mono text-xs text-link-ink w-5 text-end shrink-0 tabular-nums select-none">
-              {block.ordered ? `${lIdx + 1}.` : '✦'}
+            <span className="font-mono text-xs text-link-ink w-5 text-end shrink-0 tabular-nums select-none inline-flex justify-end items-center">
+              {block.ordered ? (
+                `${lIdx + 1}.`
+              ) : (
+                <IconSparkBullet className="w-3 h-3" />
+              )}
             </span>
-            <input
-              type="text"
-              size={1}
-              data-flow-input={lIdx === 0 ? 'primary' : undefined}
-              data-flow-list-idx={lIdx}
+            <RichEditable
+              blockId={block.id}
+              multiline={false}
+              flowInputRole={lIdx === 0 ? 'primary' : undefined}
+              extraDataAttrs={{ 'data-flow-list-idx': lIdx }}
               value={itemText}
-              onCompositionEnd={(e) => {
-                lastCompEndRef.current = e.timeStamp;
-              }}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (block.items.length === 1 && val.startsWith('[ ] ')) {
+              placeholder={v.listItemPlaceholder}
+              onChange={(val) =>
+                onUpdate({
+                  ...block,
+                  items: block.items.map((it, i) => (i === lIdx ? val : it)),
+                })
+              }
+              onPrefixTransform={(plain) => {
+                if (block.items.length === 1 && plain.startsWith('[ ] ')) {
                   flow.onReplaceBlock(
                     {
                       id: block.id,
@@ -635,7 +640,7 @@ export function ListBlockBody({
                       items: [
                         {
                           id: createVisualId('st'),
-                          title: val.slice(4),
+                          title: plain.slice(4),
                           detail: '',
                           defaultChecked: false,
                         },
@@ -643,101 +648,95 @@ export function ListBlockBody({
                     },
                     { caret: 0 },
                   );
-                  return;
+                  return true;
                 }
-                onUpdate({
-                  ...block,
-                  items: block.items.map((it, i) => (i === lIdx ? val : it)),
-                });
+                return false;
               }}
-              onKeyDown={(e) => {
-                if (isImeComposing(e, lastCompEndRef.current)) return;
-                const start = e.currentTarget.selectionStart ?? 0;
-                const end = e.currentTarget.selectionEnd ?? 0;
-
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  if (!itemText.trim()) {
-                    if (block.items.length <= 1) {
-                      flow.onReplaceBlock(
-                        {
-                          id: block.id,
-                          type: 'paragraph',
-                          text: '',
-                          marginNote: '',
-                        },
-                        { caret: 0 },
-                      );
-                    } else {
-                      const nextItems = block.items.filter((_, i) => i !== lIdx);
-                      flow.onCommitAndInsertAfter(
-                        { ...block, items: nextItems },
-                        {
-                          id: createVisualId(),
-                          type: 'paragraph',
-                          text: '',
-                          marginNote: '',
-                        },
-                        0,
-                      );
-                    }
-                    return;
-                  }
-                  const head = itemText.slice(0, start);
-                  const tail = itemText.slice(end);
-                  const nextItems = [...block.items];
-                  nextItems[lIdx] = head;
-                  nextItems.splice(lIdx + 1, 0, tail);
-                  onUpdate({ ...block, items: nextItems });
-                  scheduleItemFocus(lIdx + 1, 0);
-                  return;
-                }
-
-                if (e.key === 'Backspace' && start === 0 && end === 0) {
-                  e.preventDefault();
+              onSelectionReport={flow.onSelectionReport}
+              onEnterKey={(e, { beforeMd, afterMd }) => {
+                e.preventDefault();
+                if (!beforeMd.trim() && !afterMd.trim()) {
                   if (block.items.length <= 1) {
                     flow.onReplaceBlock(
                       {
                         id: block.id,
                         type: 'paragraph',
-                        text: itemText,
+                        text: '',
                         marginNote: '',
                       },
                       { caret: 0 },
                     );
-                  } else if (lIdx > 0) {
-                    const prevLen = block.items[lIdx - 1].length;
+                  } else {
                     const nextItems = block.items.filter((_, i) => i !== lIdx);
-                    nextItems[lIdx - 1] = `${nextItems[lIdx - 1]}${itemText}`;
-                    onUpdate({ ...block, items: nextItems });
-                    scheduleItemFocus(lIdx - 1, prevLen);
+                    flow.onCommitAndInsertAfter(
+                      { ...block, items: nextItems },
+                      {
+                        id: createVisualId(),
+                        type: 'paragraph',
+                        text: '',
+                        marginNote: '',
+                      },
+                      0,
+                    );
                   }
-                  return;
+                  return true;
                 }
-
-                if (e.key === 'ArrowUp' && lIdx > 0) {
-                  e.preventDefault();
-                  scheduleItemFocus(lIdx - 1, 'end');
-                } else if (e.key === 'ArrowUp' && lIdx === 0 && start === 0) {
-                  e.preventDefault();
-                  flow.onMoveFocusVertical(-1);
-                } else if (
-                  e.key === 'ArrowDown' &&
-                  lIdx < block.items.length - 1
-                ) {
-                  e.preventDefault();
-                  scheduleItemFocus(lIdx + 1, 0);
-                } else if (
-                  e.key === 'ArrowDown' &&
-                  lIdx === block.items.length - 1 &&
-                  start === itemText.length
-                ) {
-                  e.preventDefault();
-                  flow.onMoveFocusVertical(1);
-                }
+                const nextItems = [...block.items];
+                nextItems[lIdx] = beforeMd;
+                nextItems.splice(lIdx + 1, 0, afterMd);
+                onUpdate({ ...block, items: nextItems });
+                scheduleItemFocus(lIdx + 1, 0);
+                return true;
               }}
-              placeholder={v.listItemPlaceholder}
-              className="flex-1 min-w-0 bg-transparent border-0 p-0 text-base text-ink-primary placeholder:text-ink-muted/65 focus:outline-none leading-relaxed"
+              onBackspaceAtStart={(remainingMd) => {
+                if (block.items.length <= 1) {
+                  flow.onReplaceBlock(
+                    {
+                      id: block.id,
+                      type: 'paragraph',
+                      text: remainingMd,
+                      marginNote: '',
+                    },
+                    { caret: 0 },
+                  );
+                  return true;
+                }
+                if (lIdx > 0) {
+                  const prevEl = document
+                    .querySelector<HTMLElement>(`[data-flow-block-id="${block.id}"]`)
+                    ?.querySelector<HTMLElement>(`[data-flow-list-idx="${lIdx - 1}"]`);
+                  const prevPlainLen = (prevEl?.textContent ?? '').replace(
+                    /\u200B/g,
+                    '',
+                  ).length;
+                  const nextItems = block.items.filter((_, i) => i !== lIdx);
+                  nextItems[lIdx - 1] = `${nextItems[lIdx - 1]}${remainingMd}`;
+                  onUpdate({ ...block, items: nextItems });
+                  scheduleItemFocus(lIdx - 1, prevPlainLen);
+                  return true;
+                }
+                return false;
+              }}
+              onMoveVertical={(dir) => {
+                if (dir < 0 && lIdx > 0) {
+                  scheduleItemFocus(lIdx - 1, 'end');
+                  return true;
+                }
+                if (dir < 0 && lIdx === 0) {
+                  flow.onMoveFocusVertical(-1);
+                  return true;
+                }
+                if (dir > 0 && lIdx < block.items.length - 1) {
+                  scheduleItemFocus(lIdx + 1, 0);
+                  return true;
+                }
+                if (dir > 0 && lIdx === block.items.length - 1) {
+                  flow.onMoveFocusVertical(1);
+                  return true;
+                }
+                return false;
+              }}
+              className="flex-1 min-w-0 text-base text-ink-primary leading-relaxed"
             />
           </div>
         ))}

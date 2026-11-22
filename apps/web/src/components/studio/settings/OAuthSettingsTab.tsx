@@ -13,7 +13,7 @@ import {
   type SiteSettingsDto,
 } from '../../../lib/types';
 import { RadioPillGroup, SwitchRow } from '../../ui/FormControls';
-import { IconCopy, IconPen, IconPlus, IconTrash } from '../../ui/Icons';
+import { IconCheck, IconCopy, IconPen, IconPlus, IconTrash } from '../../ui/Icons';
 import { ModalDialog, ModalHeader } from '../../ui/ModalDialog';
 import { PasswordInput } from '../../ui/PasswordInput';
 import { StatusBadge } from '../../ui/StatusBadge';
@@ -539,13 +539,18 @@ export function OAuthSettingsTab({
                         </StatusBadge>
                       )}
                       <span
-                        className={`text-xs font-mono shrink-0 ${
+                        className={`text-xs font-mono shrink-0 inline-flex items-center gap-1 ${
                           secretSaved ? 'text-accent-success' : 'text-ink-muted'
                         }`}
                       >
-                        {secretSaved
-                          ? `✓ ${st.oauthSecretSavedBadge}`
-                          : extSettings.oauthMissingSecretBadge}
+                        {secretSaved ? (
+                          <>
+                            <IconCheck className="w-3 h-3" />
+                            <span>{st.oauthSecretSavedBadge}</span>
+                          </>
+                        ) : (
+                          extSettings.oauthMissingSecretBadge
+                        )}
                       </span>
                     </div>
 
@@ -606,6 +611,7 @@ export function OAuthSettingsTab({
         }}
         ariaLabelledBy="oauth-provider-modal-title"
         maxWidthClass="max-w-xl"
+        stableScrollbarGutter
       >
         <form
           onSubmit={(e) => void handleSaveModal(e)}
@@ -783,8 +789,9 @@ export function OAuthSettingsTab({
                   {st.oauthClientSecretLabel}
                 </label>
                 {hasExistingModalSecret && (
-                  <span className="text-xs font-mono text-accent-success">
-                    ✓ {st.oauthSecretSavedBadge}
+                  <span className="text-xs font-mono text-accent-success inline-flex items-center gap-1">
+                    <IconCheck className="w-3 h-3" />
+                    <span>{st.oauthSecretSavedBadge}</span>
                   </span>
                 )}
               </div>

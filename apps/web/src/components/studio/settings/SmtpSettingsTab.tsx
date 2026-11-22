@@ -14,6 +14,8 @@ import type {
   SmtpSettingsDto,
 } from '../../../lib/types';
 import { SwitchRow } from '../../ui/FormControls';
+import { IconCheck } from '../../ui/Icons';
+import { InkSelect } from '../../ui/InkSelect';
 import { PasswordInput } from '../../ui/PasswordInput';
 import { SegmentedControl, UnderlineTabs } from '../../ui/Tabs';
 import { useToast } from '../../ui/ToastProvider';
@@ -138,6 +140,8 @@ export function SmtpSettingsTab({
 
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const previewResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const onDirtyAndSavingChangeRef = useRef(onDirtyAndSavingChange);
+  onDirtyAndSavingChangeRef.current = onDirtyAndSavingChange;
   const [previewIframeHeight, setPreviewIframeHeight] = useState<number>(480);
 
   useEffect(() => {
@@ -176,8 +180,8 @@ export function SmtpSettingsTab({
       passwordInput.trim().length > 0);
 
   useEffect(() => {
-    onDirtyAndSavingChange(isDirty, savingSmtp);
-  }, [isDirty, savingSmtp, onDirtyAndSavingChange]);
+    onDirtyAndSavingChangeRef.current(isDirty, savingSmtp);
+  }, [isDirty, savingSmtp]);
 
   const handleSaveSmtp = useCallback(async () => {
     if (savingSmtp || !loaded) return;
@@ -495,21 +499,22 @@ export function SmtpSettingsTab({
               >
                 {extSettings.smtpEncryptionLabel}
               </label>
-              <select
+              <InkSelect
                 id="smtp-enc"
                 value={smtpDraft.encryption}
-                onChange={(e) =>
+                onChange={(nextEnc) =>
                   setSmtpDraft({
                     ...smtpDraft,
-                    encryption: e.target.value as 'tls' | 'starttls' | 'none',
+                    encryption: nextEnc as 'tls' | 'starttls' | 'none',
                   })
                 }
-                className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs"
-              >
-                <option value="tls">{extSettings.smtpEncTls}</option>
-                <option value="starttls">{extSettings.smtpEncStarttls}</option>
-                <option value="none">{extSettings.smtpEncNone}</option>
-              </select>
+                options={[
+                  { value: 'tls', label: extSettings.smtpEncTls },
+                  { value: 'starttls', label: extSettings.smtpEncStarttls },
+                  { value: 'none', label: extSettings.smtpEncNone },
+                ]}
+                triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-xs"
+              />
             </div>
           </div>
 
@@ -542,8 +547,9 @@ export function SmtpSettingsTab({
                 </label>
                 {hasPassword && (
                   <div className="flex items-center gap-2 text-xs">
-                    <span className="font-mono text-accent-success">
-                      ✓ {extSettings.smtpPasswordSavedBadge}
+                    <span className="font-mono text-accent-success inline-flex items-center gap-1">
+                      <IconCheck className="w-3 h-3" />
+                      <span>{extSettings.smtpPasswordSavedBadge}</span>
                     </span>
                     <button
                       type="button"

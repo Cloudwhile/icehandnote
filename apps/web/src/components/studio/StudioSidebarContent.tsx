@@ -207,7 +207,7 @@ export function StudioSidebarContent({
                       <details
                         key={track.track_id}
                         open={isCurrentTrack || Boolean(treeQuery.trim())}
-                        className="group"
+                        className="group studio-disclosure"
                       >
                         <summary className="list-none px-1.5 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer select-none text-xs font-semibold text-ink-primary hover:bg-surface-sheet/70">
                           <span
@@ -224,110 +224,123 @@ export function StudioSidebarContent({
                           </span>
                         </summary>
 
-                        <div className="ms-2.5 ps-2 border-s border-border-subtle space-y-2 py-1">
-                          {track.chapters.map((ch) => (
-                            <div key={ch.chapter_id} className="space-y-0.5">
-                              <div className="px-1 flex items-center justify-between gap-1">
-                                <span
-                                  className="text-xs text-ink-muted studio-ellipsis"
-                                  title={stripHtmlTags(ch.title)}
-                                >
-                                  <SafeHtml as="span" html={ch.title} />
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    onQuickNewStep(track.slug, ch.slug);
-                                    onCloseMobileDrawer?.();
-                                  }}
-                                  aria-label={s.addStepInChapterAria(stripHtmlTags(ch.title))}
-                                  title={s.addStepInChapterTitle}
-                                  className="min-w-6 min-h-6 inline-flex items-center justify-center rounded text-xs font-mono text-link-ink hover:bg-action-subtle cursor-pointer shrink-0"
-                                >
-                                  +
-                                </button>
-                              </div>
+                        <div className="ms-2.5 ps-2 border-s border-border-subtle space-y-1 py-1">
+                          {(() => {
+                            const defaultChSlug =
+                              track.chapters[0]?.slug ?? 'chapters';
+                            const flatSteps = track.chapters.flatMap((ch) =>
+                              ch.steps.map((st) => ({
+                                chSlug: ch.slug,
+                                st,
+                              })),
+                            );
+                            return (
+                              <>
+                                <div className="px-1 flex items-center justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      onQuickNewStep(track.slug, defaultChSlug);
+                                      onCloseMobileDrawer?.();
+                                    }}
+                                    aria-label={s.addStepInChapterAria(
+                                      stripHtmlTags(track.title),
+                                    )}
+                                    title={s.addStepInChapterTitle}
+                                    className="min-h-6 px-1.5 inline-flex items-center gap-1 rounded text-xs font-mono text-link-ink hover:bg-action-subtle cursor-pointer shrink-0"
+                                  >
+                                    <span>{s.addStepHereBtn}</span>
+                                  </button>
+                                </div>
 
-                              <ul className="m-0 p-0 list-none space-y-0.5">
-                                {ch.steps.map((st) => {
-                                  const active =
-                                    activeSection === 'editor' &&
-                                    track.slug === selTrack &&
-                                    ch.slug === selChapter &&
-                                    st.slug === selStep;
-                                  const hasDraft = st.translations.some(
-                                    (tr) => tr.status === 'draft',
-                                  );
-                                  const hasDrift = st.translations.some(
-                                    (tr) =>
-                                      tr.synced_revision < st.canonical_revision,
-                                  );
+                                <ul className="m-0 p-0 list-none space-y-0.5">
+                                  {flatSteps.map(({ chSlug, st }, idx) => {
+                                    const active =
+                                      activeSection === 'editor' &&
+                                      track.slug === selTrack &&
+                                      chSlug === selChapter &&
+                                      st.slug === selStep;
+                                    const hasDraft = st.translations.some(
+                                      (tr) => tr.status === 'draft',
+                                    );
+                                    const hasDrift = st.translations.some(
+                                      (tr) =>
+                                        tr.synced_revision <
+                                        st.canonical_revision,
+                                    );
 
-                                  return (
-                                    <li key={st.step_id}>
-                                      <button
-                                        type="button"
-                                        aria-current={
-                                          active ? 'location' : undefined
-                                        }
-                                        onClick={() => {
-                                          onPickStep(
-                                            track.slug,
-                                            ch.slug,
-                                            st.slug,
-                                          );
-                                          onCloseMobileDrawer?.();
-                                        }}
-                                        className={`w-full min-h-8 px-2 py-1 rounded-lg text-xs flex items-center gap-1.5 text-start cursor-pointer transition-colors ${
-                                          active
-                                            ? 'bg-action-subtle text-ink-primary font-semibold'
-                                            : 'text-ink-secondary hover:bg-surface-sheet hover:text-ink-primary'
-                                        }`}
-                                      >
-                                        <span className="font-mono text-xs text-ink-muted tabular-nums shrink-0">
-                                          {st.step_number}.
-                                        </span>
-                                        <span className="flex-1 studio-ellipsis">
-                                          <SafeHtml as="span" html={st.title} />
-                                        </span>
-                                        {st.takedown_reason && (
-                                          <StatusBadge
-                                            tone="danger"
-                                            mono
-                                            className="px-1 py-0"
-                                            title={st.takedown_reason}
-                                          >
-                                            {EXT_COPY[locale].studio.takenDownBadge}
-                                          </StatusBadge>
-                                        )}
-                                        {hasDraft && (
-                                          <StatusBadge
-                                            tone="info"
-                                            mono
-                                            className="px-1 py-0"
-                                            title={s.hasDraftTitle}
-                                          >
-                                            {s.draftChip}
-                                          </StatusBadge>
-                                        )}
-                                        {hasDrift && (
-                                          <span
-                                            aria-label={s.hasDriftTitle}
-                                            title={s.hasDriftTitle}
-                                            className="w-2 h-2 rounded-full shrink-0"
-                                            style={{
-                                              backgroundColor:
-                                                'var(--marker-h3)',
-                                            }}
-                                          />
-                                        )}
-                                      </button>
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            </div>
-                          ))}
+                                    return (
+                                      <li key={st.step_id}>
+                                        <button
+                                          type="button"
+                                          aria-current={
+                                            active ? 'location' : undefined
+                                          }
+                                          onClick={() => {
+                                            onPickStep(
+                                              track.slug,
+                                              chSlug,
+                                              st.slug,
+                                            );
+                                            onCloseMobileDrawer?.();
+                                          }}
+                                          className={`w-full min-h-8 px-2 py-1 rounded-lg text-xs flex items-center gap-1.5 text-start cursor-pointer transition-colors ${
+                                            active
+                                              ? 'bg-action-subtle text-ink-primary font-semibold'
+                                              : 'text-ink-secondary hover:bg-surface-sheet hover:text-ink-primary'
+                                          }`}
+                                        >
+                                          <span className="font-mono text-xs text-ink-muted tabular-nums shrink-0">
+                                            {st.step_number || idx + 1}.
+                                          </span>
+                                          <span className="flex-1 studio-ellipsis">
+                                            <SafeHtml
+                                              as="span"
+                                              html={st.title}
+                                            />
+                                          </span>
+                                          {st.takedown_reason && (
+                                            <StatusBadge
+                                              tone="danger"
+                                              mono
+                                              className="px-1 py-0"
+                                              title={st.takedown_reason}
+                                            >
+                                              {
+                                                EXT_COPY[locale].studio
+                                                  .takenDownBadge
+                                              }
+                                            </StatusBadge>
+                                          )}
+                                          {hasDraft && (
+                                            <StatusBadge
+                                              tone="info"
+                                              mono
+                                              className="px-1 py-0"
+                                              title={s.hasDraftTitle}
+                                            >
+                                              {s.draftChip}
+                                            </StatusBadge>
+                                          )}
+                                          {hasDrift && (
+                                            <span
+                                              aria-label={s.hasDriftTitle}
+                                              title={s.hasDriftTitle}
+                                              className="w-2 h-2 rounded-full shrink-0"
+                                              style={{
+                                                backgroundColor:
+                                                  'var(--marker-h3)',
+                                              }}
+                                            />
+                                          )}
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </>
+                            );
+                          })()}
                         </div>
                       </details>
                     );

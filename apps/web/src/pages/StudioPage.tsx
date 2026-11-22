@@ -36,8 +36,10 @@ import { StudioTopbar } from '../components/studio/StudioTopbar';
 import { StudioUsersPanel } from '../components/studio/StudioUsersPanel';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { IconSnowflake } from '../components/ui/Icons';
+import { InkSelect } from '../components/ui/InkSelect';
 import { useToast } from '../components/ui/ToastProvider';
 import { api } from '../lib/api';
+import { runLayoutTransition } from '../lib/motion';
 import {
   EXT_COPY,
   isRegisteredLocale,
@@ -185,7 +187,10 @@ export function StudioPage({
     useState<StepModerationPatch | null>(null);
 
   const canAuthor = Boolean(
-    user && (user.role === 'author' || user.role === 'admin'),
+    user &&
+      (user.role === 'author' ||
+        user.role === 'admin' ||
+        user.has_collaborations),
   );
   const isAdmin = Boolean(user && user.role === 'admin');
 
@@ -351,17 +356,23 @@ export function StudioPage({
   }, [canAuthor, locale]);
 
   useEffect(() => {
-    if (!canAuthor) return;
+    if (!authResolved || !canAuthor) return;
     void refreshOverview();
-  }, [canAuthor, refreshOverview]);
+  }, [authResolved, canAuthor, refreshOverview]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!authResolved || !isAdmin) return;
     void api
       .adminListUsers()
       .then(setUsersList)
       .catch(() => {});
-  }, [isAdmin, activeSection]);
+  }, [authResolved, isAdmin, activeSection]);
+
+  const handleSwitchSection = useCallback((next: StudioSectionId) => {
+    runLayoutTransition(mainScrollRef.current, () => {
+      setActiveSection(next);
+    });
+  }, []);
 
   const pendingCount = useMemo(() => {
     const enabled =
@@ -436,8 +447,6 @@ export function StudioPage({
     );
   }
 
-  const currentTrackObj = tracks.find((t) => t.slug === selTrack) ?? tracks[0];
-
   const handleTrackSelect = (nextTrackSlug: string) => {
     setSelTrack(nextTrackSlug);
     const t = tracks.find((item) => item.slug === nextTrackSlug);
@@ -445,14 +454,6 @@ export function StudioPage({
     if (ch) {
       setSelChapter(ch.slug);
       if (ch.steps[0]) setSelStep(ch.steps[0].slug);
-    }
-  };
-
-  const handleChapterSelect = (nextChSlug: string) => {
-    setSelChapter(nextChSlug);
-    const ch = currentTrackObj?.chapters.find((c) => c.slug === nextChSlug);
-    if (ch?.steps[0]) {
-      setSelStep(ch.steps[0].slug);
     }
   };
 
@@ -465,17 +466,34 @@ export function StudioPage({
     setSelChapter(chapterSlug);
     setSelStep(stepSlug);
     setCreatingNewStep(false);
-    setActiveSection('editor');
+    handleSwitchSection('editor');
+  };
+
+  const makeNextDraftSlug = (trackSlug: string): string => {
+    const track = tracks.find((t) => t.slug === trackSlug);
+    const existing = new Set(
+      (track?.chapters ?? []).flatMap((c) => c.steps.map((st) => st.slug)),
+    );
+    const baseNum = existing.size + 1;
+    let candidate = `draft-${String(baseNum).padStart(2, '0')}`;
+    let suffix = 2;
+    while (existing.has(candidate)) {
+      candidate = `draft-${String(baseNum).padStart(2, '0')}-${suffix}`;
+      suffix += 1;
+    }
+    return candidate;
   };
 
   const handleQuickNewStepFromSidebar = (
     trackSlug: string,
     chapterSlug: string,
   ) => {
+    const draftSlug = makeNextDraftSlug(trackSlug);
     setSelTrack(trackSlug);
     setSelChapter(chapterSlug);
-    setCreatingNewStep(true);
-    setActiveSection('editor');
+    setSelStep(draftSlug);
+    setCreatingNewStep(false);
+    handleSwitchSection('editor');
   };
 
   const handleOpenEditorTarget = (
@@ -489,21 +507,27 @@ export function StudioPage({
     setSelStep(stepSlug);
     setEditLocale(targetLocale);
     setCreatingNewStep(false);
-    setActiveSection('editor');
+    handleSwitchSection('editor');
   };
 
   const handleStartNewStep = (e: FormEvent) => {
     e.preventDefault();
-    const clean = newStepSlug
+    const rawClean = newStepSlug
       .trim()
       .toLowerCase()
-      .replace(/[^a-z0-9-_]/g, '-');
-    if (!clean) return;
+      .replace(/[^a-z0-9-_]/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const clean =
+      rawClean && rawClean !== '-' ? rawClean : makeNextDraftSlug(selTrack);
+    const defaultChSlug =
+      tracks.find((t) => t.slug === selTrack)?.chapters[0]?.slug ||
+      selChapter ||
+      'chapters';
+    setSelChapter(defaultChSlug);
     setSelStep(clean);
     setNewStepSlug('');
     setCreatingNewStep(false);
-    setActiveSection('editor');
-    toast.info(s.switchedNewStepBanner(clean));
+    handleSwitchSection('editor');
   };
 
   const handleRequestTakedown = (target: TakedownStepTarget) => {
@@ -567,7 +591,7 @@ export function StudioPage({
     siteSettings,
     settingsReady,
     activeSection,
-    onSelectSection: setActiveSection,
+    onSelectSection: handleSwitchSection,
     activeSettingsTab,
     onSelectSettingsTab: handleSelectSettingsTab,
     enabledOAuthCount,
@@ -634,9 +658,9 @@ export function StudioPage({
                 onOpenEditorTarget={handleOpenEditorTarget}
                 onStartQuickNewStep={() => {
                   setCreatingNewStep(true);
-                  setActiveSection('editor');
+                  handleSwitchSection('editor');
                 }}
-                onSwitchSection={setActiveSection}
+                onSwitchSection={handleSwitchSection}
               />
             </div>
           )}
@@ -657,9 +681,10 @@ export function StudioPage({
                 editLocale={editLocale}
                 onChangeEditLocale={setEditLocale}
                 onStepDeleted={(nextSlug) => setSelStep(nextSlug)}
+                onStepSlugSaved={(nextSlug) => setSelStep(nextSlug)}
                 onRefreshOverview={refreshOverview}
                 onOpenNewStepModal={() => setCreatingNewStep(true)}
-                onSwitchSection={setActiveSection}
+                onSwitchSection={handleSwitchSection}
                 onRequestTakedown={handleRequestTakedown}
                 onRestoreStep={(t, c, st) => void handleRestoreStep(t, c, st)}
                 moderationPatch={moderationPatch}
@@ -715,7 +740,7 @@ export function StudioPage({
       <ConfirmDialog
         open={creatingNewStep}
         onClose={() => setCreatingNewStep(false)}
-        title={s.startNewNoteCta}
+        title={s.addStepInChapterTitle}
         cancelLabel={s.deleteCancelBtn}
         confirmLabel={s.createBtn}
         maxWidthClass="max-w-md"
@@ -729,39 +754,16 @@ export function StudioPage({
             >
               {s.stepTrackLabel}
             </label>
-            <select
+            <InkSelect
               id="modal-new-track"
               value={selTrack}
-              onChange={(e) => handleTrackSelect(e.target.value)}
-              className="w-full ps-3 pe-7 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
-            >
-              {tracks.map((t) => (
-                <option key={t.slug} value={t.slug}>
-                  {stripHtmlTags(t.title)} ({t.slug})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label
-              htmlFor="modal-new-chapter"
-              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-            >
-              {s.stepChapterLabel}
-            </label>
-            <select
-              id="modal-new-chapter"
-              value={selChapter}
-              onChange={(e) => handleChapterSelect(e.target.value)}
-              className="w-full ps-3 pe-7 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
-            >
-              {(currentTrackObj?.chapters ?? []).map((ch) => (
-                <option key={ch.slug} value={ch.slug}>
-                  {stripHtmlTags(ch.title)} ({ch.slug})
-                </option>
-              ))}
-            </select>
+              onChange={handleTrackSelect}
+              options={tracks.map((t) => ({
+                value: t.slug,
+                label: `${stripHtmlTags(t.title)} (${t.slug})`,
+              }))}
+              triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-sm"
+            />
           </div>
 
           <div>
@@ -774,9 +776,9 @@ export function StudioPage({
             <input
               id="modal-new-slug"
               type="text"
-              required
               value={newStepSlug}
               onChange={(e) => setNewStepSlug(e.target.value)}
+              placeholder={extCopy.studio.publishedUrl.autoSlugPlaceholder}
               className="ink-field-input font-mono"
             />
           </div>

@@ -4,28 +4,41 @@
  */
 
 import { type FormEvent, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { MAX_EMAIL_LENGTH } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
-import { ALL_LICENSE_OPTIONS, normalizeLicenseId } from '../../lib/licenses';
+import { sanitizeStepSlugDraft } from '../../lib/slugify';
+import { normalizeLicenseId } from '../../lib/licenses';
+import { CcLicenseSelector } from '../notebook/CcLicenseCard';
 import type {
   ArticleAuthorDto,
   CollaboratorInviteDto,
+  CollaboratorRole,
   LicenseId,
   LocaleCode,
   SiteSettingsDto,
 } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { FieldErrorText } from '../ui/FormControls';
-import { IconClose, IconCopy } from '../ui/Icons';
+import { IconClose, IconCopy, IconExternalLink } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
+import { useToast } from '../ui/ToastProvider';
 import { UserAvatar } from '../ui/UserAvatar';
 
 interface StudioEditorInspectorProps {
   locale: LocaleCode;
+  editLocale: LocaleCode;
   siteSettings: SiteSettingsDto;
+  trackSlug: string;
   trackTitle: string;
   chapterTitle: string;
   stepSlug: string;
+  draftStepSlug: string;
+  canOpenPublishedPage: boolean;
+  suggestedSlug?: string;
+  onApplySuggestedSlug?: () => void;
+  onChangeStepSlug: (val: string) => void;
+  onCommitStepSlug: (cleanSlug: string) => void;
   docExists: boolean;
   docStatus: 'published' | 'draft';
   docVersion: number;
@@ -44,23 +57,38 @@ interface StudioEditorInspectorProps {
   docAuthors: ArticleAuthorDto[];
   docPendingInvites: CollaboratorInviteDto[];
   canManageCollaborators: boolean;
+  canLeave?: boolean;
   inviteEmail: string;
   onChangeInviteEmail: (val: string) => void;
+  inviteRole: CollaboratorRole;
+  onChangeInviteRole: (val: CollaboratorRole) => void;
   inviting: boolean;
   lastInviteUrl: string;
   onInviteCollaborator: (e: FormEvent) => void;
   onCopyInviteLink: () => void;
   onRevokeInvite: (inviteId: string) => void;
   onRemoveCollaborator: (userId: string) => void;
+  onUpdateCollaboratorRole: (userId: string, role: CollaboratorRole) => void;
+  onTransferOwnership: (author: ArticleAuthorDto) => void;
+  onLeaveCollaboration: () => void;
+  onOpenHistory: () => void;
   onClose: () => void;
 }
 
 export function StudioEditorInspector({
   locale,
+  editLocale,
   siteSettings,
+  trackSlug,
   trackTitle,
   chapterTitle,
   stepSlug,
+  draftStepSlug,
+  canOpenPublishedPage,
+  suggestedSlug,
+  onApplySuggestedSlug,
+  onChangeStepSlug,
+  onCommitStepSlug,
   docExists,
   docStatus,
   docVersion,
@@ -79,20 +107,30 @@ export function StudioEditorInspector({
   docAuthors,
   docPendingInvites,
   canManageCollaborators,
+  canLeave = false,
   inviteEmail,
   onChangeInviteEmail,
+  inviteRole,
+  onChangeInviteRole,
   inviting,
   lastInviteUrl,
   onInviteCollaborator,
   onCopyInviteLink,
   onRevokeInvite,
   onRemoveCollaborator,
+  onUpdateCollaboratorRole,
+  onTransferOwnership,
+  onLeaveCollaboration,
+  onOpenHistory,
   onClose,
 }: StudioEditorInspectorProps) {
   const copy = UI_COPY[locale];
   const s = copy.studio;
   const extCopy = EXT_COPY[locale];
+  const toast = useToast();
   const inviteFormRef = useRef<HTMLFormElement | null>(null);
+  const slugInputRef = useRef<HTMLInputElement | null>(null);
+  const skipBlurCommitRef = useRef(false);
 
   const parsedTags = docTagsText
     .split(',')
@@ -169,6 +207,122 @@ export function StudioEditorInspector({
           </h3>
 
           <div>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <label
+                htmlFor="doc-url-slug-input"
+                className="ink-field-label mb-0!"
+              >
+                {extCopy.studio.publishedUrl.label}
+              </label>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const origin =
+                      typeof window !== 'undefined' ? window.location.origin : '';
+                    const slugVal = (draftStepSlug || stepSlug).trim();
+                    const fullUrl = `${origin}/${editLocale}/series/${trackSlug}/${slugVal}`;
+                    if (navigator.clipboard?.writeText) {
+                      void navigator.clipboard
+                        .writeText(fullUrl)
+                        .then(() => toast.success(extCopy.reader.copiedUrlToast))
+                        .catch(() => toast.success(extCopy.reader.copiedUrlToast));
+                    } else {
+                      toast.success(extCopy.reader.copiedUrlToast);
+                    }
+                  }}
+                  aria-label={extCopy.studio.publishedUrl.copyUrlBtn}
+                  title={extCopy.studio.publishedUrl.copyUrlBtn}
+                  className="min-h-6 px-2 py-0.5 rounded-lg border border-border-subtle bg-surface-raised hover:border-border-ink text-xs font-semibold text-ink-secondary inline-flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <IconCopy className="w-3.5 h-3.5" />
+                  <span>{extCopy.studio.publishedUrl.copyUrlBtn}</span>
+                </button>
+
+                {canOpenPublishedPage ? (
+                  <Link
+                    data-testid="studio-open-published-link"
+                    to={`/${editLocale}/series/${trackSlug}/${stepSlug}`}
+                    className="min-h-6 px-2 py-0.5 rounded-lg border border-border-subtle bg-action-subtle/70 hover:border-link-ink text-xs font-semibold text-link-ink inline-flex items-center gap-1 transition-colors"
+                  >
+                    <IconExternalLink className="w-3.5 h-3.5" />
+                    <span>{extCopy.studio.publishedUrl.openUrlBtn}</span>
+                  </Link>
+                ) : (
+                  <span
+                    data-testid="studio-unpublished-url-badge"
+                    className="px-2 py-0.5 rounded-lg bg-surface-raised border border-border-subtle text-xs text-ink-muted"
+                  >
+                    {extCopy.studio.publishedUrl.unpublishedHint}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div
+              data-testid="inspector-url-slug-shell"
+              onClick={() => slugInputRef.current?.focus()}
+              className="ink-url-slug-shell"
+            >
+              <span className="text-xs font-mono text-ink-muted truncate">
+                /{editLocale}/series/{trackSlug}/
+              </span>
+              <input
+                ref={slugInputRef}
+                id="doc-url-slug-input"
+                type="text"
+                data-testid="studio-url-slug-input"
+                value={draftStepSlug}
+                onChange={(e) =>
+                  onChangeStepSlug(sanitizeStepSlugDraft(e.target.value))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    skipBlurCommitRef.current = true;
+                    onChangeStepSlug(stepSlug);
+                    e.currentTarget.blur();
+                  }
+                }}
+                onBlur={() => {
+                  if (skipBlurCommitRef.current) {
+                    skipBlurCommitRef.current = false;
+                    return;
+                  }
+                  const clean = sanitizeStepSlugDraft(draftStepSlug).replace(
+                    /^-+|-+$/g,
+                    '',
+                  );
+                  if (!clean || clean === '-') {
+                    onChangeStepSlug(stepSlug);
+                    return;
+                  }
+                  onCommitStepSlug(clean);
+                }}
+                placeholder={extCopy.studio.publishedUrl.slugPlaceholder}
+                className="ink-url-slug-field w-full font-mono text-xs font-semibold text-link-ink"
+              />
+            </div>
+
+            {suggestedSlug && onApplySuggestedSlug && (
+              <button
+                type="button"
+                data-testid="studio-apply-title-slug-btn"
+                onClick={onApplySuggestedSlug}
+                className="mt-1.5 min-h-7 px-2.5 py-0.5 rounded-lg border border-border-subtle bg-action-subtle/60 hover:border-link-ink text-xs font-semibold text-link-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <span>
+                  {extCopy.studio.publishedUrl.applySuggestedSlug(suggestedSlug)}
+                </span>
+              </button>
+            )}
+          </div>
+
+          <div>
             <label htmlFor="doc-title-input" className="ink-field-label">
               {s.titleInputLabel}
             </label>
@@ -198,32 +352,16 @@ export function StudioEditorInspector({
 
           <div className="space-y-3">
             <div>
-              <label htmlFor="doc-license-select" className="ink-field-label">
+              <span className="ink-field-label block mb-2">
                 {s.licenseSelectLabel}
-              </label>
-              <select
-                id="doc-license-select"
-                name="license"
+              </span>
+              <CcLicenseSelector
+                locale={locale}
                 value={docLicense}
-                onChange={(e) => onChangeLicense(normalizeLicenseId(e.target.value))}
-                className="ink-select w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs"
-              >
-                <option value="">
-                  {s.licenseFollowSite(
-                    (
-                      copy.licenseNames[
-                        normalizeLicenseId(siteSettings.default_license) ||
-                          'cc-by-nc-sa-4.0'
-                      ] || 'CC BY-NC-SA 4.0'
-                    ).split(' · ')[0],
-                  )}
-                </option>
-                {ALL_LICENSE_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {copy.licenseNames[opt.id]}
-                  </option>
-                ))}
-              </select>
+                onChange={(id) => onChangeLicense(normalizeLicenseId(id))}
+                allowFollowSite
+                siteDefaultLicense={siteSettings.default_license}
+              />
             </div>
 
             <div className="flex items-center justify-between gap-3">
@@ -270,60 +408,114 @@ export function StudioEditorInspector({
           </div>
         </section>
 
-        {/* Section 3: Co-Authors & Collaboration Invites */}
-        {docExists && (docAuthors.length > 0 || canManageCollaborators) && (
+        {/* Section 3: Co-Authors, Roles, Revision History & Collaboration Invites */}
+        {docExists && (docAuthors.length > 0 || canManageCollaborators || canLeave) && (
           <section className="p-4 space-y-3">
-            <div className="flex items-baseline justify-between gap-2">
-              <h3 className="text-xs font-semibold text-ink-secondary">
-                {extCopy.studio.collabSectionTitle}
-              </h3>
-              <span className="text-xs font-mono text-ink-muted tabular-nums">
-                {docAuthors.length}
-              </span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-baseline gap-1.5">
+                <h3 className="text-xs font-semibold text-ink-secondary">
+                  {extCopy.studio.collabSectionTitle}
+                </h3>
+                <span className="text-xs font-mono text-ink-muted tabular-nums">
+                  {docAuthors.length}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenHistory}
+                className="text-xs font-semibold text-link-ink hover:text-link-hover-ink cursor-pointer transition-colors"
+              >
+                {extCopy.collab.historyBtn}
+              </button>
             </div>
 
             {docAuthors.length > 0 && (
               <div className="space-y-1.5">
-                {docAuthors.map((author) => (
-                  <div
-                    key={author.user_id || author.username}
-                    className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-surface-raised border border-border-subtle text-xs"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <UserAvatar
-                        name={author.display_name}
-                        avatarUrl={author.avatar_url}
-                        sizeClass="w-5 h-5"
-                        textClass="text-xs"
-                      />
-                      <span className="font-semibold text-ink-primary truncate">
-                        {author.display_name}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <StatusBadge
-                        tone={author.is_owner ? 'info' : 'neutral'}
-                        mono
-                        className="px-1.5"
-                      >
-                        {author.is_owner
-                          ? extCopy.studio.ownerBadge
-                          : extCopy.studio.coAuthorBadge}
-                      </StatusBadge>
+                {docAuthors.map((author) => {
+                  const roleKey = author.is_owner
+                    ? 'owner'
+                    : author.role === 'translator' || author.role === 'reviewer'
+                      ? author.role
+                      : 'editor';
+                  const roleText = extCopy.collab.roles[roleKey];
+                  return (
+                    <div
+                      key={author.user_id || author.username}
+                      className="px-2.5 py-2 rounded-xl bg-surface-raised border border-border-subtle text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <UserAvatar
+                            name={author.display_name}
+                            avatarUrl={author.avatar_url}
+                            sizeClass="w-5 h-5"
+                            textClass="text-xs"
+                          />
+                          <span className="font-semibold text-ink-primary truncate">
+                            {author.display_name}
+                          </span>
+                        </div>
+                        <StatusBadge
+                          tone={author.is_owner ? 'info' : 'neutral'}
+                          mono
+                          className="px-1.5 shrink-0"
+                        >
+                          {roleText}
+                        </StatusBadge>
+                      </div>
+
                       {canManageCollaborators &&
                         !author.is_owner &&
                         author.user_id && (
-                          <button
-                            type="button"
-                            onClick={() => onRemoveCollaborator(author.user_id!)}
-                            className="text-xs font-semibold text-accent-danger hover:underline cursor-pointer"
-                          >
-                            {extCopy.studio.removeCollaboratorBtn}
-                          </button>
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-dashed border-border-subtle">
+                            <select
+                              aria-label={extCopy.collab.inviteRoleLabel}
+                              value={roleKey}
+                              onChange={(e) =>
+                                onUpdateCollaboratorRole(
+                                  author.user_id!,
+                                  e.target.value as CollaboratorRole,
+                                )
+                              }
+                              className="text-[11px] bg-surface-sheet border border-border-subtle rounded-lg px-1.5 py-0.5 text-ink-secondary cursor-pointer"
+                            >
+                              <option value="editor">{extCopy.collab.roles.editor}</option>
+                              <option value="translator">{extCopy.collab.roles.translator}</option>
+                              <option value="reviewer">{extCopy.collab.roles.reviewer}</option>
+                            </select>
+                            <div className="flex items-center gap-2.5">
+                              <button
+                                type="button"
+                                onClick={() => onTransferOwnership(author)}
+                                className="text-[11px] font-semibold text-ink-muted hover:text-ink-primary cursor-pointer transition-colors"
+                              >
+                                {extCopy.collab.transferOwnerBtn}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onRemoveCollaborator(author.user_id!)}
+                                className="text-[11px] font-semibold text-accent-danger/85 hover:text-accent-danger cursor-pointer transition-colors"
+                              >
+                                {extCopy.studio.removeCollaboratorBtn}
+                              </button>
+                            </div>
+                          </div>
                         )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
+              </div>
+            )}
+
+            {canLeave && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={onLeaveCollaboration}
+                  className="text-xs font-semibold text-accent-danger/85 hover:text-accent-danger cursor-pointer transition-colors"
+                >
+                  {extCopy.collab.leaveCollabBtn}
+                </button>
               </div>
             )}
 
@@ -332,7 +524,7 @@ export function StudioEditorInspector({
                 <form
                   ref={inviteFormRef}
                   onSubmit={onInviteCollaborator}
-                  className="auth-field"
+                  className="auth-field space-y-2"
                 >
                   <div className="flex items-center gap-1.5">
                     <input
@@ -352,14 +544,26 @@ export function StudioEditorInspector({
                       placeholder={extCopy.studio.inviteEmailPlaceholder}
                       className="ink-field-input flex-1 min-w-0 text-xs py-1.5"
                     />
-                    <button
-                      type="submit"
-                      disabled={inviting}
-                      className="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-60 shrink-0"
+                    <select
+                      aria-label={extCopy.collab.inviteRoleLabel}
+                      value={inviteRole}
+                      onChange={(e) =>
+                        onChangeInviteRole(e.target.value as CollaboratorRole)
+                      }
+                      className="min-h-8 text-xs bg-surface-raised border border-border-subtle rounded-xl px-2 py-1 text-ink-secondary cursor-pointer shrink-0"
                     >
-                      {inviting ? extCopy.studio.invitingBtn : extCopy.studio.inviteBtn}
-                    </button>
+                      <option value="editor">{extCopy.collab.roles.editor}</option>
+                      <option value="translator">{extCopy.collab.roles.translator}</option>
+                      <option value="reviewer">{extCopy.collab.roles.reviewer}</option>
+                    </select>
                   </div>
+                  <button
+                    type="submit"
+                    disabled={inviting}
+                    className="w-full min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-60"
+                  >
+                    {inviting ? extCopy.studio.invitingBtn : extCopy.studio.inviteBtn}
+                  </button>
                   <FieldErrorText
                     id="collab-invite-email-err"
                     prefixLabel={extCopy.auth.errorPrefixLabel}
@@ -378,7 +582,7 @@ export function StudioEditorInspector({
                     <button
                       type="button"
                       onClick={onCopyInviteLink}
-                      className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle inline-flex items-center gap-1 cursor-pointer shrink-0"
+                      className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:text-link-hover-ink inline-flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
                     >
                       <IconCopy className="w-3.5 h-3.5 text-ink-muted" />
                       <span>{extCopy.studio.copyInviteLinkBtn}</span>
@@ -392,23 +596,34 @@ export function StudioEditorInspector({
                       {extCopy.studio.pendingInvitesLabel}
                     </div>
                     <ul className="p-0 list-none space-y-1">
-                      {docPendingInvites.map((inv) => (
-                        <li
-                          key={inv.id}
-                          className="px-2.5 py-1.5 rounded-lg bg-surface-raised flex items-center justify-between gap-2 text-xs"
-                        >
-                          <span className="font-mono text-ink-secondary studio-ellipsis">
-                            {inv.email}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => onRevokeInvite(inv.id)}
-                            className="text-xs font-semibold text-accent-danger hover:underline cursor-pointer shrink-0"
+                      {docPendingInvites.map((inv) => {
+                        const invRoleKey =
+                          inv.role === 'translator' || inv.role === 'reviewer'
+                            ? inv.role
+                            : 'editor';
+                        return (
+                          <li
+                            key={inv.id}
+                            className="px-2.5 py-1.5 rounded-lg bg-surface-raised flex items-center justify-between gap-2 text-xs"
                           >
-                            {extCopy.studio.revokeInviteBtn}
-                          </button>
-                        </li>
-                      ))}
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono text-ink-secondary studio-ellipsis">
+                                {inv.email}
+                              </span>
+                              <StatusBadge tone="neutral" className="px-1.5 shrink-0">
+                                {extCopy.collab.roles[invRoleKey]}
+                              </StatusBadge>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => onRevokeInvite(inv.id)}
+                              className="text-xs font-semibold text-accent-danger/85 hover:text-accent-danger cursor-pointer shrink-0 transition-colors"
+                            >
+                              {extCopy.studio.revokeInviteBtn}
+                            </button>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
                 )}

@@ -16,6 +16,7 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api';
+import { ApiError } from '../../lib/apiError';
 import { normalizeEmail } from '../../lib/email';
 import {
   EXT_COPY,
@@ -24,14 +25,22 @@ import {
   UI_COPY,
 } from '../../lib/i18n';
 import { normalizeLicenseId } from '../../lib/licenses';
+import { runLayoutTransition } from '../../lib/motion';
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
+import {
+  isAutoPlaceholderSlug,
+  sanitizeStepSlugDraft,
+  suggestSlugFromTitle,
+} from '../../lib/slugify';
 import type { ResolvedTheme } from '../../lib/theme';
 import type {
   ArticleAuthorDto,
   CollaboratorInviteDto,
+  CollaboratorRole,
   LicenseId,
   LocaleCode,
   NotebookBlock,
+  RevisionConflictMeta,
   SiteSettingsDto,
   StudioStepEditorDto,
   StudioTrackDto,
@@ -52,6 +61,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { FileUploadButton } from '../ui/FileUploadButton';
 import { SwitchRow } from '../ui/FormControls';
 import {
+  IconAlertTriangle,
   IconBook,
   IconExternalLink,
   IconFileCode,
@@ -67,6 +77,8 @@ import {
 import { PopupMenu } from '../ui/PopupMenu';
 import { UnderlineTabs } from '../ui/Tabs';
 import { useToast } from '../ui/ToastProvider';
+import { RevisionConflictModal } from './RevisionConflictModal';
+import { RevisionHistoryModal } from './RevisionHistoryModal';
 import type { TakedownStepTarget } from './StudioCatalogPanel';
 import { StudioEditorInspector } from './StudioEditorInspector';
 import type { StudioSectionId } from './StudioSidebarContent';
@@ -103,7 +115,7 @@ function getSnippetBodies(locale: LocaleCode) {
       margin: '\n:::margin[]\n',
       code: '\n```text\n\n```\n',
       sketch:
-        '\n```sketch\n{\n  "nodes": [\n    { "id": "n1", "label": "A", "x": 24, "y": 36, "width": 160, "height": 62, "tone": "ice" },\n    { "id": "n2", "label": "B", "x": 245, "y": 36, "width": 160, "height": 62, "tone": "violet" }\n  ],\n  "edges": [\n    { "from": "n1", "to": "n2" }\n  ]\n}\n```\n',
+        '\n```sketch\n{\n  "nodes": [\n    { "id": "n1", "label": "A", "x": 24, "y": 36, "width": 160, "height": 62, "tone": "ice" },\n    { "id": "n2", "label": "B", "x": 260, "y": 36, "width": 160, "height": 62, "tone": "violet" }\n  ],\n  "edges": [\n    { "from": "n1", "to": "n2" }\n  ]\n}\n```\n',
     } as const;
   }
   return {
@@ -213,6 +225,7 @@ export interface StudioEditorPanelProps {
   editLocale: LocaleCode;
   onChangeEditLocale: (next: LocaleCode) => void;
   onStepDeleted: (nextStepSlug: string) => void;
+  onStepSlugSaved?: (nextStepSlug: string) => void;
   onRefreshOverview: () => Promise<StudioTrackDto[] | undefined>;
   onOpenNewStepModal: () => void;
   onSwitchSection: (section: StudioSectionId) => void;
@@ -239,6 +252,7 @@ export function StudioEditorPanel({
   editLocale,
   onChangeEditLocale,
   onStepDeleted,
+  onStepSlugSaved,
   onRefreshOverview,
   onOpenNewStepModal,
   onSwitchSection,
@@ -253,10 +267,12 @@ export function StudioEditorPanel({
   const modeTabPrefix = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const saveActionRef = useRef<() => void>(() => {});
+  const skipNextLoadKeyRef = useRef<string | null>(null);
+  const slugManuallyEditedRef = useRef(false);
 
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
   const [inspectorOpen, setInspectorOpen] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 1280 : true,
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true,
   );
   const [previewSplitOpen, setPreviewSplitOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -268,6 +284,7 @@ export function StudioEditorPanel({
   );
 
   // Editor document fields
+  const [draftStepSlug, setDraftStepSlug] = useState(selStep);
   const [docTitle, setDocTitle] = useState('');
   const [docSummary, setDocSummary] = useState('');
   const [docStepNum, setDocStepNum] = useState(1);
@@ -282,6 +299,9 @@ export function StudioEditorPanel({
   const [docBody, setDocBody] = useState('');
   const [visualBlocks, setVisualBlocks] = useState<VisualBlock[]>([]);
   const [docExists, setDocExists] = useState(true);
+  const [docEtag, setDocEtag] = useState('');
+  const [canEditDoc, setCanEditDoc] = useState(true);
+  const [canLeaveDoc, setCanLeaveDoc] = useState(false);
   const [docAuthors, setDocAuthors] = useState<ArticleAuthorDto[]>([]);
   const [docPendingInvites, setDocPendingInvites] = useState<
     CollaboratorInviteDto[]
@@ -292,8 +312,16 @@ export function StudioEditorPanel({
   );
   const [docTakedownBy, setDocTakedownBy] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<CollaboratorRole>('editor');
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [conflictState, setConflictState] =
+    useState<RevisionConflictMeta | null>(null);
+  const [transferTarget, setTransferTarget] =
+    useState<ArticleAuthorDto | null>(null);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [busyLifecycle, setBusyLifecycle] = useState(false);
   const [uploadingMdImage, setUploadingMdImage] = useState(false);
   const [uploadingVisualImage, setUploadingVisualImage] = useState(false);
 
@@ -318,6 +346,19 @@ export function StudioEditorPanel({
   const activeTargetRef = useRef(activeTargetKey);
   activeTargetRef.current = activeTargetKey;
 
+  const handleTitleChange = (nextTitle: string) => {
+    setDocTitle(nextTitle);
+    if (
+      !slugManuallyEditedRef.current &&
+      (!docExists || isAutoPlaceholderSlug(selStep))
+    ) {
+      const auto = suggestSlugFromTitle(nextTitle, docStepNum);
+      if (auto) {
+        setDraftStepSlug(auto);
+      }
+    }
+  };
+
   // Apply external moderation updates (takedown / restore) without discarding unsaved body edits
   useEffect(() => {
     if (
@@ -341,6 +382,13 @@ export function StudioEditorPanel({
           loc,
         );
         setDocExists(dto.exists);
+        setDocEtag(dto.etag ?? '');
+        setCanEditDoc(dto.can_edit !== false);
+        setCanLeaveDoc(Boolean(dto.can_leave));
+        setConflictState(null);
+        const resolvedDtoSlug = dto.step_slug || sSlug;
+        setDraftStepSlug(resolvedDtoSlug);
+        slugManuallyEditedRef.current = false;
         setDocTitle(dto.title);
         setDocSummary(dto.summary);
         setDocStepNum(dto.step_number);
@@ -349,7 +397,9 @@ export function StudioEditorPanel({
         setDocSyncedRev(dto.synced_revision);
         setDocCanonicalRev(dto.canonical_revision);
         setBumpCanonical(false);
-        setDocStatus(dto.status === 'draft' ? 'draft' : 'published');
+        const nextStatus =
+          !dto.exists || dto.status === 'draft' ? 'draft' : 'published';
+        setDocStatus(nextStatus);
         const nextLicense = normalizeLicenseId(dto.license);
         setDocLicense(nextLicense);
         const nextTags = dto.tags.join(', ');
@@ -365,10 +415,11 @@ export function StudioEditorPanel({
         setPreviewStepOverrides({});
         setSavedSnapshot(
           JSON.stringify({
+            stepSlug: resolvedDtoSlug,
             title: dto.title,
             summary: dto.summary,
             stepNum: dto.step_number,
-            status: dto.status === 'draft' ? 'draft' : 'published',
+            status: nextStatus,
             license: nextLicense,
             tags: nextTags,
             body: dto.body_markdown,
@@ -394,6 +445,9 @@ export function StudioEditorPanel({
         }
       } catch (err) {
         setDocExists(false);
+        setDocEtag('');
+        setCanEditDoc(false);
+        setCanLeaveDoc(false);
         setDocAuthors([]);
         setDocPendingInvites([]);
         setCanManageCollaborators(false);
@@ -406,6 +460,13 @@ export function StudioEditorPanel({
   );
 
   useEffect(() => {
+    const nextKey = `${selTrack}/${selChapter}/${selStep}/${editLocale}`;
+    if (skipNextLoadKeyRef.current === nextKey) {
+      skipNextLoadKeyRef.current = null;
+      return;
+    }
+    setDraftStepSlug(selStep);
+    slugManuallyEditedRef.current = false;
     void loadEditorStep(selTrack, selChapter, selStep, editLocale);
   }, [selTrack, selChapter, selStep, editLocale, loadEditorStep]);
 
@@ -460,8 +521,19 @@ export function StudioEditorPanel({
       { id: 'margin', label: s.snippets.margin, snippet: bodies.margin },
       { id: 'code', label: s.snippets.code, snippet: bodies.code },
       { id: 'sketch', label: s.snippets.sketch, snippet: bodies.sketch },
+      {
+        id: 'pixel-sticker',
+        label: `+ ${s.visual.types.pixel_sticker}`,
+        snippet: '\n:::pixel[cat]{align="center" size="md" caption=""}\n',
+      },
     ];
-  }, [locale, s.snippets, copy.taskScopeSection, copy.taskScopeParagraph]);
+  }, [
+    locale,
+    s.snippets,
+    s.visual.types.pixel_sticker,
+    copy.taskScopeSection,
+    copy.taskScopeParagraph,
+  ]);
 
   const previewCheckedIds = useMemo(() => {
     const set = new Set<string>();
@@ -486,6 +558,7 @@ export function StudioEditorPanel({
   const currentDocSig = useMemo(
     () =>
       JSON.stringify({
+        stepSlug: draftStepSlug.trim() || selStep,
         title: docTitle,
         summary: docSummary,
         stepNum: docStepNum,
@@ -496,6 +569,8 @@ export function StudioEditorPanel({
         bump: bumpCanonical,
       }),
     [
+      draftStepSlug,
+      selStep,
       docTitle,
       docSummary,
       docStepNum,
@@ -514,6 +589,7 @@ export function StudioEditorPanel({
     selTrack,
     selChapter,
     selStep,
+    draftStepSlug,
     editLocale,
     docTitle,
     docSummary,
@@ -525,6 +601,8 @@ export function StudioEditorPanel({
     docTagsText,
     docBody,
     docExists,
+    docEtag,
+    canEditDoc,
     saving,
     currentDocSig,
   });
@@ -533,6 +611,7 @@ export function StudioEditorPanel({
     selTrack,
     selChapter,
     selStep,
+    draftStepSlug,
     editLocale,
     docTitle,
     docSummary,
@@ -544,12 +623,18 @@ export function StudioEditorPanel({
     docTagsText,
     docBody,
     docExists,
+    docEtag,
+    canEditDoc,
     saving,
     currentDocSig,
   };
 
-  // Unified periodic draft auto-save
-  const needsAutosave = isEditorDirty && currentDocSig !== lastLocalAutosaveSig;
+  // Unified periodic draft auto-save (automatically paused while resolving HTTP 412 conflict or in read-only role)
+  const needsAutosave =
+    canEditDoc &&
+    !conflictState &&
+    isEditorDirty &&
+    currentDocSig !== lastLocalAutosaveSig;
 
   useEffect(() => {
     if (!siteSettings.enable_draft_autosave || !needsAutosave || saving) {
@@ -567,8 +652,11 @@ export function StudioEditorPanel({
       if (activeTargetRef.current !== cur.targetKey || cur.saving) return;
 
       const timeStr = new Date().toLocaleTimeString();
+      const unchangedSlug =
+        (cur.draftStepSlug.trim() || cur.selStep) === cur.selStep;
 
       if (
+        unchangedSlug &&
         (cur.docStatus === 'draft' || !cur.docExists) &&
         cur.docTitle.trim() &&
         cur.selStep.trim()
@@ -596,6 +684,7 @@ export function StudioEditorPanel({
             tags,
             body_markdown: cur.docBody,
             write_to_content_dir: true,
+            expected_etag: cur.docExists && cur.docEtag ? cur.docEtag : undefined,
           })
           .then((saved) => {
             if (activeTargetRef.current !== cur.targetKey) return;
@@ -607,6 +696,7 @@ export function StudioEditorPanel({
             );
             setRecoverableDraft(null);
             setDocExists(true);
+            setDocEtag(saved.etag ?? '');
             setDocStatus('draft');
             setDocMinutes(saved.estimated_minutes);
             setDocVersion(saved.version ?? saved.synced_revision);
@@ -614,6 +704,7 @@ export function StudioEditorPanel({
             setDocCanonicalRev(saved.canonical_revision);
             setSavedSnapshot(
               JSON.stringify({
+                stepSlug: cur.selStep,
                 title: cur.docTitle.trim(),
                 summary: cur.docSummary.trim(),
                 stepNum: cur.docStepNum,
@@ -628,7 +719,7 @@ export function StudioEditorPanel({
             setAutosaveStatus({ kind: 'saved_server', time: timeStr });
             void onRefreshOverview();
           })
-          .catch(() => {
+          .catch((err) => {
             if (activeTargetRef.current !== cur.targetKey) return;
             writeLocalDraft(
               cur.selTrack,
@@ -648,6 +739,14 @@ export function StudioEditorPanel({
             );
             setLastLocalAutosaveSig(cur.currentDocSig);
             setAutosaveStatus({ kind: 'error' });
+            if (
+              err instanceof ApiError &&
+              err.code === 'REVISION_CONFLICT' &&
+              err.meta &&
+              typeof err.meta.current_etag === 'string'
+            ) {
+              setConflictState(err.meta as unknown as RevisionConflictMeta);
+            }
           });
       } else {
         writeLocalDraft(
@@ -740,22 +839,26 @@ export function StudioEditorPanel({
   };
 
   const handleTogglePreviewSplit = () => {
-    setPreviewSplitOpen((prev) => {
-      const next = !prev;
-      if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
-        setInspectorOpen(false);
-      }
-      return next;
+    runLayoutTransition(null, () => {
+      setPreviewSplitOpen((prev) => {
+        const next = !prev;
+        if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
+          setInspectorOpen(false);
+        }
+        return next;
+      });
     });
   };
 
   const handleToggleInspector = () => {
-    setInspectorOpen((prev) => {
-      const next = !prev;
-      if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
-        setPreviewSplitOpen(false);
-      }
-      return next;
+    runLayoutTransition(null, () => {
+      setInspectorOpen((prev) => {
+        const next = !prev;
+        if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
+          setPreviewSplitOpen(false);
+        }
+        return next;
+      });
     });
   };
 
@@ -798,14 +901,36 @@ export function StudioEditorPanel({
     }
   };
 
-  const handleSaveStep = async () => {
-    if (saving || (!isEditorDirty && docExists)) {
+  const canOpenPublishedPage =
+    docExists &&
+    docStatus === 'published' &&
+    draftStepSlug.trim() === selStep &&
+    !saving;
+
+  const performSaveStep = async (
+    overrideSlug?: string,
+    forceWhenExists = false,
+    overrideExpectedEtag?: string,
+  ) => {
+    const targetStepSlug = (overrideSlug ?? draftStepSlug).trim();
+    if (
+      saving ||
+      !canEditDoc ||
+      (!forceWhenExists && !overrideExpectedEtag && !isEditorDirty && docExists)
+    ) {
       return;
     }
-    if (!docTitle.trim() || !selStep.trim()) {
+    if (
+      !docTitle.trim() ||
+      !targetStepSlug ||
+      targetStepSlug === '-' ||
+      !/^[a-zA-Z0-9_-]+$/.test(targetStepSlug)
+    ) {
       toast.warning(s.missingTitleOrSlugBanner);
       return;
     }
+    const isRenamingSlug =
+      docExists && Boolean(selStep) && targetStepSlug !== selStep;
     setSaving(true);
     try {
       const tags = docTagsText
@@ -813,10 +938,14 @@ export function StudioEditorPanel({
         .map((t) => t.trim())
         .filter(Boolean);
 
+      const expectedEtag =
+        overrideExpectedEtag ?? (docExists && docEtag ? docEtag : undefined);
+
       const saved = await api.studioSaveStep({
         track_slug: selTrack,
         chapter_slug: selChapter,
-        step_slug: selStep,
+        step_slug: targetStepSlug,
+        previous_step_slug: isRenamingSlug ? selStep : undefined,
         locale: editLocale,
         title: docTitle.trim(),
         summary: docSummary.trim(),
@@ -829,9 +958,15 @@ export function StudioEditorPanel({
         tags,
         body_markdown: docBody,
         write_to_content_dir: true,
+        expected_etag: expectedEtag,
       });
 
+      const resolvedSlug = saved.step_slug || targetStepSlug;
       setDocExists(true);
+      setDocEtag(saved.etag ?? '');
+      setCanEditDoc(saved.can_edit !== false);
+      setCanLeaveDoc(Boolean(saved.can_leave));
+      setConflictState(null);
       setDocMinutes(saved.estimated_minutes);
       setDocVersion(saved.version ?? saved.synced_revision);
       setDocSyncedRev(saved.synced_revision);
@@ -843,11 +978,17 @@ export function StudioEditorPanel({
       }
       setBumpCanonical(false);
       clearLocalDraft(selTrack, selChapter, selStep, editLocale);
+      if (resolvedSlug !== selStep) {
+        clearLocalDraft(selTrack, selChapter, resolvedSlug, editLocale);
+      }
       setRecoverableDraft(null);
       setLastLocalAutosaveSig('');
       setAutosaveStatus({ kind: 'idle' });
+      setDraftStepSlug(resolvedSlug);
+      slugManuallyEditedRef.current = false;
       setSavedSnapshot(
         JSON.stringify({
+          stepSlug: resolvedSlug,
           title: docTitle.trim(),
           summary: docSummary.trim(),
           stepNum: docStepNum,
@@ -858,21 +999,53 @@ export function StudioEditorPanel({
           bump: false,
         }),
       );
+      if (resolvedSlug !== selStep && onStepSlugSaved) {
+        skipNextLoadKeyRef.current = `${selTrack}/${selChapter}/${resolvedSlug}/${editLocale}`;
+        onStepSlugSaved(resolvedSlug);
+      }
       await onRefreshOverview();
       const timeStr = new Date().toLocaleTimeString();
-      toast.success(
-        s.savedBanner(
-          editLocale,
-          saved.version ?? saved.synced_revision,
-          saved.status === 'draft',
-          timeStr,
-        ),
-      );
+      if (resolvedSlug !== selStep) {
+        toast.success(extCopy.studio.publishedUrl.renamedToast);
+      } else {
+        toast.success(
+          s.savedBanner(
+            editLocale,
+            saved.version ?? saved.synced_revision,
+            saved.status === 'draft',
+            timeStr,
+          ),
+        );
+      }
     } catch (err) {
-      toast.error(err);
+      if (
+        err instanceof ApiError &&
+        err.code === 'REVISION_CONFLICT' &&
+        err.meta &&
+        typeof err.meta.current_etag === 'string'
+      ) {
+        setConflictState(err.meta as unknown as RevisionConflictMeta);
+      } else {
+        toast.error(err);
+      }
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSaveStep = () => performSaveStep();
+
+  const handleCommitStepSlugOnBlur = (cleanSlug: string) => {
+    setDraftStepSlug(cleanSlug);
+    if (cleanSlug === selStep) return;
+    if (!docTitle.trim()) {
+      if (!docExists && onStepSlugSaved) {
+        skipNextLoadKeyRef.current = `${selTrack}/${selChapter}/${cleanSlug}/${editLocale}`;
+        onStepSlugSaved(cleanSlug);
+      }
+      return;
+    }
+    void performSaveStep(cleanSlug, true);
   };
   saveActionRef.current = () => {
     void handleSaveStep();
@@ -924,6 +1097,8 @@ export function StudioEditorPanel({
         selStep,
         cleanEmail,
         locale,
+        inviteRole,
+        inviteRole === 'translator' ? [editLocale] : [],
       );
       setInviteEmail('');
       setLastInviteUrl(res.invite_url);
@@ -979,6 +1154,97 @@ export function StudioEditorPanel({
     }
   };
 
+  const handleUpdateCollaboratorRole = async (
+    targetUserId: string,
+    role: CollaboratorRole,
+  ) => {
+    try {
+      await api.updateStepCollaboratorRole(
+        selTrack,
+        selChapter,
+        selStep,
+        targetUserId,
+        role,
+        role === 'translator' ? [editLocale] : [],
+      );
+      setDocAuthors((prev) =>
+        prev.map((a) =>
+          a.user_id === targetUserId
+            ? { ...a, role, locale_scope: role === 'translator' ? [editLocale] : [] }
+            : a,
+        ),
+      );
+      toast.success(extCopy.collab.roleUpdatedToast);
+    } catch (err) {
+      toast.error(err);
+    }
+  };
+
+  const handleConfirmTransferOwnership = async () => {
+    if (!transferTarget?.user_id || busyLifecycle) return;
+    setBusyLifecycle(true);
+    try {
+      await api.transferStepOwnership(
+        selTrack,
+        selChapter,
+        selStep,
+        transferTarget.user_id,
+      );
+      setTransferTarget(null);
+      toast.success(extCopy.collab.ownerTransferredToast);
+      await loadEditorStep(selTrack, selChapter, selStep, editLocale);
+      void onRefreshOverview();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusyLifecycle(false);
+    }
+  };
+
+  const handleConfirmLeaveCollaboration = async () => {
+    if (busyLifecycle) return;
+    setBusyLifecycle(true);
+    try {
+      await api.leaveStepCollaboration(selTrack, selChapter, selStep);
+      setLeaveConfirmOpen(false);
+      toast.success(extCopy.collab.leftCollabToast);
+      await onRefreshOverview();
+      onSwitchSection('overview');
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusyLifecycle(false);
+    }
+  };
+
+  const handleApplyRestoredSnapshot = (saved: StudioStepEditorDto) => {
+    setDocExists(true);
+    setDocEtag(saved.etag ?? '');
+    setDocTitle(saved.title);
+    setDocSummary(saved.summary);
+    setDocMinutes(saved.estimated_minutes);
+    setDocVersion(saved.version ?? saved.synced_revision);
+    setDocSyncedRev(saved.synced_revision);
+    setDocCanonicalRev(saved.canonical_revision);
+    setDocBody(saved.body_markdown);
+    setVisualBlocks(parseMarkdownToVisualBlocks(saved.body_markdown));
+    setConflictState(null);
+    setSavedSnapshot(
+      JSON.stringify({
+        stepSlug: saved.step_slug || selStep,
+        title: saved.title,
+        summary: saved.summary,
+        stepNum: saved.step_number,
+        status: saved.status === 'draft' ? 'draft' : 'published',
+        license: normalizeLicenseId(saved.license),
+        tags: saved.tags.join(', '),
+        body: saved.body_markdown,
+        bump: false,
+      }),
+    );
+    void onRefreshOverview();
+  };
+
   const combinedPreviewAuthor =
     docAuthors.length > 0
       ? docAuthors.map((a) => a.display_name).join(' · ')
@@ -1022,6 +1288,23 @@ export function StudioEditorPanel({
     <div className="studio-editor-workspace">
       <h1 className="sr-only">{s.editorHeadingSr}</h1>
 
+      {/* Read-Only Collaborator Role Notice */}
+      {docExists && !canEditDoc && (
+        <div className="px-3.5 py-2.5 rounded-xl border border-accent-amber/50 bg-surface-raised flex items-center justify-between gap-2 text-xs text-ink-primary">
+          <div className="flex items-center gap-2">
+            <IconAlertTriangle className="w-4 h-4 text-accent-amber shrink-0" />
+            <span>{extCopy.collab.readonlyBanner}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(true)}
+            className="text-xs font-semibold text-link-ink hover:text-link-hover-ink cursor-pointer shrink-0 transition-colors"
+          >
+            {extCopy.collab.historyBtn}
+          </button>
+        </div>
+      )}
+
       {/* ZONE 1A: Top Editor Workbench Bar */}
       <div className="studio-panel overflow-hidden">
         <div className="px-3.5 py-2 flex flex-wrap items-center justify-between gap-2">
@@ -1053,14 +1336,16 @@ export function StudioEditorPanel({
                     const tr = currentStepObj?.translations.find(
                       (item) => item.locale === loc.code,
                     );
+                    const isDrifted =
+                      tr &&
+                      tr.status !== 'draft' &&
+                      tr.synced_revision <
+                        (currentStepObj?.canonical_revision ?? 1);
                     const statusHint = !tr
                       ? s.addLocaleAction
                       : tr.status === 'draft'
                         ? s.draftParen
-                        : tr.synced_revision <
-                            (currentStepObj?.canonical_revision ?? 1)
-                          ? `⚠ v${tr.synced_revision}`
-                          : `v${tr.synced_revision}`;
+                        : `v${tr.synced_revision}`;
                     return (
                       <button
                         key={loc.code}
@@ -1073,7 +1358,10 @@ export function StudioEditorPanel({
                         }}
                       >
                         <span className="flex-1">{loc.label}</span>
-                        <span className="ink-menu-hint">{statusHint}</span>
+                        <span className="ink-menu-hint inline-flex items-center gap-1">
+                          {isDrifted && <IconAlertTriangle className="w-3 h-3" />}
+                          <span>{statusHint}</span>
+                        </span>
                       </button>
                     );
                   })}
@@ -1209,13 +1497,15 @@ export function StudioEditorPanel({
 
                   <hr />
 
-                  <Link
-                    to={`/${editLocale}/tracks/${selTrack}/${selChapter}/${selStep}`}
-                    onClick={() => close(true)}
-                  >
-                    <IconExternalLink className="w-3.5 h-3.5 text-ink-muted" />
-                    <span>{s.openReaderLink.replace(/\s*↗$/, '')}</span>
-                  </Link>
+                  {canOpenPublishedPage && (
+                    <Link
+                      to={`/${editLocale}/series/${selTrack}/${selStep}`}
+                      onClick={() => close(true)}
+                    >
+                      <IconExternalLink className="w-3.5 h-3.5 text-ink-muted" />
+                      <span>{s.openReaderLink.replace(/\s*↗$/, '')}</span>
+                    </Link>
+                  )}
 
                   <button
                     type="button"
@@ -1285,7 +1575,7 @@ export function StudioEditorPanel({
 
             <button
               type="button"
-              disabled={saving || (!isEditorDirty && docExists)}
+              disabled={saving || !canEditDoc || (!isEditorDirty && docExists)}
               onClick={() => void handleSaveStep()}
               title="Ctrl+S / ⌘S"
               className="min-h-8 px-4 py-1.5 rounded-xl text-xs sm:text-sm font-semibold ink-btn-primary inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1454,7 +1744,7 @@ export function StudioEditorPanel({
                         size={1}
                         aria-label={s.titleInputLabel}
                         value={docTitle}
-                        onChange={(e) => setDocTitle(e.target.value)}
+                        onChange={(e) => handleTitleChange(e.target.value)}
                         placeholder={extCopy.studio.editorCanvasTitlePlaceholder}
                         style={{ fontFamily: 'var(--font-hand)' }}
                         className="w-full min-w-0 bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-tight tracking-tight"
@@ -1621,49 +1911,162 @@ export function StudioEditorPanel({
         </div>
 
         {/* ZONE 3: Collapsible Article Info Inspector */}
-        {inspectorOpen && (
-          <StudioEditorInspector
-            locale={locale}
-            siteSettings={siteSettings}
-            trackTitle={
-              currentTrackObj ? stripHtmlTags(currentTrackObj.title) : selTrack
+        {inspectorOpen &&
+          (() => {
+            let savedTitleVal = '';
+            try {
+              if (savedSnapshot) {
+                savedTitleVal =
+                  (JSON.parse(savedSnapshot) as { title?: string }).title ?? '';
+              }
+            } catch {
+              savedTitleVal = '';
             }
-            chapterTitle={
-              currentChapterObj
-                ? stripHtmlTags(currentChapterObj.title)
-                : selChapter
-            }
-            stepSlug={selStep}
-            docExists={docExists}
-            docStatus={docStatus}
-            docVersion={docVersion}
-            docMinutes={docMinutes}
-            docCanonicalRev={docCanonicalRev}
-            docTitle={docTitle}
-            onChangeTitle={setDocTitle}
-            docSummary={docSummary}
-            onChangeSummary={setDocSummary}
-            docStepNum={docStepNum}
-            onChangeStepNum={setDocStepNum}
-            docLicense={docLicense}
-            onChangeLicense={setDocLicense}
-            docTagsText={docTagsText}
-            onChangeTagsText={setDocTagsText}
-            docAuthors={docAuthors}
-            docPendingInvites={docPendingInvites}
-            canManageCollaborators={canManageCollaborators}
-            inviteEmail={inviteEmail}
-            onChangeInviteEmail={setInviteEmail}
-            inviting={inviting}
-            lastInviteUrl={lastInviteUrl}
-            onInviteCollaborator={(e) => void handleInviteCollaborator(e)}
-            onCopyInviteLink={() => void handleCopyInviteLink()}
-            onRevokeInvite={(id) => void handleRevokeInvite(id)}
-            onRemoveCollaborator={(uid) => void handleRemoveCollaborator(uid)}
-            onClose={() => setInspectorOpen(false)}
-          />
-        )}
+            const rawSuggestedSlug = suggestSlugFromTitle(docTitle, docStepNum);
+            const suggestedTitleSlug =
+              docExists &&
+              !isAutoPlaceholderSlug(selStep) &&
+              docTitle.trim() !== savedTitleVal.trim() &&
+              rawSuggestedSlug &&
+              rawSuggestedSlug !== draftStepSlug.trim() &&
+              rawSuggestedSlug !== selStep
+                ? rawSuggestedSlug
+                : undefined;
+
+            return (
+              <StudioEditorInspector
+                locale={locale}
+                editLocale={editLocale}
+                siteSettings={siteSettings}
+                trackSlug={selTrack}
+                trackTitle={
+                  currentTrackObj ? stripHtmlTags(currentTrackObj.title) : selTrack
+                }
+                chapterTitle={
+                  currentChapterObj
+                    ? stripHtmlTags(currentChapterObj.title)
+                    : selChapter
+                }
+                stepSlug={selStep}
+                draftStepSlug={draftStepSlug}
+                canOpenPublishedPage={canOpenPublishedPage}
+                suggestedSlug={suggestedTitleSlug}
+                onApplySuggestedSlug={
+                  suggestedTitleSlug
+                    ? () => handleCommitStepSlugOnBlur(suggestedTitleSlug)
+                    : undefined
+                }
+                onChangeStepSlug={(val) => {
+                  slugManuallyEditedRef.current = true;
+                  setDraftStepSlug(sanitizeStepSlugDraft(val));
+                }}
+                onCommitStepSlug={handleCommitStepSlugOnBlur}
+                docExists={docExists}
+                docStatus={docStatus}
+                docVersion={docVersion}
+                docMinutes={docMinutes}
+                docCanonicalRev={docCanonicalRev}
+                docTitle={docTitle}
+                onChangeTitle={handleTitleChange}
+                docSummary={docSummary}
+                onChangeSummary={setDocSummary}
+                docStepNum={docStepNum}
+                onChangeStepNum={setDocStepNum}
+                docLicense={docLicense}
+                onChangeLicense={setDocLicense}
+                docTagsText={docTagsText}
+                onChangeTagsText={setDocTagsText}
+                docAuthors={docAuthors}
+                docPendingInvites={docPendingInvites}
+                canManageCollaborators={canManageCollaborators}
+                canLeave={canLeaveDoc}
+                inviteEmail={inviteEmail}
+                onChangeInviteEmail={setInviteEmail}
+                inviteRole={inviteRole}
+                onChangeInviteRole={setInviteRole}
+                inviting={inviting}
+                lastInviteUrl={lastInviteUrl}
+                onInviteCollaborator={(e) => void handleInviteCollaborator(e)}
+                onCopyInviteLink={() => void handleCopyInviteLink()}
+                onRevokeInvite={(id) => void handleRevokeInvite(id)}
+                onRemoveCollaborator={(uid) => void handleRemoveCollaborator(uid)}
+                onUpdateCollaboratorRole={(uid, r) =>
+                  void handleUpdateCollaboratorRole(uid, r)
+                }
+                onTransferOwnership={(author) => setTransferTarget(author)}
+                onLeaveCollaboration={() => setLeaveConfirmOpen(true)}
+                onOpenHistory={() => setHistoryOpen(true)}
+                onClose={() =>
+                  runLayoutTransition(null, () => setInspectorOpen(false))
+                }
+              />
+            );
+          })()}
       </div>
+
+      {/* Revision History & Collaboration Audit Log Modal */}
+      {historyOpen && (
+        <RevisionHistoryModal
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          locale={locale}
+          trackSlug={selTrack}
+          chapterSlug={selChapter}
+          stepSlug={selStep}
+          editLocale={editLocale}
+          currentEtag={docEtag}
+          canEdit={canEditDoc}
+          onRestored={handleApplyRestoredSnapshot}
+        />
+      )}
+
+      {/* HTTP 412 Optimistic Concurrency Conflict Resolution Modal */}
+      <RevisionConflictModal
+        open={Boolean(conflictState)}
+        locale={locale}
+        conflict={conflictState}
+        localTitle={docTitle}
+        localBody={docBody}
+        resolving={saving}
+        onClose={() => setConflictState(null)}
+        onAdoptRemote={() => {
+          setConflictState(null);
+          void loadEditorStep(selTrack, selChapter, selStep, editLocale);
+        }}
+        onOverwriteWithLocal={(currentEtag) =>
+          void performSaveStep(undefined, true, currentEtag)
+        }
+      />
+
+      {/* Transfer Ownership Confirmation Modal */}
+      <ConfirmDialog
+        open={Boolean(transferTarget)}
+        onClose={() => setTransferTarget(null)}
+        tone="danger"
+        busy={busyLifecycle}
+        title={
+          transferTarget
+            ? extCopy.collab.transferConfirmTitle(transferTarget.display_name)
+            : ''
+        }
+        description={extCopy.collab.transferConfirmDesc}
+        cancelLabel={copy.cancelBtn}
+        confirmLabel={extCopy.collab.transferOwnerBtn}
+        onConfirm={() => void handleConfirmTransferOwnership()}
+      />
+
+      {/* Leave Collaboration Confirmation Modal */}
+      <ConfirmDialog
+        open={leaveConfirmOpen}
+        onClose={() => setLeaveConfirmOpen(false)}
+        tone="danger"
+        busy={busyLifecycle}
+        title={extCopy.collab.leaveConfirmTitle}
+        description={extCopy.collab.leaveConfirmDesc}
+        cancelLabel={copy.cancelBtn}
+        confirmLabel={extCopy.collab.leaveCollabBtn}
+        onConfirm={() => void handleConfirmLeaveCollaboration()}
+      />
 
       {/* Delete Step Confirmation Modal */}
       <ConfirmDialog

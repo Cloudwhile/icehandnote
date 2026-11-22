@@ -6,6 +6,7 @@ import { useCallback, useState } from 'react';
 import { api } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
 import { APP_VERSION, type LocaleCode, type UpdateCheckResponse } from '../../lib/types';
+import { IconCheck } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
 
@@ -99,8 +100,9 @@ export function UpdateCheckStatus({
             )
           ) : (
             <>
-              <span className="font-semibold text-accent-success">
-                ✓ {st.upToDateBadge}
+              <span className="font-semibold text-accent-success inline-flex items-center gap-1">
+                <IconCheck className="w-3.5 h-3.5" />
+                <span>{st.upToDateBadge}</span>
               </span>
               {!compact && (
                 <a

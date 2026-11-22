@@ -66,14 +66,12 @@ export function StudioOverviewPanel({
   const update = useSiteUpdateCheck();
   const localesToTrack = getEnabledLocaleMetas(siteSettings.enabled_locales);
 
-  let chapterCount = 0;
   let stepCount = 0;
   let publishedDocs = 0;
   let draftDocs = 0;
   const pendingQueue: PendingTranslationItem[] = [];
 
   for (const track of tracks) {
-    chapterCount += track.chapters.length;
     for (const ch of track.chapters) {
       stepCount += ch.steps.length;
       for (const stepItem of ch.steps) {
@@ -166,7 +164,7 @@ export function StudioOverviewPanel({
               {tracks.length}
             </span>
             <span className="text-xs text-ink-muted tabular-nums">
-              {s.kpiTracksSub(chapterCount)}
+              {s.kpiTracksSub(stepCount)}
             </span>
           </div>
         </div>

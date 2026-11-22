@@ -15,8 +15,10 @@ import {
   IconDiagram,
   IconHeading,
   IconImage,
+  IconKeyboardKey,
   IconList,
   IconParagraph,
+  IconPixelSticker,
   IconQuote,
 } from '../../ui/Icons';
 
@@ -31,11 +33,13 @@ export type SlashCommandId =
   | 'alert_warn'
   | 'alert_danger'
   | 'code_card'
+  | 'kbd_shortcut'
   | 'image'
   | 'list_bullet'
   | 'list_ordered'
   | 'quote'
-  | 'rough_diagram';
+  | 'rough_diagram'
+  | 'pixel_sticker';
 
 export interface SlashCommandItem {
   id: SlashCommandId;
@@ -113,6 +117,13 @@ export function getSlashCommands(locale: LocaleCode): SlashCommandItem[] {
       icon: <IconCode className="w-4 h-4" />,
     },
     {
+      id: 'kbd_shortcut',
+      alias: '/kbd',
+      label: EXT_COPY[locale].studio.richFormat.slashKbdTitle,
+      keywords: 'kbd keyboard shortcut keycap 按键 快捷键 组合键',
+      icon: <IconKeyboardKey className="w-4 h-4 text-link-ink" />,
+    },
+    {
       id: 'image',
       alias: '/img',
       label: v.types.image,
@@ -146,6 +157,14 @@ export function getSlashCommands(locale: LocaleCode): SlashCommandItem[] {
       label: v.types.rough_diagram,
       keywords: 'diagram sketch flowchart graph 流程图 架构图 手绘',
       icon: <IconDiagram className="w-4 h-4" />,
+    },
+    {
+      id: 'pixel_sticker',
+      alias: '/pixel',
+      label: v.types.pixel_sticker,
+      keywords:
+        'pixel sticker cute icon stamp cat coffee lightbulb heart 像素 贴纸 装饰 猫 灯泡 爱心',
+      icon: <IconPixelSticker className="w-4 h-4 text-accent-amber" />,
     },
     {
       id: 'paragraph',
@@ -201,6 +220,13 @@ export function createBlockFromSlashCommand(id: SlashCommandId): VisualBlock {
       return { id: newId, type: 'alert', kind: 'danger', title: '', body: '', detailSummary: '', detailBody: '', style: '', tone: '', badge: '' };
     case 'code_card':
       return { id: newId, type: 'code_card', language: 'text', filename: '', code: '', marginNote: '', style: 'washi' };
+    case 'kbd_shortcut':
+      return {
+        id: newId,
+        type: 'paragraph',
+        text: '<span class="ink-kbd-combo"><kbd class="ink-kbd">Ctrl</kbd><span class="ink-kbd-sep">+</span><kbd class="ink-kbd">K</kbd></span> ',
+        marginNote: '',
+      };
     case 'image':
       return { id: newId, type: 'image', src: '', alt: '', caption: '', marginNote: '' };
     case 'list_bullet':
@@ -209,6 +235,15 @@ export function createBlockFromSlashCommand(id: SlashCommandId): VisualBlock {
       return { id: newId, type: 'list', ordered: true, items: [''] };
     case 'quote':
       return { id: newId, type: 'quote', text: '' };
+    case 'pixel_sticker':
+      return {
+        id: newId,
+        type: 'pixel_sticker',
+        sprite: 'cat',
+        align: 'center',
+        size: 'md',
+        caption: '',
+      };
     case 'rough_diagram':
       return {
         id: newId,

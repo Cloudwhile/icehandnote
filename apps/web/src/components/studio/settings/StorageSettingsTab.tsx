@@ -14,6 +14,8 @@ import type {
   StorageStatusDto,
 } from '../../../lib/types';
 import { RadioPillGroup, SwitchRow } from '../../ui/FormControls';
+import { IconCheck } from '../../ui/Icons';
+import { InkSelect } from '../../ui/InkSelect';
 import { PasswordInput } from '../../ui/PasswordInput';
 import { useToast } from '../../ui/ToastProvider';
 import { SettingsSectionCard } from './SettingsSectionCard';
@@ -482,23 +484,30 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
                       >
                         {extSettings.pgSslModeLabel}
                       </label>
-                      <select
+                      <InkSelect
                         id="set-pg-ssl"
                         value={pgFields.ssl_mode}
-                        onChange={(e) =>
+                        onChange={(nextSsl) =>
                           setPgFields((prev) => ({
                             ...prev,
-                            ssl_mode: normalizePgSslMode(e.target.value),
+                            ssl_mode: normalizePgSslMode(nextSsl),
                           }))
                         }
-                        className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs"
-                      >
-                        <option value="prefer">{extSettings.pgSslPrefer}</option>
-                        <option value="disable">{extSettings.pgSslDisable}</option>
-                        <option value="require">{extSettings.pgSslRequire}</option>
-                        <option value="verify-ca">{extSettings.pgSslVerifyCa}</option>
-                        <option value="verify-full">{extSettings.pgSslVerifyFull}</option>
-                      </select>
+                        options={[
+                          { value: 'prefer', label: extSettings.pgSslPrefer },
+                          { value: 'disable', label: extSettings.pgSslDisable },
+                          { value: 'require', label: extSettings.pgSslRequire },
+                          {
+                            value: 'verify-ca',
+                            label: extSettings.pgSslVerifyCa,
+                          },
+                          {
+                            value: 'verify-full',
+                            label: extSettings.pgSslVerifyFull,
+                          },
+                        ]}
+                        triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-xs"
+                      />
                     </div>
                   </div>
 
@@ -578,8 +587,9 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
                               </>
                             ) : (
                               <>
-                                <span className="font-mono text-accent-success">
-                                  ✓ {extSettings.pgPasswordSavedBadge}
+                                <span className="font-mono text-accent-success inline-flex items-center gap-1">
+                                  <IconCheck className="w-3 h-3" />
+                                  <span>{extSettings.pgPasswordSavedBadge}</span>
                                 </span>
                                 <button
                                   type="button"

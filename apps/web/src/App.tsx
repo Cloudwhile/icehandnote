@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   BrowserRouter,
   Route,
@@ -7,7 +7,6 @@ import {
   useNavigate,
   useParams,
 } from 'react-router-dom';
-import { UserProfileModal } from './components/auth/UserProfileModal';
 import { CommandSearchDialog } from './components/navigation/CommandSearchDialog';
 import { SiteFooter } from './components/navigation/SiteFooter';
 import { TopNavbar } from './components/navigation/TopNavbar';
@@ -45,10 +44,30 @@ import type {
   SiteSettingsDto,
   UserProfileDto,
 } from './lib/types';
-import { AuthFlowPage } from './pages/AuthFlowPage';
 import { HomePage } from './pages/HomePage';
 import { StepReaderPage } from './pages/StepReaderPage';
-import { StudioPage } from './pages/StudioPage';
+
+const AuthFlowPage = lazy(() =>
+  import('./pages/AuthFlowPage').then((m) => ({ default: m.AuthFlowPage })),
+);
+const StudioPage = lazy(() =>
+  import('./pages/StudioPage').then((m) => ({ default: m.StudioPage })),
+);
+const UserProfileModal = lazy(() =>
+  import('./components/auth/UserProfileModal').then((m) => ({
+    default: m.UserProfileModal,
+  })),
+);
+const MyNotesModal = lazy(() =>
+  import('./components/notebook/MyNotesModal').then((m) => ({
+    default: m.MyNotesModal,
+  })),
+);
+const CollabInviteModal = lazy(() =>
+  import('./components/studio/CollabInviteModal').then((m) => ({
+    default: m.CollabInviteModal,
+  })),
+);
 
 function NotFoundPage({ locale }: { locale: LocaleCode }) {
   const copy = UI_COPY[locale];
@@ -104,7 +123,9 @@ function LocaleShellInner({
   );
 
   const [searchOpen, setSearchOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [activeCollabInvite, setActiveCollabInvite] = useState('');
   const [pendingCollabInvite, setPendingCollabInvite] = useState('');
   const [user, setUserState] = useState<UserProfileDto | null>(() =>
     getCachedSessionUser(),
@@ -118,6 +139,12 @@ function LocaleShellInner({
     setUserState(next);
     saveCachedSessionUser(next);
   }, []);
+
+  useEffect(() => {
+    const onExpired = () => updateUser(null);
+    window.addEventListener('ihn:session-expired', onExpired);
+    return () => window.removeEventListener('ihn:session-expired', onExpired);
+  }, [updateUser]);
 
   const openAuthPage = useCallback(
     (mode: 'login' | 'register' = 'login') => {
@@ -411,53 +438,69 @@ function LocaleShellInner({
     updateUser,
   ]);
 
-  const acceptInviteToken = useCallback(
-    async (token: string) => {
-      try {
-        const res = await api.acceptCollaboratorInvite(token);
-        if (res.user) {
-          updateUser(res.user);
-        }
-        toast.success(extAuth.collabAcceptedMsg);
-        const query = new URLSearchParams({
-          section: 'editor',
-          track: res.track_slug,
-          chapter: res.chapter_slug,
-          step: res.step_slug,
-        });
-        navigate(`/${locale}/studio?${query.toString()}`, { replace: true });
-      } catch (err) {
-        toast.error(err);
+  const handleCollabInviteAccepted = useCallback(
+    (res: {
+      track_slug: string;
+      chapter_slug: string;
+      step_slug: string;
+      user?: UserProfileDto | null;
+    }) => {
+      setActiveCollabInvite('');
+      setPendingCollabInvite('');
+      if (res.user) {
+        updateUser(res.user);
       }
+      const query = new URLSearchParams({
+        section: 'editor',
+        track: res.track_slug,
+        chapter: res.chapter_slug,
+        step: res.step_slug,
+      });
+      navigate(`/${locale}/studio?${query.toString()}`, { replace: true });
     },
-    [locale, navigate, extAuth.collabAcceptedMsg, toast, updateUser],
+    [locale, navigate, updateUser],
   );
 
-  // 4. Handle incoming `?collab_invite=...` once auth resolution completes
+  // 4. Handle incoming RFC 9700 Fragment (`/{locale}/invite#token=...`) or legacy `?collab_invite=...`
+  // Opens a two-step safe confirmation modal (preview -> explicit user accept) and scrubs token from URL immediately.
   useEffect(() => {
     if (!authResolved) return;
-    const sp = new URLSearchParams(location.search);
-    const inviteToken = sp.get('collab_invite');
-    if (!inviteToken) return;
+    let extractedToken = '';
+    const isInvitePath = location.pathname === `/${locale}/invite`;
+    if (location.hash) {
+      const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+      const fragTok = hashParams.get('token');
+      if (fragTok && fragTok.trim()) {
+        extractedToken = fragTok.trim();
+        window.history.replaceState(
+          null,
+          '',
+          isInvitePath ? `/${locale}` : `${location.pathname}${location.search}`,
+        );
+      }
+    }
+    if (!extractedToken) {
+      const sp = new URLSearchParams(location.search);
+      const queryTok = sp.get('collab_invite');
+      if (queryTok && queryTok.trim()) {
+        extractedToken = queryTok.trim();
+        stripQueryParams(['collab_invite']);
+      }
+    }
+    if (!extractedToken) return;
 
-    stripQueryParams(['collab_invite']);
-    if (user) {
-      void acceptInviteToken(inviteToken);
-    } else {
-      setPendingCollabInvite(inviteToken);
-      toast.info(extAuth.collabLoginRequiredMsg);
-      navigate(`/${locale}/auth/login`, { replace: true });
+    setActiveCollabInvite(extractedToken);
+    if (isInvitePath) {
+      navigate(`/${locale}`, { replace: true });
     }
   }, [
-    acceptInviteToken,
     authResolved,
     locale,
+    location.hash,
+    location.pathname,
     location.search,
     navigate,
-    extAuth.collabLoginRequiredMsg,
     stripQueryParams,
-    toast,
-    user,
   ]);
 
   // Global `⌘K` / `Ctrl+K` shortcut
@@ -519,7 +562,7 @@ function LocaleShellInner({
     if (pendingCollabInvite) {
       const token = pendingCollabInvite;
       setPendingCollabInvite('');
-      void acceptInviteToken(token);
+      setActiveCollabInvite(token);
     }
   };
 
@@ -529,7 +572,12 @@ function LocaleShellInner({
     location.pathname === `/${locale}/auth` ||
     location.pathname === `/${locale}/login` ||
     location.pathname === `/${locale}/register`;
-  const canAuthor = Boolean(user && (user.role === 'author' || user.role === 'admin'));
+  const canAuthor = Boolean(
+    user &&
+      (user.role === 'author' ||
+        user.role === 'admin' ||
+        user.has_collaborations),
+  );
   const useStudioDashboardShell = isStudioRoute && canAuthor;
   // Also suppress public chrome while Studio auth is still resolving so refreshing `/studio` never flashes TopNavbar/SiteFooter
   const hideChrome =
@@ -566,6 +614,7 @@ function LocaleShellInner({
           theme={theme}
           onToggleTheme={toggleScheme}
           onOpenSearch={() => setSearchOpen(true)}
+          onOpenNotes={() => setNotesOpen(true)}
           user={user}
           siteSettings={siteSettings}
           settingsReady={settingsReady}
@@ -579,60 +628,97 @@ function LocaleShellInner({
         {!isKnownLocale ? (
           <NotFoundPage locale={locale} />
         ) : (
-          <Routes>
-            <Route
-              index
-              element={
-                <HomePage
-                  locale={locale}
-                  siteSettings={siteSettings}
-                  settingsReady={settingsReady}
-                  onOpenSearch={() => setSearchOpen(true)}
-                />
-              }
-            />
-            <Route
-              path="tracks/:track/:chapter/:step"
-              element={
-                <StepReaderPage
-                  locale={locale}
-                  theme={theme}
-                  siteSettings={siteSettings}
-                  settingsReady={settingsReady}
-                  onChangeLocale={handleLocaleSwitch}
-                />
-              }
-            />
-            <Route
-              path="studio"
-              element={
-                <StudioPage
-                  locale={locale}
-                  localePref={localePref}
-                  onChangeLocalePref={handleLocalePrefChange}
-                  theme={theme}
-                  onToggleTheme={toggleScheme}
-                  onOpenSearch={() => setSearchOpen(true)}
-                  user={user}
-                  authResolved={authResolved}
-                  siteSettings={siteSettings}
-                  settingsReady={settingsReady}
-                  onSettingsUpdated={handleSettingsUpdated}
-                  onOpenAuth={() => openAuthPage('login')}
-                  onOpenProfile={() => setProfileOpen(true)}
-                  onLogout={() => void handleLogout()}
-                />
-              }
-            />
-            <Route path="auth/login" element={<AuthFlowPage mode="login" {...authFlowCommonProps} />} />
-            <Route path="login" element={<AuthFlowPage mode="login" {...authFlowCommonProps} />} />
-            <Route path="auth/register" element={<AuthFlowPage mode="register" {...authFlowCommonProps} />} />
-            <Route path="register" element={<AuthFlowPage mode="register" {...authFlowCommonProps} />} />
-            <Route path="auth/forgot-password" element={<AuthFlowPage mode="forgot" {...authFlowCommonProps} />} />
-            <Route path="auth/reset-password" element={<AuthFlowPage mode="reset" {...authFlowCommonProps} />} />
-            <Route path="auth/onboarding" element={<AuthFlowPage mode="onboarding" {...authFlowCommonProps} />} />
-            <Route path="*" element={<NotFoundPage locale={locale} />} />
-          </Routes>
+          <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
+            <Routes>
+              <Route
+                index
+                element={
+                  <HomePage
+                    locale={locale}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onOpenSearch={() => setSearchOpen(true)}
+                  />
+                }
+              />
+              <Route
+                path="invite"
+                element={
+                  <HomePage
+                    locale={locale}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onOpenSearch={() => setSearchOpen(true)}
+                  />
+                }
+              />
+              <Route
+                path="series/:track/:step"
+                element={
+                  <StepReaderPage
+                    locale={locale}
+                    theme={theme}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onChangeLocale={handleLocaleSwitch}
+                  />
+                }
+              />
+              <Route
+                path="tracks/:track/:step"
+                element={
+                  <StepReaderPage
+                    locale={locale}
+                    theme={theme}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onChangeLocale={handleLocaleSwitch}
+                  />
+                }
+              />
+              <Route
+                path="tracks/:track/:chapter/:step"
+                element={
+                  <StepReaderPage
+                    locale={locale}
+                    theme={theme}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onChangeLocale={handleLocaleSwitch}
+                  />
+                }
+              />
+              <Route
+                path="studio"
+                element={
+                  <StudioPage
+                    locale={locale}
+                    localePref={localePref}
+                    onChangeLocalePref={handleLocalePrefChange}
+                    theme={theme}
+                    onToggleTheme={toggleScheme}
+                    onOpenSearch={() => setSearchOpen(true)}
+                    user={user}
+                    authResolved={authResolved}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    onSettingsUpdated={handleSettingsUpdated}
+                    onOpenAuth={() => openAuthPage('login')}
+                    onOpenProfile={() => setProfileOpen(true)}
+                    onLogout={() => void handleLogout()}
+                  />
+                }
+              />
+              <Route path="auth/login" element={<AuthFlowPage mode="login" {...authFlowCommonProps} />} />
+              <Route path="login" element={<AuthFlowPage mode="login" {...authFlowCommonProps} />} />
+              <Route path="auth/register" element={<AuthFlowPage mode="register" {...authFlowCommonProps} />} />
+              <Route path="register" element={<AuthFlowPage mode="register" {...authFlowCommonProps} />} />
+              <Route path="auth/forgot-password" element={<AuthFlowPage mode="forgot" {...authFlowCommonProps} />} />
+              <Route path="auth/reset-password" element={<AuthFlowPage mode="reset" {...authFlowCommonProps} />} />
+              <Route path="auth/onboarding" element={<AuthFlowPage mode="onboarding" {...authFlowCommonProps} />} />
+              <Route path="*" element={<NotFoundPage locale={locale} />} />
+            </Routes>
+          </Suspense>
         )}
       </div>
 
@@ -650,15 +736,49 @@ function LocaleShellInner({
         locale={locale}
       />
 
-      <UserProfileModal
-        open={profileOpen}
-        onClose={() => setProfileOpen(false)}
-        locale={locale}
-        user={user}
-        siteSettings={siteSettings}
-        onUserUpdated={(next) => updateUser(next)}
-        onCurrentSessionRevoked={() => updateUser(null)}
-      />
+      {profileOpen && (
+        <Suspense fallback={null}>
+          <UserProfileModal
+            open={profileOpen}
+            onClose={() => setProfileOpen(false)}
+            locale={locale}
+            user={user}
+            siteSettings={siteSettings}
+            onUserUpdated={(next) => updateUser(next)}
+            onCurrentSessionRevoked={() => updateUser(null)}
+          />
+        </Suspense>
+      )}
+
+      {notesOpen && (
+        <Suspense fallback={null}>
+          <MyNotesModal
+            open={notesOpen}
+            onClose={() => setNotesOpen(false)}
+            locale={locale}
+          />
+        </Suspense>
+      )}
+
+      {activeCollabInvite && (
+        <Suspense fallback={null}>
+          <CollabInviteModal
+            open={Boolean(activeCollabInvite)}
+            token={activeCollabInvite}
+            locale={locale}
+            user={user}
+            onClose={() => setActiveCollabInvite('')}
+            onRequireSignIn={() => {
+              const tok = activeCollabInvite;
+              setPendingCollabInvite(tok);
+              setActiveCollabInvite('');
+              toast.info(extAuth.collabLoginRequiredMsg);
+              navigate(`/${locale}/auth/login`, { replace: true });
+            }}
+            onAccepted={handleCollabInviteAccepted}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

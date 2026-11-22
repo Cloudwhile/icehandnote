@@ -3,7 +3,7 @@
  * Reuses `<StatusBadge>`, `<NotebookEmptyState>`, and `<ConfirmDialog tone="danger">`.
  */
 
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { EXT_COPY, getEnabledLocaleMetas, UI_COPY } from '../../lib/i18n';
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
@@ -14,6 +14,8 @@ import type {
 } from '../../lib/types';
 import { NotebookEmptyState } from '../notebook/NotebookEmptyState';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { IconAlertTriangle, IconCheck } from '../ui/Icons';
+import { InkSelect } from '../ui/InkSelect';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
 
@@ -71,27 +73,11 @@ export function StudioCatalogPanel({
   const [trackTitleInput, setTrackTitleInput] = useState('');
   const [trackDescInput, setTrackDescInput] = useState('');
   const [trackDifficulty, setTrackDifficulty] = useState('intermediate');
-  const [firstChSlugInput, setFirstChSlugInput] = useState('01-basics');
-  const [firstChTitleInput, setFirstChTitleInput] = useState('');
-
-  // Create Chapter form state
-  const [newChTrack, setNewChTrack] = useState(tracks[0]?.slug ?? '');
-  const [newChSlug, setNewChSlug] = useState('');
-  const [newChNumber, setNewChNumber] = useState(2);
-  const [newChTitle, setNewChTitle] = useState('');
-
-  const [deleteCatalogTarget, setDeleteCatalogTarget] = useState<
-    | { kind: 'track'; trackSlug: string }
-    | { kind: 'chapter'; trackSlug: string; chapterSlug: string }
-    | null
-  >(null);
+  const [deleteCatalogTarget, setDeleteCatalogTarget] = useState<{
+    kind: 'track';
+    trackSlug: string;
+  } | null>(null);
   const [deletingCatalog, setDeletingCatalog] = useState(false);
-
-  useEffect(() => {
-    if (tracks.length > 0 && (!newChTrack || !tracks.some((t) => t.slug === newChTrack))) {
-      setNewChTrack(tracks[0].slug);
-    }
-  }, [tracks, newChTrack]);
 
   const handleCreateTrack = async (e: FormEvent) => {
     e.preventDefault();
@@ -105,8 +91,8 @@ export function StudioCatalogPanel({
         title_zh_tw: trackTitleInput.trim(),
         subtitle_zh_tw: trackDescInput.trim(),
         description_zh_tw: trackDescInput.trim(),
-        first_chapter_slug: firstChSlugInput.trim() || '01-basics',
-        first_chapter_title: firstChTitleInput.trim() || trackTitleInput.trim(),
+        first_chapter_slug: 'chapters',
+        first_chapter_title: trackTitleInput.trim(),
       });
       await onRefreshOverview();
       setTrackSlugInput('');
@@ -115,29 +101,10 @@ export function StudioCatalogPanel({
       toast.success(s.trackCreatedBanner(stripHtmlTags(created.title)));
       onOpenEditorTarget(
         created.slug,
-        created.chapters[0]?.slug ?? '01-basics',
+        created.chapters[0]?.slug ?? 'chapters',
         '01-intro',
         locale,
       );
-    } catch (err) {
-      toast.error(err);
-    }
-  };
-
-  const handleCreateChapter = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!newChSlug.trim() || !newChTitle.trim()) return;
-    try {
-      await api.studioCreateChapter({
-        track_slug: newChTrack,
-        slug: newChSlug.trim(),
-        number: newChNumber,
-        title_zh_tw: newChTitle.trim(),
-      });
-      await onRefreshOverview();
-      setNewChSlug('');
-      setNewChTitle('');
-      toast.success(s.chapterCreatedBanner(newChTrack));
     } catch (err) {
       toast.error(err);
     }
@@ -147,16 +114,8 @@ export function StudioCatalogPanel({
     if (!deleteCatalogTarget || deletingCatalog) return;
     setDeletingCatalog(true);
     try {
-      if (deleteCatalogTarget.kind === 'track') {
-        await api.studioDeleteTrack(deleteCatalogTarget.trackSlug);
-        toast.success(extCopy.studio.trackDeletedMsg);
-      } else {
-        await api.studioDeleteChapter(
-          deleteCatalogTarget.trackSlug,
-          deleteCatalogTarget.chapterSlug,
-        );
-        toast.success(extCopy.studio.chapterDeletedMsg);
-      }
+      await api.studioDeleteTrack(deleteCatalogTarget.trackSlug);
+      toast.success(extCopy.studio.trackDeletedMsg);
       setDeleteCatalogTarget(null);
       await onRefreshOverview();
     } catch (err) {
@@ -212,46 +171,29 @@ export function StudioCatalogPanel({
               </div>
             </div>
 
-            {t.chapters.map((ch) => (
-              <div
-                key={ch.chapter_id}
-                className="rounded-xl p-4 bg-surface-raised space-y-3"
-              >
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-semibold text-ink-primary">
-                    <SafeHtml as="span" html={ch.title} />{' '}
-                    <span className="font-mono text-xs text-ink-muted">
-                      ({ch.slug})
-                    </span>
-                  </span>
-                  <div className="flex items-center gap-2.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => onQuickNewStep(t.slug, ch.slug)}
-                      className="min-h-7 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
-                    >
-                      {s.addStepHereBtn}
-                    </button>
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setDeleteCatalogTarget({
-                            kind: 'chapter',
-                            trackSlug: t.slug,
-                            chapterSlug: ch.slug,
-                          })
-                        }
-                        className="min-h-7 text-xs font-semibold text-accent-danger hover:underline cursor-pointer"
-                      >
-                        {extCopy.studio.deleteChapterBtn}
-                      </button>
-                    )}
-                  </div>
-                </div>
+            <div className="rounded-xl p-4 bg-surface-raised space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-ink-muted tabular-nums">
+                  {copy.formatTrackCounts(
+                    t.chapters.length,
+                    t.chapters.reduce((acc, c) => acc + c.steps.length, 0),
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onQuickNewStep(t.slug, t.chapters[0]?.slug ?? 'chapters')
+                  }
+                  className="min-h-7 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                >
+                  {s.addStepHereBtn}
+                </button>
+              </div>
 
-                <div className="space-y-2">
-                  {ch.steps.map((st) => (
+              <div className="space-y-2">
+                {t.chapters
+                  .flatMap((ch) => ch.steps.map((st) => ({ ch, st })))
+                  .map(({ ch, st }) => (
                     <div
                       key={st.step_id}
                       className="p-3 rounded-xl bg-surface-sheet flex flex-wrap items-baseline justify-between gap-3"
@@ -329,14 +271,24 @@ export function StudioCatalogPanel({
                                         }
                               }
                             >
-                              {loc.code}{' '}
-                              {!found
-                                ? s.addLocaleAction
-                                : found.status === 'draft'
-                                  ? s.draftParen
-                                  : drifted
-                                    ? `⚠v${found.synced_revision}`
-                                    : `✓v${found.synced_revision}`}
+                              <span className="inline-flex items-center gap-1">
+                                <span>{loc.code}</span>
+                                {!found ? (
+                                  <span>{s.addLocaleAction}</span>
+                                ) : found.status === 'draft' ? (
+                                  <span>{s.draftParen}</span>
+                                ) : drifted ? (
+                                  <span className="inline-flex items-center gap-0.5">
+                                    <IconAlertTriangle className="w-3 h-3" />
+                                    <span>v{found.synced_revision}</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-0.5">
+                                    <IconCheck className="w-3 h-3" />
+                                    <span>v{found.synced_revision}</span>
+                                  </span>
+                                )}
+                              </span>
                             </button>
                           );
                         })}
@@ -371,15 +323,14 @@ export function StudioCatalogPanel({
                       </div>
                     </div>
                   ))}
-                </div>
               </div>
-            ))}
+            </div>
           </div>
         ))
       )}
 
-      {/* Create New Track & Chapter Forms */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+      {/* Create New Series Form (2-level: Series -> Chapters) */}
+      <div className="max-w-xl">
         <form
           onSubmit={(e) => void handleCreateTrack(e)}
           className="studio-panel p-5"
@@ -437,57 +388,27 @@ export function StudioCatalogPanel({
               className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm ink-input-inset"
             />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
-            <div>
-              <label
-                htmlFor="new-track-diff"
-                className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-              >
-                {s.difficultyLabel}
-              </label>
-              <select
-                id="new-track-diff"
-                value={trackDifficulty}
-                onChange={(e) => setTrackDifficulty(e.target.value)}
-                className="ink-select w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs"
-              >
-                <option value="beginner">{copy.difficultyLabels.beginner}</option>
-                <option value="intermediate">
-                  {copy.difficultyLabels.intermediate}
-                </option>
-                <option value="advanced">{copy.difficultyLabels.advanced}</option>
-              </select>
-            </div>
-            <div>
-              <label
-                htmlFor="new-track-chslug"
-                className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-              >
-                {s.firstChapterSlugLabel}
-              </label>
-              <input
-                id="new-track-chslug"
-                type="text"
-                value={firstChSlugInput}
-                onChange={(e) => setFirstChSlugInput(e.target.value)}
-                className="w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="new-track-chtitle"
-                className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-              >
-                {s.firstChapterTitleLabel}
-              </label>
-              <input
-                id="new-track-chtitle"
-                type="text"
-                value={firstChTitleInput}
-                onChange={(e) => setFirstChTitleInput(e.target.value)}
-                className="w-full px-2.5 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs"
-              />
-            </div>
+          <div className="mb-5">
+            <label
+              htmlFor="new-track-diff"
+              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
+            >
+              {s.difficultyLabel}
+            </label>
+            <InkSelect
+              id="new-track-diff"
+              value={trackDifficulty}
+              onChange={setTrackDifficulty}
+              options={[
+                { value: 'beginner', label: copy.difficultyLabels.beginner },
+                {
+                  value: 'intermediate',
+                  label: copy.difficultyLabels.intermediate,
+                },
+                { value: 'advanced', label: copy.difficultyLabels.advanced },
+              ]}
+              triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-xs"
+            />
           </div>
           <button
             type="submit"
@@ -496,114 +417,18 @@ export function StudioCatalogPanel({
             {s.createTrackSubmit}
           </button>
         </form>
-
-        <form
-          onSubmit={(e) => void handleCreateChapter(e)}
-          className="studio-panel p-5"
-        >
-          <h3 className="text-base font-semibold text-ink-primary mb-5">
-            {s.createChapterTitle}
-          </h3>
-          <div className="mb-5">
-            <label
-              htmlFor="ch-parent-track"
-              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-            >
-              {s.parentTrackLabel}
-            </label>
-            <select
-              id="ch-parent-track"
-              value={newChTrack}
-              onChange={(e) => setNewChTrack(e.target.value)}
-              className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
-            >
-              {tracks.map((t) => (
-                <option key={t.slug} value={t.slug}>
-                  {stripHtmlTags(t.title)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
-            <div className="sm:col-span-2">
-              <label
-                htmlFor="new-ch-slug"
-                className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-              >
-                {s.chapterSlugLabel}
-              </label>
-              <input
-                id="new-ch-slug"
-                type="text"
-                required
-                value={newChSlug}
-                onChange={(e) => setNewChSlug(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm font-mono ink-input-inset"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="new-ch-num"
-                className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-              >
-                {s.chapterNumLabel}
-              </label>
-              <input
-                id="new-ch-num"
-                type="number"
-                min={1}
-                value={newChNumber}
-                onChange={(e) => setNewChNumber(Number(e.target.value) || 1)}
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm tabular-nums"
-              />
-            </div>
-          </div>
-          <div className="mb-5">
-            <label
-              htmlFor="new-ch-title"
-              className="block mb-1.5 text-xs font-semibold text-ink-secondary"
-            >
-              {s.chapterTitleLabel}
-            </label>
-            <input
-              id="new-ch-title"
-              type="text"
-              required
-              value={newChTitle}
-              onChange={(e) => setNewChTitle(e.target.value)}
-              placeholder={s.chapterTitlePlaceholder}
-              className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm ink-input-inset"
-            />
-          </div>
-          <button
-            type="submit"
-            className="min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-secondary cursor-pointer"
-          >
-            {s.createChapterSubmit}
-          </button>
-        </form>
       </div>
 
-      {/* Delete Track / Chapter Confirmation Modal */}
+      {/* Delete Series Confirmation Modal */}
       <ConfirmDialog
         open={Boolean(deleteCatalogTarget)}
         onClose={() => setDeleteCatalogTarget(null)}
         tone="danger"
         busy={deletingCatalog}
-        title={
-          deleteCatalogTarget?.kind === 'track'
-            ? extCopy.studio.deleteTrackDialogTitle(deleteCatalogTarget.trackSlug)
-            : extCopy.studio.deleteChapterDialogTitle(
-                deleteCatalogTarget?.kind === 'chapter'
-                  ? deleteCatalogTarget.chapterSlug
-                  : '',
-              )
-        }
-        description={
-          deleteCatalogTarget?.kind === 'track'
-            ? extCopy.studio.deleteTrackDialogDesc
-            : extCopy.studio.deleteChapterDialogDesc
-        }
+        title={extCopy.studio.deleteTrackDialogTitle(
+          deleteCatalogTarget?.trackSlug ?? '',
+        )}
+        description={extCopy.studio.deleteTrackDialogDesc}
         cancelLabel={s.deleteCancelBtn}
         confirmLabel={s.deleteConfirmBtn}
         onConfirm={() => void handleConfirmDeleteCatalog()}

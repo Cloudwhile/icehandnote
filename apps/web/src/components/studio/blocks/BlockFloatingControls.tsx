@@ -10,9 +10,26 @@ import {
   type RefObject,
   useEffect,
   useRef,
+  useState,
 } from 'react';
 import { EXT_COPY, UI_COPY } from '../../../lib/i18n';
-import type { LocaleCode, StickerStyle } from '../../../lib/types';
+import {
+  type ActiveInlineFormats,
+  parseKeyComboInput,
+  eventToKeyCombo,
+  QUICK_KBD_KEYS,
+  RICH_BG_SWATCHES,
+  RICH_FG_SWATCHES,
+  RICH_HL_SWATCHES,
+  type RichInlineCommand,
+  setPersistentSelectionHighlight,
+} from '../../../lib/richInline';
+import type {
+  LocaleCode,
+  StickerStyle,
+  TextAlign,
+  TextSizePreset,
+} from '../../../lib/types';
 import {
   createVisualId,
   formatAuthorMarginNote,
@@ -31,23 +48,37 @@ import {
 import { ToneSwatchPicker } from '../../notebook/ToneSwatchPicker';
 import {
   IconAlertCircle,
+  IconAlignCenter,
+  IconAlignLeft,
+  IconAlignRight,
   IconArrowDown,
   IconArrowUp,
+  IconBold,
   IconCheckSquare,
   IconCode,
   IconCopy,
   IconDiagram,
+  IconEraser,
   IconFileCode,
   IconGripVertical,
   IconHeading,
+  IconHighlighter,
   IconImage,
+  IconInlineCode,
+  IconItalic,
+  IconKeyboardKey,
+  IconLink,
   IconList,
   IconPalette,
   IconParagraph,
   IconPen,
+  IconPixelSticker,
   IconPlus,
   IconQuote,
+  IconStrikethrough,
+  IconTextSize,
   IconTrash,
+  IconUnderline,
 } from '../../ui/Icons';
 import { PopupMenu } from '../../ui/PopupMenu';
 
@@ -190,6 +221,8 @@ export function visualBlockIcon(type: VisualBlock['type']): ReactNode {
       return <IconQuote className="w-3.5 h-3.5" />;
     case 'rough_diagram':
       return <IconDiagram className="w-3.5 h-3.5" />;
+    case 'pixel_sticker':
+      return <IconPixelSticker className="w-3.5 h-3.5 text-accent-amber" />;
     case 'raw_markdown':
       return <IconFileCode className="w-3.5 h-3.5" />;
   }
@@ -215,6 +248,8 @@ export function extractTurnIntoText(block: VisualBlock): string {
     case 'image':
       return block.caption || block.alt;
     case 'rough_diagram':
+      return block.caption;
+    case 'pixel_sticker':
       return block.caption;
     case 'raw_markdown':
       return block.content;
@@ -292,67 +327,743 @@ export function convertBlockType(
 }
 
 /**
- * Accessible Selection Formatting Toolbar (`modern-web-guidance/toolbar`).
+ * Shared Theme-Calibrated Text Color / Pill Background / Highlighter Swatch Palette
+ * Reused by both `<InlineFormatToolbar>` and `<EditorContextMenu>`.
  */
-export function InlineFormatToolbar({
+export function ColorHighlightPalette({
   locale,
-  onBold,
-  onItalic,
-  onCode,
-  onLink,
+  activeFg,
+  activeBg,
+  activeHighlight,
+  testIdPrefix,
+  preventFocusLoss = false,
+  onCommand,
 }: {
   locale: LocaleCode;
-  onBold: () => void;
-  onItalic: () => void;
-  onCode: () => void;
-  onLink: () => void;
+  activeFg?: string | null;
+  activeBg?: string | null;
+  activeHighlight?: string | null;
+  testIdPrefix: string;
+  preventFocusLoss?: boolean;
+  onCommand: (cmd: RichInlineCommand) => void;
 }) {
-  const v = UI_COPY[locale].studio.visual;
+  const rf = EXT_COPY[locale].studio.richFormat;
+  const colorName = (id: string): string => {
+    switch (id) {
+      case 'violet':
+        return rf.colorViolet;
+      case 'ice':
+        return rf.colorIce;
+      case 'emerald':
+        return rf.colorEmerald;
+      case 'amber':
+        return rf.colorAmber;
+      case 'rose':
+        return rf.colorRose;
+      case 'muted':
+        return rf.colorMuted;
+      case 'kraft':
+        return rf.colorKraft;
+      default:
+        return rf.colorDefault;
+    }
+  };
+
+  const keepFocus = preventFocusLoss
+    ? (e: ReactPointerEvent<HTMLButtonElement>) => {
+        if (e.button === 0) e.preventDefault();
+      }
+    : undefined;
+
+  return (
+    <div className="space-y-2 text-xs">
+      {/* Row 1: Text Color */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-ink-secondary font-semibold whitespace-nowrap">
+          {rf.textColor}
+        </span>
+        <div className="flex items-center gap-1 flex-wrap">
+          <button
+            type="button"
+            data-testid={`${testIdPrefix}-fg-default`}
+            aria-label={`${rf.textColor}: ${rf.colorDefault}`}
+            aria-pressed={!activeFg}
+            onPointerDown={keepFocus}
+            onClick={() => onCommand({ type: 'fg-color', value: null })}
+            className="w-6 h-6 rounded-full border border-border-control bg-surface-sheet text-ink-primary font-mono text-xs inline-flex items-center justify-center cursor-pointer"
+          >
+            A
+          </button>
+          {RICH_FG_SWATCHES.map((sw) => (
+            <button
+              key={sw.id}
+              type="button"
+              data-testid={`${testIdPrefix}-fg-${sw.id}`}
+              aria-label={`${rf.textColor}: ${colorName(sw.id)}`}
+              title={colorName(sw.id)}
+              aria-pressed={activeFg === sw.id}
+              onPointerDown={keepFocus}
+              onClick={() => onCommand({ type: 'fg-color', value: sw.id })}
+              className={`w-6 h-6 rounded-full border cursor-pointer inline-flex items-center justify-center font-semibold text-xs ${
+                activeFg === sw.id
+                  ? 'border-border-ink ring-2 ring-action-bg ring-offset-1 ring-offset-surface-sheet'
+                  : 'border-border-subtle hover:border-border-ink'
+              }`}
+              style={{ color: sw.cssVar, backgroundColor: 'var(--surface-sheet)' }}
+            >
+              A
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Row 2: Pill Background Color */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-ink-secondary font-semibold whitespace-nowrap">
+          {rf.bgColor}
+        </span>
+        <div className="flex items-center gap-1 flex-wrap">
+          <button
+            type="button"
+            data-testid={`${testIdPrefix}-bg-default`}
+            aria-label={`${rf.bgColor}: ${rf.colorDefault}`}
+            aria-pressed={!activeBg}
+            onPointerDown={keepFocus}
+            onClick={() => onCommand({ type: 'bg-color', value: null })}
+            className="w-6 h-6 rounded-md border border-dashed border-border-control bg-surface-sheet text-ink-muted text-xs inline-flex items-center justify-center cursor-pointer"
+          >
+            ×
+          </button>
+          {RICH_BG_SWATCHES.map((sw) => (
+            <button
+              key={sw.id}
+              type="button"
+              data-testid={`${testIdPrefix}-bg-${sw.id}`}
+              aria-label={`${rf.bgColor}: ${colorName(sw.id)}`}
+              title={colorName(sw.id)}
+              aria-pressed={activeBg === sw.id}
+              onPointerDown={keepFocus}
+              onClick={() => onCommand({ type: 'bg-color', value: sw.id })}
+              className={`w-6 h-6 rounded-md border cursor-pointer ${
+                activeBg === sw.id
+                  ? 'ring-2 ring-action-bg ring-offset-1 ring-offset-surface-sheet'
+                  : 'hover:border-border-ink'
+              }`}
+              style={{
+                backgroundColor: sw.bgVar,
+                borderColor: sw.borderVar,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Row 3: Highlighter Marker Color */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-ink-secondary font-semibold whitespace-nowrap">
+          {rf.highlightColor}
+        </span>
+        <div className="flex items-center gap-1 flex-wrap">
+          <button
+            type="button"
+            data-testid={`${testIdPrefix}-hl-default`}
+            aria-label={`${rf.highlightColor}: ${rf.colorDefault}`}
+            aria-pressed={!activeHighlight}
+            onPointerDown={keepFocus}
+            onClick={() => onCommand({ type: 'highlight', value: null })}
+            className="w-6 h-6 rounded-md border border-dashed border-border-control bg-surface-sheet text-ink-muted text-xs inline-flex items-center justify-center cursor-pointer"
+          >
+            ×
+          </button>
+          {RICH_HL_SWATCHES.map((sw) => (
+            <button
+              key={sw.id}
+              type="button"
+              data-testid={`${testIdPrefix}-hl-${sw.id}`}
+              aria-label={`${rf.highlightColor}: ${colorName(sw.id)}`}
+              title={colorName(sw.id)}
+              aria-pressed={activeHighlight === sw.id}
+              onPointerDown={keepFocus}
+              onClick={() => onCommand({ type: 'highlight', value: sw.id })}
+              className={`w-6 h-6 rounded-md border cursor-pointer inline-flex items-end justify-center pb-1 ${
+                activeHighlight === sw.id
+                  ? 'border-border-ink ring-2 ring-action-bg ring-offset-1 ring-offset-surface-sheet'
+                  : 'border-border-subtle hover:border-border-ink'
+              }`}
+              style={{
+                backgroundColor: 'var(--surface-sheet)',
+                backgroundImage: `linear-gradient(to top, ${sw.cssVar} 60%, transparent 60%)`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Interactive Tactile Keyboard Key Combo Recorder & Composer (`<kbd>` + `.ink-kbd-combo`).
+ */
+export function KbdComboComposer({
+  locale,
+  onInsert,
+  onCancel,
+}: {
+  locale: LocaleCode;
+  onInsert: (keys: string[]) => void;
+  onCancel?: () => void;
+}) {
+  const rf = EXT_COPY[locale].studio.richFormat;
+  const [rawInput, setRawInput] = useState('Ctrl+K');
+  const lastCompEndRef = useRef<number | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
+  }, []);
+
+  const parsedKeys = parseKeyComboInput(rawInput);
 
   return (
     <div
-      role="toolbar"
-      aria-label={v.fmtBold}
-      className="flow-inline-toolbar ui-popover-enter origin-bottom"
-      {...({ focusgroup: 'toolbar wrap' } as Record<string, string>)}
+      data-testid="kbd-composer-panel"
+      className="space-y-2.5 text-xs p-2.5 rounded-xl bg-surface-sheet border-2 border-border-ink shadow-[3px_3px_0_0_var(--border-ink)] w-72 sm:w-80"
     >
-      <button
-        type="button"
-        title="Ctrl+B / ⌘B"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onBold}
-      >
-        <span className="font-semibold">{v.fmtBold}</span>
-      </button>
-      <button
-        type="button"
-        title="Ctrl+I / ⌘I"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onItalic}
-      >
-        <span className="italic">{v.fmtItalic}</span>
-      </button>
-      <span
-        role="separator"
-        aria-orientation="vertical"
-        className="w-px h-4 bg-border-subtle mx-0.5"
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-ink-primary inline-flex items-center gap-1.5">
+          <IconKeyboardKey className="w-3.5 h-3.5 text-link-ink" />
+          <span>{rf.kbdTitle}</span>
+        </span>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label={UI_COPY[locale].auth.close}
+            className="w-6 h-6 rounded-md inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      <input
+        ref={inputRef}
+        type="text"
+        data-testid="kbd-combo-input"
+        value={rawInput}
+        placeholder={rf.kbdRecordPlaceholder}
+        onCompositionEnd={(e) => {
+          lastCompEndRef.current = e.timeStamp;
+        }}
+        onChange={(e) => setRawInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (isImeComposing(e, lastCompEndRef.current)) return;
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            onCancel?.();
+            return;
+          }
+          if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            if (parsedKeys.length > 0) onInsert(parsedKeys);
+            return;
+          }
+          if (e.ctrlKey || e.metaKey || e.altKey) {
+            e.preventDefault();
+            const recorded = eventToKeyCombo(e);
+            if (recorded.length > 0) setRawInput(recorded.join(' + '));
+          }
+        }}
+        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-raised text-ink-primary border border-border-subtle font-mono text-xs focus:outline-none focus:border-action-bg"
       />
-      <button
-        type="button"
-        title="Ctrl+E / ⌘E"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onCode}
+
+      <div className="flex flex-wrap gap-1">
+        {QUICK_KBD_KEYS.map((keyLabel) => (
+          <button
+            key={keyLabel}
+            type="button"
+            onClick={() => {
+              const cur = parseKeyComboInput(rawInput);
+              setRawInput([...cur, keyLabel].slice(0, 6).join(' + '));
+            }}
+            className="ink-kbd px-1.5 py-0.5 text-xs cursor-pointer hover:bg-action-subtle"
+          >
+            {keyLabel}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border-subtle">
+        <div className="min-h-6 flex items-center gap-1 overflow-x-auto">
+          {parsedKeys.length > 0 ? (
+            <span className="ink-kbd-combo" aria-hidden="true">
+              {parsedKeys.map((k, idx) => (
+                <span key={`${k}-${idx}`} className="inline-flex items-center gap-1">
+                  {idx > 0 && <span className="ink-kbd-sep">+</span>}
+                  <kbd className="ink-kbd">{k}</kbd>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="text-ink-muted">{rf.kbdRecordHint}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          data-testid="kbd-insert-submit"
+          disabled={parsedKeys.length === 0}
+          onClick={() => {
+            if (parsedKeys.length > 0) onInsert(parsedKeys);
+          }}
+          className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold ink-btn-primary disabled:opacity-45 cursor-pointer shrink-0"
+        >
+          {rf.kbdInsertBtn}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Accessible Selection Formatting Toolbar (`modern-web-guidance/toolbar` & `highlight-text-ranges`).
+ * Renders single-tab-stop toolbar with `focusgroup="toolbar wrap"` (+ roving fallback),
+ * ARIA `[aria-pressed="true"]`, inline colors/highlights, font size, alignment, `<kbd>`, & links.
+ */
+export function InlineFormatToolbar({
+  locale,
+  rect,
+  formats,
+  supportsAlign = false,
+  blockAlign = 'left',
+  supportsFontSize = false,
+  blockSize = 'base',
+  savedRange,
+  onCommand,
+  onChangeAlign,
+  onChangeBlockSize,
+  onRequestDismiss,
+}: {
+  locale: LocaleCode;
+  rect: { top: number; bottom: number; left: number; width: number };
+  formats: ActiveInlineFormats;
+  supportsAlign?: boolean;
+  blockAlign?: TextAlign;
+  supportsFontSize?: boolean;
+  blockSize?: TextSizePreset;
+  savedRange: Range | null;
+  onCommand: (cmd: RichInlineCommand) => void;
+  onChangeAlign?: (align: TextAlign) => void;
+  onChangeBlockSize?: (size: TextSizePreset) => void;
+  onRequestDismiss?: () => void;
+}) {
+  const copy = UI_COPY[locale];
+  const v = copy.studio.visual;
+  const rf = EXT_COPY[locale].studio.richFormat;
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const linkInputRef = useRef<HTMLInputElement | null>(null);
+  const lastLinkCompEndRef = useRef<number | null>(null);
+  const [subPanel, setSubPanel] = useState<'color' | 'size' | 'kbd' | 'link' | null>(null);
+  const [linkDraft, setLinkDraft] = useState(formats.linkHref ?? 'https://');
+
+  useEffect(() => {
+    setLinkDraft(formats.linkHref ?? 'https://');
+  }, [formats.linkHref]);
+
+  // Keep selected range highlighted visually whenever an input subpanel (`kbd` / `link`) holds focus
+  useEffect(() => {
+    if (subPanel === 'kbd' || subPanel === 'link') {
+      setPersistentSelectionHighlight(savedRange);
+      return () => setPersistentSelectionHighlight(null);
+    }
+    setPersistentSelectionHighlight(null);
+    return undefined;
+  }, [subPanel, savedRange]);
+
+  // Install roving-tabindex fallback ONLY when native `focusgroup` is unsupported (`toolbar` guide)
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar || 'focusGroup' in HTMLElement.prototype) return undefined;
+
+    const getItems = () =>
+      Array.from(bar.querySelectorAll<HTMLButtonElement>('[role="group"] > button'));
+    const initItems = getItems();
+    initItems.forEach((b, i) => {
+      b.tabIndex = i === 0 ? 0 : -1;
+    });
+
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLButtonElement | null;
+      const items = getItems();
+      if (target && items.includes(target)) {
+        items.forEach((b) => {
+          b.tabIndex = b === target ? 0 : -1;
+        });
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+      const items = getItems();
+      const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (idx < 0 || items.length === 0) return;
+      e.preventDefault();
+      const rtl = getComputedStyle(bar).direction === 'rtl';
+      let nextIdx = idx;
+      if (e.key === 'Home') nextIdx = 0;
+      else if (e.key === 'End') nextIdx = items.length - 1;
+      else if (e.key === 'ArrowRight') {
+        nextIdx = (idx + (rtl ? -1 : 1) + items.length) % items.length;
+      } else if (e.key === 'ArrowLeft') {
+        nextIdx = (idx + (rtl ? 1 : -1) + items.length) % items.length;
+      }
+      items[nextIdx]?.focus({ preventScroll: true });
+    };
+
+    bar.addEventListener('focusin', onFocusIn);
+    bar.addEventListener('keydown', onKeyDown);
+    return () => {
+      bar.removeEventListener('focusin', onFocusIn);
+      bar.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const openBelow = rect.top < 118;
+  const fixedTop = openBelow
+    ? Math.min(vh - 64, rect.bottom + 8)
+    : Math.max(8, rect.top - 48);
+  const fixedLeft = Math.max(12, Math.min(rect.left + rect.width / 2, vw - 220));
+
+  const keepFocusOnPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    if (e.button === 0) e.preventDefault();
+  };
+
+  const sizeOptions: Array<{ id: TextSizePreset; label: string }> = [
+    { id: 'sm', label: rf.sizeSm },
+    { id: 'base', label: rf.sizeBase },
+    { id: 'lg', label: rf.sizeLg },
+    { id: 'xl', label: rf.sizeXl },
+    { id: '2xl', label: rf.size2xl },
+  ];
+
+  const activeSize = blockSize !== 'base' ? blockSize : formats.fontSize ?? 'base';
+
+  return (
+    <div
+      data-testid="flow-inline-toolbar"
+      className="fixed z-55 flex flex-col items-start gap-1.5 ui-popover-enter origin-bottom"
+      style={{
+        left: `${Math.round(Math.max(12, fixedLeft - 140))}px`,
+        top: `${Math.round(fixedTop)}px`,
+        maxWidth: 'calc(100dvw - 1.5rem)',
+      }}
+    >
+      <div
+        ref={barRef}
+        role="toolbar"
+        aria-label={rf.toolbarAria}
+        className="flow-inline-toolbar"
+        {...({ focusgroup: 'toolbar wrap' } as Record<string, string>)}
       >
-        <span className="font-mono">{v.fmtCode}</span>
-      </button>
-      <button
-        type="button"
-        title="Ctrl+K / ⌘K"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={onLink}
-      >
-        <span>{v.fmtLink}</span>
-      </button>
+        <div role="group" aria-label={v.fmtBold} className="inline-flex items-center gap-0.5">
+          <button
+            type="button"
+            data-testid="toolbar-bold-btn"
+            aria-label={v.fmtBold}
+            title={`${v.fmtBold} (Ctrl+B)`}
+            aria-pressed={formats.bold}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => onCommand({ type: 'bold' })}
+          >
+            <IconBold />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-italic-btn"
+            aria-label={v.fmtItalic}
+            title={`${v.fmtItalic} (Ctrl+I)`}
+            aria-pressed={formats.italic}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => onCommand({ type: 'italic' })}
+          >
+            <IconItalic />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-underline-btn"
+            aria-label={rf.underline}
+            title={`${rf.underline} (Ctrl+U)`}
+            aria-pressed={formats.underline}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => onCommand({ type: 'underline' })}
+          >
+            <IconUnderline />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-strike-btn"
+            aria-label={rf.strikethrough}
+            title={rf.strikethrough}
+            aria-pressed={formats.strike}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => onCommand({ type: 'strike' })}
+          >
+            <IconStrikethrough />
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" className="w-px h-4 bg-border-subtle mx-0.5" />
+
+        <div role="group" aria-label={rf.inlineCode} className="inline-flex items-center gap-0.5">
+          <button
+            type="button"
+            data-testid="toolbar-code-btn"
+            aria-label={rf.inlineCode}
+            title={`${rf.inlineCode} (Ctrl+E)`}
+            aria-pressed={formats.code}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => onCommand({ type: 'inline-code' })}
+          >
+            <IconInlineCode />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-kbd-btn"
+            aria-label={rf.kbdCombo}
+            title={rf.kbdCombo}
+            aria-pressed={subPanel === 'kbd'}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => setSubPanel((p) => (p === 'kbd' ? null : 'kbd'))}
+          >
+            <IconKeyboardKey />
+          </button>
+        </div>
+
+        <span role="separator" aria-orientation="vertical" className="w-px h-4 bg-border-subtle mx-0.5" />
+
+        <div role="group" aria-label={rf.highlightColor} className="inline-flex items-center gap-0.5">
+          <button
+            type="button"
+            data-testid="toolbar-color-btn"
+            aria-label={rf.highlightColor}
+            title={`${rf.textColor} / ${rf.bgColor} / ${rf.highlightColor}`}
+            aria-pressed={
+              subPanel === 'color' ||
+              Boolean(formats.fgColor || formats.bgColor || formats.highlight)
+            }
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => setSubPanel((p) => (p === 'color' ? null : 'color'))}
+          >
+            <IconHighlighter />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-fontsize-btn"
+            aria-label={rf.fontSize}
+            title={rf.fontSize}
+            aria-pressed={subPanel === 'size' || activeSize !== 'base'}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => setSubPanel((p) => (p === 'size' ? null : 'size'))}
+          >
+            <IconTextSize />
+          </button>
+        </div>
+
+        {supportsAlign && onChangeAlign && (
+          <>
+            <span role="separator" aria-orientation="vertical" className="w-px h-4 bg-border-subtle mx-0.5" />
+            <div role="group" aria-label={rf.alignLeft} className="inline-flex items-center gap-0.5">
+              <button
+                type="button"
+                data-testid="toolbar-align-left"
+                aria-label={rf.alignLeft}
+                title={rf.alignLeft}
+                aria-pressed={blockAlign === 'left'}
+                onPointerDown={keepFocusOnPointerDown}
+                onClick={() => onChangeAlign('left')}
+              >
+                <IconAlignLeft />
+              </button>
+              <button
+                type="button"
+                data-testid="toolbar-align-center"
+                aria-label={rf.alignCenter}
+                title={rf.alignCenter}
+                aria-pressed={blockAlign === 'center'}
+                onPointerDown={keepFocusOnPointerDown}
+                onClick={() => onChangeAlign('center')}
+              >
+                <IconAlignCenter />
+              </button>
+              <button
+                type="button"
+                data-testid="toolbar-align-right"
+                aria-label={rf.alignRight}
+                title={rf.alignRight}
+                aria-pressed={blockAlign === 'right'}
+                onPointerDown={keepFocusOnPointerDown}
+                onClick={() => onChangeAlign('right')}
+              >
+                <IconAlignRight />
+              </button>
+            </div>
+          </>
+        )}
+
+        <span role="separator" aria-orientation="vertical" className="w-px h-4 bg-border-subtle mx-0.5" />
+
+        <div role="group" aria-label={v.fmtLink} className="inline-flex items-center gap-0.5">
+          <button
+            type="button"
+            data-testid="toolbar-link-btn"
+            aria-label={v.fmtLink}
+            title={v.fmtLink}
+            aria-pressed={Boolean(formats.linkHref) || subPanel === 'link'}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => {
+              setSubPanel((p) => (p === 'link' ? null : 'link'));
+              requestAnimationFrame(() => linkInputRef.current?.focus({ preventScroll: true }));
+            }}
+          >
+            <IconLink />
+          </button>
+          <button
+            type="button"
+            data-testid="toolbar-clear-btn"
+            aria-label={rf.clearFormat}
+            title={rf.clearFormat}
+            onPointerDown={keepFocusOnPointerDown}
+            onClick={() => {
+              onCommand({ type: 'clear-format' });
+              setSubPanel(null);
+            }}
+          >
+            <IconEraser />
+          </button>
+        </div>
+      </div>
+
+      {subPanel === 'color' && (
+        <div
+          data-testid="toolbar-color-panel"
+          className="p-3 rounded-xl bg-surface-sheet border-2 border-border-ink shadow-[3px_3px_0_0_var(--border-ink)] w-72"
+        >
+          <ColorHighlightPalette
+            locale={locale}
+            activeFg={formats.fgColor}
+            activeBg={formats.bgColor}
+            activeHighlight={formats.highlight}
+            testIdPrefix="toolbar"
+            preventFocusLoss
+            onCommand={(cmd) => onCommand(cmd)}
+          />
+        </div>
+      )}
+
+      {subPanel === 'size' && (
+        <div
+          data-testid="toolbar-fontsize-panel"
+          className="p-2.5 rounded-xl bg-surface-sheet border-2 border-border-ink shadow-[3px_3px_0_0_var(--border-ink)] space-y-2 text-xs"
+        >
+          <div className="flex flex-wrap items-center gap-1">
+            {sizeOptions.map((opt) => {
+              const isSelected = activeSize === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-testid={`toolbar-size-${opt.id}`}
+                  aria-pressed={isSelected}
+                  onPointerDown={keepFocusOnPointerDown}
+                  onClick={() => {
+                    onCommand({
+                      type: 'font-size',
+                      value: opt.id === 'base' ? null : opt.id,
+                    });
+                    if (supportsFontSize && onChangeBlockSize) {
+                      onChangeBlockSize(opt.id);
+                    }
+                    setSubPanel(null);
+                  }}
+                  className={`min-h-7 px-2.5 py-1 rounded-lg border cursor-pointer font-semibold transition-colors ${
+                    isSelected
+                      ? 'bg-action-subtle text-link-ink border-action-bg'
+                      : 'bg-surface-raised text-ink-secondary border-border-subtle hover:text-ink-primary'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {subPanel === 'kbd' && (
+        <KbdComboComposer
+          locale={locale}
+          onInsert={(keys) => {
+            onCommand({ type: 'kbd-combo', keys });
+            setSubPanel(null);
+            onRequestDismiss?.();
+          }}
+          onCancel={() => setSubPanel(null)}
+        />
+      )}
+
+      {subPanel === 'link' && (
+        <div
+          data-testid="toolbar-link-panel"
+          className="p-2.5 rounded-xl bg-surface-sheet border-2 border-border-ink shadow-[3px_3px_0_0_var(--border-ink)] flex items-center gap-1.5 text-xs w-72"
+        >
+          <input
+            ref={linkInputRef}
+            type="url"
+            value={linkDraft}
+            placeholder={rf.linkPlaceholder}
+            onCompositionEnd={(e) => {
+              lastLinkCompEndRef.current = e.timeStamp;
+            }}
+            onChange={(e) => setLinkDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (isImeComposing(e, lastLinkCompEndRef.current)) return;
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                onCommand({ type: 'link', href: linkDraft });
+                setSubPanel(null);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setSubPanel(null);
+              }
+            }}
+            className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-surface-raised border border-border-subtle font-mono text-xs text-ink-primary focus:outline-none focus:border-action-bg"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              onCommand({ type: 'link', href: linkDraft });
+              setSubPanel(null);
+            }}
+            className="min-h-7 px-2 py-1 rounded-lg font-semibold ink-btn-primary cursor-pointer shrink-0"
+          >
+            {rf.linkApplyBtn}
+          </button>
+          {formats.linkHref && (
+            <button
+              type="button"
+              onClick={() => {
+                onCommand({ type: 'unlink' });
+                setSubPanel(null);
+              }}
+              className="min-h-7 px-2 py-1 rounded-lg text-accent-danger border border-border-subtle hover:bg-surface-raised cursor-pointer shrink-0"
+            >
+              {rf.linkRemoveBtn}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

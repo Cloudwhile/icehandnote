@@ -21,6 +21,7 @@ import type {
 } from '../../lib/types';
 import { NotebookEmptyState } from '../notebook/NotebookEmptyState';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { InkSelect } from '../ui/InkSelect';
 import { PasswordInput } from '../ui/PasswordInput';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
@@ -330,19 +331,22 @@ export function StudioUsersPanel({
                         )}
                       </td>
                       <td className="py-3.5 px-4">
-                        <select
-                          aria-label={s.changeRoleAria(u.display_name)}
+                        <InkSelect
+                          ariaLabel={s.changeRoleAria(u.display_name)}
                           value={u.role}
                           disabled={isSelf}
-                          onChange={(e) =>
-                            void handleRoleChange(u.id, e.target.value as UserRole)
+                          onChange={(nextRole) =>
+                            void handleRoleChange(u.id, nextRole as UserRole)
                           }
-                          className="ink-select w-auto min-w-28 min-h-8 px-2.5 py-1 rounded-lg bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono disabled:opacity-60"
-                        >
-                          <option value="reader">{s.roleOptReader}</option>
-                          <option value="author">{s.roleOptAuthor}</option>
-                          <option value="admin">{s.roleOptAdmin}</option>
-                        </select>
+                          options={[
+                            { value: 'reader', label: s.roleOptReader },
+                            { value: 'author', label: s.roleOptAuthor },
+                            { value: 'admin', label: s.roleOptAdmin },
+                          ]}
+                          wrapperClassName="w-auto min-w-28"
+                          minWidthClass="min-w-[8.5rem]"
+                          triggerClassName="w-auto min-w-28 min-h-8 px-2.5 py-1 rounded-lg bg-surface-raised text-ink-primary border-border-subtle text-xs font-mono"
+                        />
                       </td>
                       <td className="py-3.5 px-4 text-start">
                         {isSelf ? (
@@ -462,16 +466,17 @@ export function StudioUsersPanel({
               <label htmlFor="admin-new-role" className="ink-field-label">
                 {extCopy.users.roleLabel}
               </label>
-              <select
+              <InkSelect
                 id="admin-new-role"
                 value={newUserRole}
-                onChange={(e) => setNewUserRole(e.target.value as UserRole)}
-                className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
-              >
-                <option value="reader">{s.roleOptReader}</option>
-                <option value="author">{s.roleOptAuthor}</option>
-                <option value="admin">{s.roleOptAdmin}</option>
-              </select>
+                onChange={(nextRole) => setNewUserRole(nextRole as UserRole)}
+                options={[
+                  { value: 'reader', label: s.roleOptReader },
+                  { value: 'author', label: s.roleOptAuthor },
+                  { value: 'admin', label: s.roleOptAdmin },
+                ]}
+                triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-sm"
+              />
             </div>
           </div>
 

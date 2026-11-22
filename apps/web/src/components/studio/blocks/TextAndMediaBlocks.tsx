@@ -10,13 +10,17 @@
 
 import {
   type DragEvent as ReactDragEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { api } from '../../../lib/api';
 import { EXT_COPY, UI_COPY } from '../../../lib/i18n';
+import {
+  blockAlignClass,
+  blockSizeClass,
+  editorDomToInlineMarkdown,
+} from '../../../lib/richInline';
 import type { AlertKind, LocaleCode } from '../../../lib/types';
 import { createVisualId, type VisualBlock } from '../../../lib/visualBlocks';
 import { FileUploadButton } from '../../ui/FileUploadButton';
@@ -25,13 +29,13 @@ import { PopupMenu } from '../../ui/PopupMenu';
 import { SegmentedControl } from '../../ui/Tabs';
 import { useToast } from '../../ui/ToastProvider';
 import {
-  handleInlineFormatShortcut,
   InlineAuthorMarginSticky,
-  InlineFormatToolbar,
-  isImeComposing,
   useAutoResizeTextarea,
-  wrapTextareaSelection,
 } from './BlockFloatingControls';
+import {
+  RichEditable,
+  type RichSelectionReport,
+} from './RichEditable';
 import {
   createBlockFromSlashCommand,
   filterSlashCommands,
@@ -51,6 +55,8 @@ export interface FlowBlockHandlers {
   ) => void;
   onBackspaceAtStart: (remainingText: string) => void;
   onMoveFocusVertical: (direction: -1 | 1) => void;
+  onSelectionReport?: (report: RichSelectionReport | null) => void;
+  onOpenKbdComposer?: (blockId: string, el: HTMLElement) => void;
   marginNoteOpen: boolean;
   onOpenMarginNote: () => void;
   onCloseMarginNote: () => void;
@@ -189,23 +195,80 @@ interface SlashMatch {
   replaceWholeBlock: boolean;
 }
 
-function detectSlashMatch(value: string, caret: number): SlashMatch | null {
-  const lineStart = value.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
-  const beforeCaretOnLine = value.slice(lineStart, caret);
+function detectSlashMatch(
+  textBeforeCaret: string,
+  plainFullText: string,
+  hasRichAtomicNodes: boolean,
+): SlashMatch | null {
+  const caret = textBeforeCaret.length;
+  const lineStart = textBeforeCaret.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
+  const beforeCaretOnLine = textBeforeCaret.slice(lineStart, caret);
   const m = beforeCaretOnLine.match(/^(?:(.*\s))?\/([^\s/]*)$/);
   if (!m) return null;
   const leading = m[1] ?? '';
   const query = m[2] ?? '';
   const tokenStart = lineStart + leading.length;
   const replaceWholeBlock =
-    value.slice(0, tokenStart).trim().length === 0 &&
-    value.slice(caret).trim().length === 0;
+    !hasRichAtomicNodes && plainFullText.trim() === `/${query}`;
   return {
     query,
     tokenStart,
     tokenEnd: caret,
     replaceWholeBlock,
   };
+}
+
+function stripSlashTokenAtRange(
+  root: HTMLElement,
+  tokenStart: number,
+  tokenEnd: number,
+): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let acc = 0;
+  let startNode: Text | null = null;
+  let startOff = 0;
+  let endNode: Text | null = null;
+  let endOff = 0;
+
+  let cur = walker.nextNode();
+  while (cur) {
+    const txt = cur as Text;
+    if (!txt.parentElement?.closest('[contenteditable="false"]')) {
+      const raw = txt.textContent ?? '';
+      // Map linear non-ZWS character count back to raw DOM offset cleanly
+      const visibleIndices: number[] = [];
+      for (let i = 0; i < raw.length; i += 1) {
+        if (raw[i] !== '\u200B') visibleIndices.push(i);
+      }
+      const len = visibleIndices.length;
+      if (!startNode && acc + len >= tokenStart) {
+        startNode = txt;
+        const rel = tokenStart - acc;
+        startOff = rel >= len ? raw.length : visibleIndices[Math.max(0, rel)];
+      }
+      if (startNode && acc + len >= tokenEnd) {
+        endNode = txt;
+        const rel = tokenEnd - acc;
+        endOff = rel >= len ? raw.length : visibleIndices[Math.max(0, rel)];
+        break;
+      }
+      acc += len;
+    }
+    cur = walker.nextNode();
+  }
+
+  if (startNode && endNode) {
+    const delRange = document.createRange();
+    delRange.setStart(startNode, startOff);
+    delRange.setEnd(endNode, endOff);
+    delRange.deleteContents();
+    delRange.collapse(true);
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(delRange);
+    }
+  }
 }
 
 export function ParagraphBlockBody({
@@ -224,24 +287,31 @@ export function ParagraphBlockBody({
   flow: FlowBlockHandlers;
 }) {
   const extFlow = EXT_COPY[locale].studio.flowEditor;
-  const taRef = useRef<HTMLTextAreaElement | null>(null);
-  const isComposingRef = useRef(false);
-  const lastCompEndRef = useRef<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
 
   const [focused, setFocused] = useState(false);
-  const [hasSelection, setHasSelection] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissedValue, setSlashDismissedValue] = useState<string | null>(null);
-  const [caretSnapshot, setCaretSnapshot] = useState<number>(0);
-
-  useAutoResizeTextarea(taRef, block.text);
+  const [caretSnap, setCaretSnap] = useState<{
+    textBeforeCaret: string;
+    plainFullText: string;
+    el: HTMLElement | null;
+  }>({
+    textBeforeCaret: '',
+    plainFullText: '',
+    el: null,
+  });
 
   const slashMatch = useMemo(() => {
-    if (!focused || isComposingRef.current || slashDismissedValue === block.text) {
+    if (!focused || slashDismissedValue === block.text) {
       return null;
     }
-    return detectSlashMatch(block.text, caretSnapshot);
-  }, [focused, slashDismissedValue, block.text, caretSnapshot]);
+    return detectSlashMatch(
+      caretSnap.textBeforeCaret,
+      caretSnap.plainFullText,
+      Boolean(caretSnap.el?.querySelector('kbd,code,img')),
+    );
+  }, [focused, slashDismissedValue, block.text, caretSnap]);
 
   const slashCommands = useMemo(
     () => (slashMatch ? filterSlashCommands(slashMatch.query, locale) : []),
@@ -251,17 +321,32 @@ export function ParagraphBlockBody({
   const clampedSlashIdx =
     slashCommands.length > 0 ? Math.min(slashIndex, slashCommands.length - 1) : 0;
 
-  const syncCaretAndSelection = (el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    setCaretSnapshot(el.selectionStart ?? el.value.length);
-    setHasSelection((el.selectionEnd ?? 0) > (el.selectionStart ?? 0));
-  };
-
   const applySlashCommand = (cmdId: SlashCommandId) => {
     if (!slashMatch) return;
-    const created = createBlockFromSlashCommand(cmdId);
     setSlashIndex(0);
     setSlashDismissedValue(null);
+
+    let strippedMd = block.text;
+    const richEl = caretSnap.el;
+    if (richEl && richEl.isConnected) {
+      stripSlashTokenAtRange(richEl, slashMatch.tokenStart, slashMatch.tokenEnd);
+      strippedMd = editorDomToInlineMarkdown(richEl, true).trimEnd();
+    } else {
+      const esc = slashMatch.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      strippedMd = block.text.replace(new RegExp(`/${esc}$`), '').trimEnd();
+    }
+
+    if (cmdId === 'kbd_shortcut') {
+      if (richEl && richEl.isConnected) {
+        richEl.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        flow.onOpenKbdComposer?.(block.id, richEl);
+      } else {
+        onUpdate({ ...block, text: strippedMd });
+      }
+      return;
+    }
+
+    const created = createBlockFromSlashCommand(cmdId);
     if (slashMatch.replaceWholeBlock) {
       flow.onReplaceBlock(
         { ...created, id: block.id },
@@ -269,126 +354,7 @@ export function ParagraphBlockBody({
       );
       return;
     }
-    const stripped = (
-      block.text.slice(0, slashMatch.tokenStart) +
-      block.text.slice(slashMatch.tokenEnd)
-    ).trimEnd();
-    flow.onCommitAndInsertAfter({ ...block, text: stripped }, created, 'start');
-  };
-
-  const applyPrefixOrUpdate = (nextValue: string, caretPos: number, composing: boolean) => {
-    setCaretSnapshot(caretPos);
-    if (slashDismissedValue !== null && slashDismissedValue !== nextValue) {
-      setSlashDismissedValue(null);
-    }
-    setSlashIndex(0);
-
-    if (!composing) {
-      const converted = detectMarkdownPrefixBlock(block.id, nextValue, caretPos);
-      if (converted) {
-        flow.onReplaceBlock(converted.block, {
-          caret: converted.nextCaret,
-          itemIndex: 0,
-        });
-        return;
-      }
-    }
-
-    onUpdate({ ...block, text: nextValue });
-  };
-
-  const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (isImeComposing(e, lastCompEndRef.current)) {
-      return;
-    }
-
-    if (slashOpen) {
-      if (e.key === 'ArrowDown' && slashCommands.length > 0) {
-        e.preventDefault();
-        setSlashIndex((i) => (i + 1) % slashCommands.length);
-        return;
-      }
-      if (e.key === 'ArrowUp' && slashCommands.length > 0) {
-        e.preventDefault();
-        setSlashIndex(
-          (i) => (i - 1 + slashCommands.length) % slashCommands.length,
-        );
-        return;
-      }
-      if ((e.key === 'Enter' || e.key === 'Tab') && slashCommands.length > 0) {
-        e.preventDefault();
-        applySlashCommand(slashCommands[clampedSlashIdx].id);
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setSlashDismissedValue(block.text);
-        return;
-      }
-    }
-
-    if (
-      handleInlineFormatShortcut(e, block.text, (nextVal) =>
-        onUpdate({ ...block, text: nextVal }),
-      )
-    ) {
-      return;
-    }
-
-    const el = e.currentTarget;
-    const start = el.selectionStart ?? 0;
-    const end = el.selectionEnd ?? 0;
-
-    if (e.key === 'Enter' && !e.shiftKey) {
-      const fenced = block.text.match(/^```([a-zA-Z0-9_-]*)$/);
-      if (fenced) {
-        e.preventDefault();
-        flow.onReplaceBlock(
-          {
-            id: block.id,
-            type: 'code_card',
-            language: fenced[1] || 'text',
-            filename: '',
-            code: '',
-            marginNote: block.marginNote,
-            style: 'washi',
-          },
-          { caret: 0 },
-        );
-        return;
-      }
-
-      e.preventDefault();
-      const head = block.text.slice(0, start);
-      const tail = block.text.slice(end);
-      flow.onCommitAndInsertAfter(
-        { ...block, text: head },
-        { id: createVisualId(), type: 'paragraph', text: tail, marginNote: '' },
-        0,
-      );
-      return;
-    }
-
-    if (e.key === 'Backspace' && start === 0 && end === 0) {
-      e.preventDefault();
-      flow.onBackspaceAtStart(block.text);
-      return;
-    }
-
-    if (e.key === 'ArrowUp' && start === 0 && end === 0) {
-      e.preventDefault();
-      flow.onMoveFocusVertical(-1);
-      return;
-    }
-
-    if (
-      e.key === 'ArrowDown' &&
-      start === block.text.length &&
-      end === block.text.length
-    ) {
-      e.preventDefault();
-      flow.onMoveFocusVertical(1);
-    }
+    flow.onCommitAndInsertAfter({ ...block, text: strippedMd }, created, 'start');
   };
 
   const placeholder =
@@ -408,104 +374,122 @@ export function ParagraphBlockBody({
           : ''
       }`}
     >
-      <div className="relative min-w-0">
-        {hasSelection && focused && !slashOpen && (
-          <div className="mb-1.5 sm:mb-0 sm:absolute sm:-top-10 sm:start-0 sm:z-20">
-            <InlineFormatToolbar
-              locale={locale}
-              onBold={() =>
-                wrapTextareaSelection(
-                  taRef.current,
-                  block.text,
-                  '**',
-                  '**',
-                  'text',
-                  (next) => onUpdate({ ...block, text: next }),
-                )
-              }
-              onItalic={() =>
-                wrapTextareaSelection(
-                  taRef.current,
-                  block.text,
-                  '*',
-                  '*',
-                  'text',
-                  (next) => onUpdate({ ...block, text: next }),
-                )
-              }
-              onCode={() =>
-                wrapTextareaSelection(
-                  taRef.current,
-                  block.text,
-                  '`',
-                  '`',
-                  'code',
-                  (next) => onUpdate({ ...block, text: next }),
-                )
-              }
-              onLink={() =>
-                wrapTextareaSelection(
-                  taRef.current,
-                  block.text,
-                  '[',
-                  '](https://)',
-                  'label',
-                  (next) => onUpdate({ ...block, text: next }),
-                )
-              }
-            />
-          </div>
-        )}
-
-        <textarea
-          ref={taRef}
-          data-flow-input="primary"
-          rows={1}
+      <div ref={wrapRef} className="relative min-w-0">
+        <RichEditable
+          blockId={block.id}
           value={block.text}
-          onFocus={(e) => {
-            setFocused(true);
-            syncCaretAndSelection(e.currentTarget);
-          }}
-          onBlur={() => {
-            setFocused(false);
-            setHasSelection(false);
-          }}
-          onCompositionStart={() => {
-            isComposingRef.current = true;
-          }}
-          onCompositionEnd={(e) => {
-            isComposingRef.current = false;
-            lastCompEndRef.current = e.timeStamp;
-            const target = e.currentTarget;
-            applyPrefixOrUpdate(
-              target.value,
-              target.selectionStart ?? target.value.length,
-              false,
-            );
-          }}
-          onChange={(e) => {
-            const target = e.currentTarget;
-            applyPrefixOrUpdate(
-              target.value,
-              target.selectionStart ?? target.value.length,
-              isComposingRef.current ||
-                Boolean(
-                  (e.nativeEvent as { isComposing?: boolean }).isComposing,
-                ),
-            );
-          }}
-          onSelect={(e) => syncCaretAndSelection(e.currentTarget)}
-          onKeyUp={(e) => syncCaretAndSelection(e.currentTarget)}
-          onMouseUp={(e) => syncCaretAndSelection(e.currentTarget)}
-          onKeyDown={handleKeyDown}
+          multiline={true}
+          flowInputRole="primary"
           placeholder={placeholder}
-          className="flow-editor-textarea text-base text-ink-primary leading-[1.72] placeholder:text-ink-muted/65"
+          onChange={(nextVal) => {
+            if (slashDismissedValue !== null && slashDismissedValue !== nextVal) {
+              setSlashDismissedValue(null);
+            }
+            setSlashIndex(0);
+            onUpdate({ ...block, text: nextVal });
+          }}
+          onPrefixTransform={(plain, caretPos) => {
+            const converted = detectMarkdownPrefixBlock(block.id, plain, caretPos);
+            if (!converted) return false;
+            flow.onReplaceBlock(converted.block, {
+              caret: converted.nextCaret,
+              itemIndex: 0,
+            });
+            return true;
+          }}
+          onSelectionReport={flow.onSelectionReport}
+          onCaretSnapshot={(ctx) => {
+            setCaretSnap({
+              textBeforeCaret: ctx.textBeforeCaret,
+              plainFullText: (ctx.el.textContent ?? '').replace(/\u200B/g, ''),
+              el: ctx.el,
+            });
+          }}
+          onFocusField={() => setFocused(true)}
+          onBlurField={() => setFocused(false)}
+          onEnterKey={(e, { beforeMd, afterMd }) => {
+            if (slashOpen && slashCommands.length > 0) {
+              e.preventDefault();
+              applySlashCommand(slashCommands[clampedSlashIdx].id);
+              return true;
+            }
+            const fenced = block.text.trim().match(/^```([a-zA-Z0-9_-]*)$/);
+            if (fenced) {
+              e.preventDefault();
+              flow.onReplaceBlock(
+                {
+                  id: block.id,
+                  type: 'code_card',
+                  language: fenced[1] || 'text',
+                  filename: '',
+                  code: '',
+                  marginNote: block.marginNote,
+                  style: 'washi',
+                },
+                { caret: 0 },
+              );
+              return true;
+            }
+            e.preventDefault();
+            flow.onCommitAndInsertAfter(
+              { ...block, text: beforeMd },
+              {
+                id: createVisualId(),
+                type: 'paragraph',
+                text: afterMd,
+                marginNote: '',
+                ...(block.align ? { align: block.align } : {}),
+                ...(block.size ? { size: block.size } : {}),
+              },
+              0,
+            );
+            return true;
+          }}
+          onBackspaceAtStart={(remainingMd) => {
+            flow.onBackspaceAtStart(remainingMd);
+            return true;
+          }}
+          onMoveVertical={
+            slashOpen
+              ? undefined
+              : (dir) => {
+                  flow.onMoveFocusVertical(dir);
+                  return true;
+                }
+          }
+          onArrowNavKey={(e) => {
+            if (!slashOpen) return false;
+            if (e.key === 'ArrowDown' && slashCommands.length > 0) {
+              e.preventDefault();
+              setSlashIndex((i) => (i + 1) % slashCommands.length);
+              return true;
+            }
+            if (e.key === 'ArrowUp' && slashCommands.length > 0) {
+              e.preventDefault();
+              setSlashIndex(
+                (i) => (i - 1 + slashCommands.length) % slashCommands.length,
+              );
+              return true;
+            }
+            if (e.key === 'Tab' && slashCommands.length > 0) {
+              e.preventDefault();
+              applySlashCommand(slashCommands[clampedSlashIdx].id);
+              return true;
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              setSlashDismissedValue(block.text);
+              return true;
+            }
+            return false;
+          }}
+          className={`text-base text-ink-primary leading-[1.72] ${blockAlignClass(block.align)} ${blockSizeClass(block.size)}`.trim()}
         />
 
         <SlashCommandMenu
           locale={locale}
           open={slashOpen}
-          anchorEl={taRef.current}
+          anchorEl={wrapRef.current}
           commands={slashCommands}
           activeIndex={clampedSlashIdx}
           onSelect={applySlashCommand}
@@ -545,7 +529,6 @@ export function HeadingBlockBody({
 }) {
   const copy = UI_COPY[locale];
   const v = copy.studio.visual;
-  const lastCompEndRef = useRef<number | null>(null);
 
   const markerVar = block.isTask && block.defaultChecked
     ? 'var(--accent-success-ink)'
@@ -563,7 +546,7 @@ export function HeadingBlockBody({
         : 'text-base sm:text-lg';
 
   return (
-    <div className="pt-2 pb-1 space-y-1">
+    <div className={`pt-2 pb-1 space-y-1 ${blockAlignClass(block.align)}`.trim()}>
       <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5">
         <div className="flex items-center gap-2 flex-1 min-w-48 sm:min-w-0">
           {block.isTask && (
@@ -589,80 +572,61 @@ export function HeadingBlockBody({
             §{sectionNumber}
           </span>
 
-          <input
-            type="text"
-            size={1}
-            data-flow-input="primary"
+          <RichEditable
+            blockId={block.id}
             value={block.text}
-            onCompositionEnd={(e) => {
-              lastCompEndRef.current = e.timeStamp;
-            }}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!block.isTask && val.startsWith('[ ] ')) {
+            multiline={false}
+            flowInputRole="primary"
+            placeholder={v.headingPlaceholder}
+            onChange={(val) => onUpdate({ ...block, text: val })}
+            onPrefixTransform={(plain) => {
+              if (!block.isTask && plain.startsWith('[ ] ')) {
                 onUpdate({
                   ...block,
                   isTask: true,
                   defaultChecked: false,
-                  text: val.slice(4),
+                  text: plain.slice(4),
                 });
-                return;
+                return true;
               }
-              onUpdate({ ...block, text: val });
+              return false;
             }}
-            onKeyDown={(e) => {
-              if (isImeComposing(e, lastCompEndRef.current)) return;
-              const start = e.currentTarget.selectionStart ?? 0;
-              const end = e.currentTarget.selectionEnd ?? 0;
-
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                const head = block.text.slice(0, start);
-                const tail = block.text.slice(end);
-                flow.onCommitAndInsertAfter(
-                  { ...block, text: head },
+            onSelectionReport={flow.onSelectionReport}
+            onEnterKey={(e, { beforeMd, afterMd }) => {
+              e.preventDefault();
+              flow.onCommitAndInsertAfter(
+                { ...block, text: beforeMd },
+                {
+                  id: createVisualId(),
+                  type: 'paragraph',
+                  text: afterMd,
+                  marginNote: '',
+                },
+                0,
+              );
+              return true;
+            }}
+            onBackspaceAtStart={(remainingMd) => {
+              if (block.isTask) {
+                onUpdate({ ...block, isTask: false, defaultChecked: false });
+              } else {
+                flow.onReplaceBlock(
                   {
-                    id: createVisualId(),
+                    id: block.id,
                     type: 'paragraph',
-                    text: tail,
+                    text: remainingMd,
                     marginNote: '',
                   },
-                  0,
+                  { caret: 0 },
                 );
-                return;
               }
-
-              if (e.key === 'Backspace' && start === 0 && end === 0) {
-                e.preventDefault();
-                if (block.isTask) {
-                  onUpdate({ ...block, isTask: false, defaultChecked: false });
-                } else {
-                  flow.onReplaceBlock(
-                    {
-                      id: block.id,
-                      type: 'paragraph',
-                      text: block.text,
-                      marginNote: '',
-                    },
-                    { caret: 0 },
-                  );
-                }
-                return;
-              }
-
-              if (e.key === 'ArrowUp' && start === 0) {
-                e.preventDefault();
-                flow.onMoveFocusVertical(-1);
-                return;
-              }
-              if (e.key === 'ArrowDown' && start === block.text.length) {
-                e.preventDefault();
-                flow.onMoveFocusVertical(1);
-              }
+              return true;
             }}
-            placeholder={v.headingPlaceholder}
-            style={{ fontFamily: 'var(--font-hand)' }}
-            className={`w-full flex-1 min-w-0 bg-transparent border-0 p-0 font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-snug ${sizeClass}`}
+            onMoveVertical={(dir) => {
+              flow.onMoveFocusVertical(dir);
+              return true;
+            }}
+            className={`w-full flex-1 min-w-0 font-hand font-semibold text-ink-primary leading-snug ${sizeClass} ${blockAlignClass(block.align)}`.trim()}
           />
         </div>
 
@@ -701,7 +665,13 @@ export function HeadingBlockBody({
       {/* Matching hand-drawn marker underline (`SketchHeading` style) */}
       <svg
         aria-hidden="true"
-        className="h-2.5 w-52 max-w-full block pointer-events-none"
+        className={`h-2.5 w-52 max-w-full block pointer-events-none ${
+          block.align === 'center'
+            ? 'mx-auto'
+            : block.align === 'right'
+              ? 'ms-auto'
+              : ''
+        }`}
         viewBox="0 0 220 11"
         preserveAspectRatio="none"
         fill="none"
@@ -952,71 +922,50 @@ export function QuoteBlockBody({
   flow: FlowBlockHandlers;
 }) {
   const v = UI_COPY[locale].studio.visual;
-  const taRef = useRef<HTMLTextAreaElement | null>(null);
-  const lastCompEndRef = useRef<number | null>(null);
-  useAutoResizeTextarea(taRef, block.text);
 
   return (
-    <blockquote className="m-0 border-s-4 border-action-bg bg-surface-raised/55 rounded-e-xl ps-4 pe-3 py-2.5">
-      <textarea
-        ref={taRef}
-        data-flow-input="primary"
-        rows={1}
+    <blockquote
+      className={`m-0 border-s-4 border-action-bg bg-surface-raised/55 rounded-e-xl ps-4 pe-3 py-2.5 ${blockAlignClass(block.align)} ${blockSizeClass(block.size)}`.trim()}
+    >
+      <RichEditable
+        blockId={block.id}
         value={block.text}
-        onCompositionEnd={(e) => {
-          lastCompEndRef.current = e.timeStamp;
-        }}
-        onChange={(e) => onUpdate({ ...block, text: e.target.value })}
-        onKeyDown={(e) => {
-          if (isImeComposing(e, lastCompEndRef.current)) return;
-          const start = e.currentTarget.selectionStart ?? 0;
-          const end = e.currentTarget.selectionEnd ?? 0;
-
-          if (
-            e.key === 'Enter' &&
-            !e.shiftKey &&
-            start === block.text.length &&
-            block.text.endsWith('\n')
-          ) {
-            e.preventDefault();
-            flow.onCommitAndInsertAfter(
-              { ...block, text: block.text.replace(/\n+$/, '') },
-              {
-                id: createVisualId(),
-                type: 'paragraph',
-                text: '',
-                marginNote: '',
-              },
-              0,
-            );
-            return;
-          }
-
-          if (e.key === 'Backspace' && start === 0 && end === 0) {
-            e.preventDefault();
-            flow.onReplaceBlock(
-              {
-                id: block.id,
-                type: 'paragraph',
-                text: block.text,
-                marginNote: '',
-              },
-              { caret: 0 },
-            );
-            return;
-          }
-
-          if (e.key === 'ArrowUp' && start === 0) {
-            e.preventDefault();
-            flow.onMoveFocusVertical(-1);
-          } else if (e.key === 'ArrowDown' && start === block.text.length) {
-            e.preventDefault();
-            flow.onMoveFocusVertical(1);
-          }
-        }}
+        multiline={true}
+        flowInputRole="primary"
         placeholder={v.quotePlaceholder}
-        style={{ fontFamily: 'var(--font-hand)' }}
-        className="flow-editor-textarea text-base sm:text-lg leading-relaxed text-ink-primary placeholder:text-ink-muted/60"
+        onChange={(val) => onUpdate({ ...block, text: val })}
+        onSelectionReport={flow.onSelectionReport}
+        onEnterKey={(e, { beforeMd, afterMd }) => {
+          e.preventDefault();
+          flow.onCommitAndInsertAfter(
+            { ...block, text: beforeMd.replace(/\n+$/, '') },
+            {
+              id: createVisualId(),
+              type: 'paragraph',
+              text: afterMd,
+              marginNote: '',
+            },
+            0,
+          );
+          return true;
+        }}
+        onBackspaceAtStart={(remainingMd) => {
+          flow.onReplaceBlock(
+            {
+              id: block.id,
+              type: 'paragraph',
+              text: remainingMd,
+              marginNote: '',
+            },
+            { caret: 0 },
+          );
+          return true;
+        }}
+        onMoveVertical={(dir) => {
+          flow.onMoveFocusVertical(dir);
+          return true;
+        }}
+        className={`font-hand text-base sm:text-lg leading-relaxed text-ink-primary ${blockAlignClass(block.align)} ${blockSizeClass(block.size)}`.trim()}
       />
     </blockquote>
   );

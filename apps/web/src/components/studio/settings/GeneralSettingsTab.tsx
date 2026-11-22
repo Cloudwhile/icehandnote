@@ -6,7 +6,8 @@
 import { type FormEvent, useState } from 'react';
 import { api } from '../../../lib/api';
 import { EXT_COPY, LOCALES, UI_COPY } from '../../../lib/i18n';
-import { ALL_LICENSE_OPTIONS, normalizeLicenseId } from '../../../lib/licenses';
+import { normalizeLicenseId } from '../../../lib/licenses';
+import { CcLicenseSelector } from '../../notebook/CcLicenseCard';
 import type {
   DefaultThemeSetting,
   LicenseId,
@@ -276,31 +277,23 @@ export function GeneralSettingsTab({
             />
           </div>
 
-          <div>
-            <label htmlFor="set-default-license" className="ink-field-label">
+          <div className="sm:col-span-2">
+            <span className="ink-field-label block mb-2">
               {st.defaultLicenseLabel}
-            </label>
-            <select
-              id="set-default-license"
-              name="default_license"
+            </span>
+            <CcLicenseSelector
+              locale={locale}
               value={
                 normalizeLicenseId(draft.default_license) || 'cc-by-nc-sa-4.0'
               }
-              onChange={(e) =>
+              onChange={(id) =>
                 onChangeDraft((prev) => ({
                   ...prev,
-                  default_license: (normalizeLicenseId(e.target.value) ||
+                  default_license: (normalizeLicenseId(id) ||
                     'cc-by-nc-sa-4.0') as LicenseId,
                 }))
               }
-              className="ink-select w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm"
-            >
-              {ALL_LICENSE_OPTIONS.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {copy.licenseNames[opt.id]}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div className="sm:col-span-2">
@@ -453,6 +446,37 @@ export function GeneralSettingsTab({
               />
             </div>
           )}
+        </div>
+
+        <div className="px-5 py-3.5 border-t border-border-subtle/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0">
+            <label
+              htmlFor="set-stale-article-days"
+              className="block text-sm font-semibold text-ink-primary"
+            >
+              {st.staleArticleDaysLabel}
+            </label>
+            <p className="text-xs text-ink-muted mt-0.5 m-0">
+              {st.staleArticleDaysHint}
+            </p>
+          </div>
+          <input
+            id="set-stale-article-days"
+            name="stale_article_days"
+            type="number"
+            min={0}
+            max={3650}
+            value={draft.stale_article_days}
+            onChange={(e) => {
+              const raw = Number.parseInt(e.target.value || '0', 10);
+              const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(3650, raw)) : 180;
+              onChangeDraft((prev) => ({
+                ...prev,
+                stale_article_days: clamped,
+              }));
+            }}
+            className="w-28 shrink-0 px-3 py-1.5 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm font-mono tabular-nums ink-input-inset"
+          />
         </div>
       </SettingsSectionCard>
 
