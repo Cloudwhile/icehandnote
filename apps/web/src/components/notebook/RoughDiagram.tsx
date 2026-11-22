@@ -21,7 +21,7 @@ function readToken(styles: CSSStyleDeclaration, name: string, fallback: string):
   return styles.getPropertyValue(name).trim() || fallback;
 }
 
-function computeEdgeEndpoints(src: SketchNode, dst: SketchNode) {
+export function computeEdgeEndpoints(src: SketchNode, dst: SketchNode) {
   const sw = src.width ?? 150;
   const sh = src.height ?? 64;
   const dw = dst.width ?? 150;
@@ -156,7 +156,7 @@ export function RoughDiagram({ spec, caption, theme }: RoughDiagramProps) {
       <svg
         ref={svgRef}
         viewBox={`0 0 ${maxX} ${maxY}`}
-        className="w-full h-auto block min-w-[440px] sm:min-w-0"
+        className={`w-full h-auto block ${maxX > 720 ? 'min-w-[420px] sm:min-w-0' : 'min-w-0'}`}
         role="img"
         aria-label={caption ?? 'Hand-drawn architecture diagram'}
       >
@@ -169,19 +169,36 @@ export function RoughDiagram({ spec, caption, theme }: RoughDiagramProps) {
           const { x1, y1, x2, y2 } = computeEdgeEndpoints(src, dst);
           const mx = (x1 + x2) / 2;
           const my = (y1 + y2) / 2 - 10;
+          const units = Array.from(edge.label).reduce(
+            (sum, ch) => sum + (ch.charCodeAt(0) > 0x2e7f ? 1.85 : 1.05),
+            0,
+          );
+          const pillW = Math.max(28, Math.ceil(units * 7 + 12));
+          const pillH = 18;
           return (
-            <text
-              key={idx}
-              x={mx}
-              y={my}
-              textAnchor="middle"
-              fill="var(--ink-secondary)"
-              fontSize="12"
-              fontFamily="var(--font-mono)"
-              fontWeight="600"
-            >
-              {edge.label}
-            </text>
+            <g key={idx}>
+              <rect
+                x={mx - pillW / 2}
+                y={my - 13}
+                width={pillW}
+                height={pillH}
+                rx={5}
+                fill="var(--surface-sheet)"
+                stroke="var(--border-subtle)"
+                strokeWidth="1"
+              />
+              <text
+                x={mx}
+                y={my}
+                textAnchor="middle"
+                fill="var(--ink-secondary)"
+                fontSize="12"
+                fontFamily="var(--font-mono)"
+                fontWeight="600"
+              >
+                {edge.label}
+              </text>
+            </g>
           );
         })}
 

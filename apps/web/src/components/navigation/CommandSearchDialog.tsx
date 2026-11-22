@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, runDirectionalTransition } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { LocaleCode, SearchHitDto } from '../../lib/types';
@@ -66,7 +66,10 @@ export function CommandSearchDialog({
 
   const jumpToHit = (hit: SearchHitDto) => {
     onClose();
-    navigate(`/${locale}/tracks/${hit.track_slug}/${hit.chapter_slug}/${hit.step_slug}`);
+    runDirectionalTransition(
+      () => navigate(`/${locale}/series/${hit.track_slug}/${hit.step_slug}`),
+      'forward',
+    );
   };
 
   return (

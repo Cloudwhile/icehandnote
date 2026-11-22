@@ -10,7 +10,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { EXT_COPY, type LocalePreference, UI_COPY } from '../../lib/i18n';
 import type { ResolvedTheme } from '../../lib/theme';
 import type { LocaleCode, SiteSettingsDto, UserProfileDto } from '../../lib/types';
-import { IconClose, IconMenu, IconPen } from '../ui/Icons';
+import { IconBook, IconClose, IconMenu, IconPen } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { UserAvatar } from '../ui/UserAvatar';
 import { LocaleSwitcher } from './LocaleSwitcher';
@@ -26,6 +26,7 @@ interface TopNavbarProps {
   theme: ResolvedTheme;
   onToggleTheme: () => void;
   onOpenSearch: () => void;
+  onOpenNotes?: () => void;
   user: UserProfileDto | null;
   siteSettings: SiteSettingsDto;
   settingsReady?: boolean;
@@ -41,6 +42,7 @@ export function TopNavbar({
   theme,
   onToggleTheme,
   onOpenSearch,
+  onOpenNotes,
   user,
   siteSettings,
   settingsReady = true,
@@ -50,6 +52,7 @@ export function TopNavbar({
 }: TopNavbarProps) {
   const copy = UI_COPY[locale];
   const profCopy = EXT_COPY[locale].profile;
+  const notesCopy = EXT_COPY[locale].notes;
 
   const showBlogLink = Boolean(
     settingsReady &&
@@ -65,7 +68,12 @@ export function TopNavbar({
   const isHome =
     location.pathname === `/${locale}` || location.pathname === `/${locale}/`;
   const isStudio = location.pathname.startsWith(`/${locale}/studio`);
-  const canAuthor = Boolean(user && (user.role === 'author' || user.role === 'admin'));
+  const canAuthor = Boolean(
+    user &&
+      (user.role === 'author' ||
+        user.role === 'admin' ||
+        user.has_collaborations),
+  );
 
   useEffect(() => {
     setMobileMenuOpen(false);
@@ -99,7 +107,13 @@ export function TopNavbar({
   }, [mobileMenuOpen]);
 
   return (
-    <header className="w-full sticky top-3 z-30 px-3 sm:px-6">
+    <header
+      className="w-full sticky top-0 z-30 pt-3 px-3 sm:px-6"
+      style={{
+        background:
+          'linear-gradient(to bottom, var(--surface-page) 62%, transparent)',
+      }}
+    >
       <div className="max-w-6xl mx-auto relative">
         <div
           className="rounded-2xl bg-surface-sheet/95 backdrop-blur px-3.5 sm:px-5 py-2 flex items-center justify-between gap-2.5"
@@ -145,14 +159,25 @@ export function TopNavbar({
                 </Link>
               )}
 
+              {siteSettings.enable_margin_notes && onOpenNotes && (
+                <button
+                  type="button"
+                  onClick={onOpenNotes}
+                  className="px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink-primary transition-colors cursor-pointer"
+                >
+                  <IconBook className="w-3.5 h-3.5 shrink-0" />
+                  <span>{notesCopy.myNotesBtn}</span>
+                </button>
+              )}
+
               {showBlogLink && (
                 <a
                   href={siteSettings.blog_origin_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="no-underline text-ink-muted hover:text-ink-primary px-2.5 py-1.5 text-sm transition-colors hidden xl:inline"
+                  className="no-underline text-ink-muted hover:text-ink-primary px-2.5 py-1.5 rounded-lg text-sm transition-colors hidden xl:inline"
                 >
-                  {siteSettings.blog_nav_label} ↗
+                  {siteSettings.blog_nav_label}
                 </a>
               )}
             </nav>
@@ -175,7 +200,7 @@ export function TopNavbar({
               locale={locale}
               theme={theme}
               onToggleTheme={onToggleTheme}
-              sizeClass="w-8 h-8 sm:w-9 sm:h-9"
+              sizeClass="w-9 h-9"
             />
 
             <div className="hidden md:flex items-center">
@@ -206,7 +231,7 @@ export function TopNavbar({
               aria-controls={mobileMenuId}
               aria-label={copy.navMenuAria}
               onClick={() => setMobileMenuOpen((v) => !v)}
-              className="md:hidden w-8 h-8 rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink inline-flex items-center justify-center cursor-pointer"
+              className="md:hidden w-9 h-9 ink-icon-target rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink inline-flex items-center justify-center cursor-pointer"
             >
               {mobileMenuOpen ? (
                 <IconClose className="w-4 h-4 text-ink-primary" />
@@ -252,14 +277,27 @@ export function TopNavbar({
                   <span>{copy.navStudio}</span>
                 </Link>
               )}
+              {siteSettings.enable_margin_notes && onOpenNotes && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onOpenNotes();
+                  }}
+                  className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-ink-secondary hover:text-ink-primary cursor-pointer transition-colors"
+                >
+                  <IconBook className="w-4 h-4 shrink-0" />
+                  <span>{notesCopy.myNotesBtn}</span>
+                </button>
+              )}
               {showBlogLink && (
                 <a
                   href={siteSettings.blog_origin_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="block no-underline px-3 py-2 rounded-lg text-sm text-ink-secondary hover:bg-surface-raised hover:text-ink-primary"
+                  className="block no-underline px-3 py-2 rounded-lg text-sm text-ink-secondary hover:text-ink-primary"
                 >
-                  {siteSettings.blog_nav_label} ↗
+                  {siteSettings.blog_nav_label}
                 </a>
               )}
             </nav>

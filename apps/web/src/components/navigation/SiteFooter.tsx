@@ -58,7 +58,7 @@ export function SiteFooter({
             href="https://github.com/Cloudwhile/icehandnote"
             target="_blank"
             rel="noopener noreferrer"
-            className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-center gap-1 min-h-7 transition-colors"
+            className="font-hand text-sm font-semibold text-ink-secondary hover:text-link-ink no-underline inline-flex items-center gap-1 min-h-7 px-1 rounded transition-colors"
           >
             <span>Cloudwhile</span>
             <span className="font-mono text-xs text-ink-muted">AGPL-3.0</span>
@@ -68,7 +68,7 @@ export function SiteFooter({
         <nav aria-label={copy.navPrimaryAria} className="flex flex-wrap items-center gap-3">
           <Link
             to={`/${locale}`}
-            className="inline-flex items-center min-h-7 px-1 no-underline text-ink-muted hover:text-ink-primary transition-colors"
+            className="inline-flex items-center min-h-7 px-1.5 rounded no-underline text-ink-muted hover:text-ink-primary transition-colors"
           >
             {copy.navHome}
           </Link>
@@ -77,9 +77,9 @@ export function SiteFooter({
               href={siteSettings.blog_origin_url}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center min-h-7 px-1 no-underline text-ink-muted hover:text-ink-primary transition-colors"
+              className="inline-flex items-center min-h-7 px-1.5 rounded no-underline text-ink-muted hover:text-ink-primary transition-colors"
             >
-              {siteSettings.blog_nav_label} ↗
+              {siteSettings.blog_nav_label}
             </a>
           )}
         </nav>

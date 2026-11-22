@@ -1,166 +1,391 @@
-/*
- * Hand-Drawn Stationery Creative Commons License Stamp (`CcLicenseCard`)
- * - Renders bespoke 2px ink circular CC medallions (`CC`, `BY`, `SA`, `NC`, `ND`, `0`, `©`),
- *   localized license title, optional author attribution, and semantic `rel="license"` deed link.
- */
-
-import type { UiMessages } from '../../lib/i18n';
+import { useId } from 'react';
 import {
+  ALL_LICENSE_OPTIONS,
   getLicenseDeedUrl,
-  type LicenseEmblem,
+  normalizeLicenseId,
   resolveEffectiveLicense,
+  type LicenseEmblem,
 } from '../../lib/licenses';
+import type { UiMessages } from '../../lib/locales';
+import { UI_COPY } from '../../lib/i18n';
 import type { LocaleCode } from '../../lib/types';
-import { PostmarkOrnament } from './StationeryStickers';
 
-interface CcLicenseCardProps {
-  locale: LocaleCode;
-  copy: UiMessages;
-  stepLicense?: string | null;
-  siteDefaultLicense?: string | null;
-  authorName?: string | null;
-  compact?: boolean;
-}
+/**
+ * Finely engraved Creative Commons / Copyright double-ring coin medallion.
+ * Uses optical curves, knockout slash masking (for NC), and balanced proportions
+ * across both 32px archival plates and 24px Studio selector tiles.
+ */
+export function CcEmblemMedallion({
+  emblem,
+  size = 32,
+}: {
+  emblem: LicenseEmblem;
+  size?: number;
+}) {
+  const clipId = useId();
+  const coinBg = 'var(--surface-colophon-coin, #f8f4ea)';
 
-function EmblemMedallion({ kind }: { kind: LicenseEmblem }) {
   return (
-    <span
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
       aria-hidden="true"
-      className="w-7 h-7 rounded-full border-[1.75px] inline-flex items-center justify-center shrink-0 select-none"
-      style={{
-        borderColor: 'var(--alert-kraft-border)',
-        backgroundColor: 'var(--alert-kraft-badge-bg)',
-        color: 'var(--alert-kraft-title)',
-      }}
+      className="shrink-0"
     >
-      {kind === 'cc' && (
-        <span className="font-mono text-xs font-semibold tracking-tighter leading-none">
-          CC
-        </span>
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx={16} cy={16} r={13.4} />
+        </clipPath>
+      </defs>
+
+      {/* Outer heavy archival bezel & inner hair-line coin engraving */}
+      <circle
+        cx={16}
+        cy={16}
+        r={14.2}
+        style={{ fill: coinBg }}
+        stroke="currentColor"
+        strokeWidth={1.7}
+      />
+      <circle
+        cx={16}
+        cy={16}
+        r={11.8}
+        stroke="currentColor"
+        strokeWidth={0.65}
+        strokeOpacity={0.32}
+      />
+
+      {emblem === 'cc' && (
+        <g
+          stroke="currentColor"
+          strokeWidth={2.05}
+          strokeLinecap="round"
+        >
+          <path d="M14.7 13.3a2.95 3.35 0 1 0 0 5.4" />
+          <path d="M21.4 13.3a2.95 3.35 0 1 0 0 5.4" />
+        </g>
       )}
-      {kind === 'by' && (
-        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="6.5" r="2.5" />
-          <path d="M8.5 11.5h7l-.8 5H13v4.5h-2V16.5H9.3l-.8-5Z" />
-        </svg>
+
+      {emblem === 'by' && (
+        <g>
+          {/* Sculpted portrait head */}
+          <circle cx={16} cy={9.55} r={2.2} fill="currentColor" />
+          {/* Tapered torso silhouette with open sleeve & leg separation */}
+          <path
+            d="M11.65 14.35c0-1.15.9-2.05 2.08-2.05h4.54c1.18 0 2.08.9 2.08 2.05v4.15c0 .44-.36.8-.8.8h-1.08v4.55a.78.78 0 0 1-.78.78h-3.38a.78.78 0 0 1-.78-.78V19.3h-1.08a.8.8 0 0 1-.8-.8v-4.15Z"
+            fill="currentColor"
+          />
+          {/* Subtle collar scoop & sleeve/stance engraving lines */}
+          <path
+            d="M14.2 12.25q1.8 1.15 3.6 0"
+            style={{ stroke: coinBg }}
+            strokeWidth={0.95}
+            strokeLinecap="round"
+          />
+          <path
+            d="M13.5 15.1v3.85M18.5 15.1v3.85M16 19.65v4.9"
+            style={{ stroke: coinBg }}
+            strokeWidth={0.85}
+            strokeLinecap="round"
+          />
+        </g>
       )}
-      {kind === 'sa' && (
-        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M17.5 8.5A6.5 6.5 0 1 0 18 14.5" />
-          <polyline points="14 5.5 18 8.5 14.5 11.5" />
-        </svg>
+
+      {emblem === 'nc' && (
+        <g clipPath={`url(#${clipId})`}>
+          {/* Vertical currency spine */}
+          <path
+            d="M16 8.35v2.35M16 21.3v2.35"
+            stroke="currentColor"
+            strokeWidth={1.75}
+            strokeLinecap="round"
+          />
+          {/* Balanced geometric S-curve */}
+          <path
+            d="M19.15 12.2c-.55-.95-1.65-1.5-3.1-1.5-1.85 0-3.15.92-3.15 2.28 0 1.42 1.18 2.02 3.22 2.5 2.1.5 3.3 1.12 3.3 2.65 0 1.52-1.45 2.55-3.42 2.55-1.72 0-3.12-.62-3.65-1.72"
+            stroke="currentColor"
+            strokeWidth={1.95}
+            strokeLinecap="round"
+          />
+          {/* Diagonal prohibition slash with clean coin-surface halo */}
+          <line
+            x1={6.2}
+            y1={6.2}
+            x2={25.8}
+            y2={25.8}
+            style={{ stroke: coinBg }}
+            strokeWidth={3.6}
+          />
+          <line
+            x1={6.2}
+            y1={6.2}
+            x2={25.8}
+            y2={25.8}
+            stroke="currentColor"
+            strokeWidth={1.85}
+          />
+        </g>
       )}
-      {kind === 'nc' && (
-        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 4v16M15.5 8.5c0-1.5-1.5-2.5-3.5-2.5s-3.5 1-3.5 2.5 1.5 2.2 3.5 2.7 3.5 1.2 3.5 2.8-1.5 2.5-3.5 2.5-3.5-1-3.5-2.5" />
-          <line x1="5" y1="5" x2="19" y2="19" />
-        </svg>
+
+      {emblem === 'sa' && (
+        <g>
+          {/* True circular share-alike loop + crisp geometric tangent arrowhead */}
+          <path
+            d="M19.95 11.45a5.95 5.95 0 1 0 2.05 4.85"
+            stroke="currentColor"
+            strokeWidth={2.05}
+            strokeLinecap="round"
+          />
+          <path
+            d="M21.9 9.15l.75 4.25-4.35-.7Z"
+            fill="currentColor"
+            stroke="currentColor"
+            strokeWidth={0.7}
+            strokeLinejoin="round"
+          />
+        </g>
       )}
-      {kind === 'nd' && (
-        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-          <line x1="6.5" y1="9.5" x2="17.5" y2="9.5" />
-          <line x1="6.5" y1="14.5" x2="17.5" y2="14.5" />
-        </svg>
+
+      {emblem === 'nd' && (
+        <g
+          stroke="currentColor"
+          strokeWidth={2.15}
+          strokeLinecap="round"
+        >
+          <path d="M10.15 13.75h11.7" />
+          <path d="M10.15 18.25h11.7" />
+        </g>
       )}
-      {kind === 'zero' && (
-        <span className="font-mono text-xs font-semibold leading-none">0</span>
+
+      {emblem === 'zero' && (
+        <ellipse
+          cx={16}
+          cy={16}
+          rx={3.55}
+          ry={5.6}
+          stroke="currentColor"
+          strokeWidth={2.25}
+        />
       )}
-      {kind === 'copyright' && (
-        <span className="font-mono text-xs font-semibold leading-none">©</span>
+
+      {emblem === 'copyright' && (
+        <path
+          d="M19.85 12.65a4.95 4.95 0 1 0 0 6.7"
+          stroke="currentColor"
+          strokeWidth={2.2}
+          strokeLinecap="round"
+        />
       )}
-    </span>
+    </svg>
   );
 }
 
+interface CcLicenseCardProps {
+  /** Article license override (`"default"` / empty inherits `siteDefaultLicense`). */
+  stepLicense?: string | null;
+  siteDefaultLicense?: string | null;
+  locale: LocaleCode;
+  copy?: UiMessages;
+  authorName?: string | null;
+  compact?: boolean;
+  className?: string;
+}
+
+/**
+ * Archival double-ruled Press Colophon seal for articles.
+ * Single-destination clickable seal when a Creative Commons deed URL exists
+ * (clicking either the engraved coins or the license description opens the deed);
+ * adapts to its own inline container size via CSS container queries.
+ */
 export function CcLicenseCard({
-  locale,
-  copy,
   stepLicense,
   siteDefaultLicense,
+  locale,
+  copy,
   authorName,
   compact = false,
+  className = '',
 }: CcLicenseCardProps) {
-  const meta = resolveEffectiveLicense(stepLicense, siteDefaultLicense);
-  if (!meta) return null;
+  const effective = resolveEffectiveLicense(stepLicense, siteDefaultLicense);
+  if (!effective) return null;
 
-  const deedUrl = getLicenseDeedUrl(meta, locale);
-  const label = copy.licenseNames[meta.id];
+  const ui = copy ?? UI_COPY[locale];
+  const label = ui.licenseNames[effective.id] ?? effective.shortCode;
+  const deedUrl = getLicenseDeedUrl(effective, locale);
   const cleanAuthor = authorName?.trim() || '';
+
+  const innerContent = (
+    <div className="cc-colophon-inner">
+      {/* Row of finely engraved CC / BY / NC / SA / ND coin medallions */}
+      <div className="cc-colophon-emblems flex items-center gap-1.5 text-ink-primary shrink-0">
+        {effective.emblems.map((emb, idx) => (
+          <CcEmblemMedallion
+            key={`${emb}-${idx}`}
+            emblem={emb}
+            size={compact ? 26 : 30}
+          />
+        ))}
+      </div>
+
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-muted">
+          <span className="cc-colophon-kicker uppercase tracking-[0.14em]">
+            {ui.licenseBadge}
+          </span>
+          {cleanAuthor && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="break-words">© {cleanAuthor}</span>
+            </>
+          )}
+        </div>
+        <p className="cc-colophon-title text-sm font-semibold text-ink-primary leading-snug m-0">
+          {label}
+        </p>
+      </div>
+    </div>
+  );
+
+  return (
+    <aside
+      aria-label={ui.licenseCardAria}
+      className={`cc-colophon-host ${className}`.trim()}
+    >
+      {deedUrl ? (
+        <a
+          href={deedUrl}
+          target="_blank"
+          rel="noopener noreferrer license"
+          title={label}
+          className={`cc-colophon-seal cc-colophon-seal--link ${compact ? 'cc-colophon-seal--compact' : ''}`.trim()}
+        >
+          {innerContent}
+        </a>
+      ) : (
+        <div
+          className={`cc-colophon-seal ${compact ? 'cc-colophon-seal--compact' : ''}`.trim()}
+        >
+          {innerContent}
+        </div>
+      )}
+    </aside>
+  );
+}
+
+interface CcLicenseSelectorProps {
+  value: string;
+  onChange: (nextLicenseId: string) => void;
+  locale: LocaleCode;
+  /** Allow an explicit `"default"` entry that follows Site Settings */
+  allowFollowSite?: boolean;
+  siteDefaultLicense?: string | null;
+  className?: string;
+}
+
+/**
+ * Interactive Studio control for selecting content licenses.
+ * Visually structured as an editable radio-card grid (not an archival seal).
+ */
+export function CcLicenseSelector({
+  value,
+  onChange,
+  locale,
+  allowFollowSite = false,
+  siteDefaultLicense,
+  className = '',
+}: CcLicenseSelectorProps) {
+  const ui = UI_COPY[locale];
+  const studio = ui.studio;
+  const resolvedSite = resolveEffectiveLicense(siteDefaultLicense, 'cc-by-4.0');
+  const normalizedVal =
+    allowFollowSite && (!value || value === 'default')
+      ? 'default'
+      : normalizeLicenseId(value);
 
   return (
     <div
-      data-sticker-style="stamp"
-      className={`sticker-card overflow-hidden ${
-        compact ? 'p-3 sm:p-3.5' : 'p-3.5 sm:p-4'
-      }`}
-      style={{
-        '--sticker-bg': 'var(--alert-kraft-bg)',
-        '--sticker-border': 'var(--alert-kraft-border)',
-        '--sticker-body': 'var(--alert-kraft-body)',
-        borderRadius: '11px',
-        boxShadow: '2px 2px 0 0 var(--border-ink)',
-      } as React.CSSProperties}
+      role="radiogroup"
+      aria-label={ui.licenseSelectAria}
+      className={`grid grid-cols-1 sm:grid-cols-2 gap-2 ${className}`.trim()}
     >
-      <div className="pointer-events-none absolute top-1.5 end-2.5 z-0">
-        <PostmarkOrnament stroke="var(--alert-kraft-border)" compact />
-      </div>
-
-      <div className="relative z-1 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-          <div className="flex items-center gap-1 shrink-0">
-            {meta.emblems.map((emblem) => (
-              <EmblemMedallion key={emblem} kind={emblem} />
-            ))}
-          </div>
-
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className="font-hand text-xs font-semibold px-1.5 py-0.5 rounded border border-dashed"
-                style={{
-                  backgroundColor: 'var(--alert-kraft-badge-bg)',
-                  color: 'var(--alert-kraft-badge-fg)',
-                  borderColor: 'var(--alert-kraft-border)',
-                }}
-              >
-                {copy.licenseBadge}
-              </span>
-              {cleanAuthor && (
-                <span
-                  className="font-mono text-xs font-semibold truncate"
-                  style={{ color: 'var(--alert-kraft-body)' }}
-                >
-                  @{cleanAuthor}
-                </span>
-              )}
-            </div>
-
-            <p
-              className="m-0 mt-0.5 font-hand text-sm sm:text-base font-semibold leading-snug"
-              style={{ color: 'var(--alert-kraft-title)' }}
-            >
-              {label}
+      {allowFollowSite && (
+        <button
+          type="button"
+          role="radio"
+          aria-checked={normalizedVal === 'default'}
+          onClick={() => onChange('')}
+          className={`cc-selector-option sm:col-span-2 ${
+            normalizedVal === 'default' ? 'cc-selector-option--active' : ''
+          }`}
+        >
+          <span className="cc-selector-radio" aria-hidden="true">
+            {normalizedVal === 'default' && <span className="cc-selector-dot" />}
+          </span>
+          <div className="min-w-0 flex-1 text-start">
+            <p className="text-xs font-semibold text-ink-primary truncate m-0">
+              {studio.licenseFollowSite(resolvedSite?.shortCode ?? 'CC BY 4.0')}
             </p>
+            {resolvedSite && (
+              <p className="text-xs text-ink-muted leading-snug line-clamp-2 m-0">
+                {ui.licenseNames[resolvedSite.id] ?? resolvedSite.shortCode}
+              </p>
+            )}
           </div>
-        </div>
+          {resolvedSite && (
+            <div className="flex items-center gap-1 text-ink-secondary shrink-0">
+              {resolvedSite.emblems.slice(0, 3).map((emb, idx) => (
+                <CcEmblemMedallion
+                  key={`site-${emb}-${idx}`}
+                  emblem={emb}
+                  size={20}
+                />
+              ))}
+            </div>
+          )}
+        </button>
+      )}
 
-        {deedUrl && (
-          <a
-            href={deedUrl}
-            target="_blank"
-            rel="license noopener noreferrer"
-            className="min-h-8 px-2.5 py-1 rounded-lg font-hand text-xs sm:text-sm font-semibold border-[1.5px] inline-flex items-center gap-1 shrink-0 no-underline transition-transform hover:-translate-y-px"
-            style={{
-              backgroundColor: 'var(--surface-sheet)',
-              borderColor: 'var(--alert-kraft-border)',
-              color: 'var(--alert-kraft-title)',
-              boxShadow: '1.5px 1.5px 0 0 var(--alert-kraft-border)',
-            }}
+      {ALL_LICENSE_OPTIONS.map((opt) => {
+        const isActive = normalizedVal === opt.id;
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            role="radio"
+            aria-checked={isActive}
+            onClick={() => onChange(opt.id)}
+            className={`cc-selector-option ${
+              isActive ? 'cc-selector-option--active' : ''
+            }`}
           >
-            {copy.licenseDeedLink}
-          </a>
-        )}
-      </div>
+            <span className="cc-selector-radio" aria-hidden="true">
+              {isActive && <span className="cc-selector-dot" />}
+            </span>
+            <div className="min-w-0 flex-1 text-start">
+              <p className="text-xs font-mono font-semibold text-ink-primary truncate m-0">
+                {opt.shortCode}
+              </p>
+              <p className="text-xs text-ink-muted leading-snug line-clamp-2 m-0">
+                {ui.licenseNames[opt.id] ?? opt.shortCode}
+              </p>
+            </div>
+            {opt.emblems.length > 0 && (
+              <div className="flex items-center gap-1 text-ink-secondary shrink-0">
+                {opt.emblems.map((emb, idx) => (
+                  <CcEmblemMedallion
+                    key={`${opt.id}-${emb}-${idx}`}
+                    emblem={emb}
+                    size={20}
+                  />
+                ))}
+              </div>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

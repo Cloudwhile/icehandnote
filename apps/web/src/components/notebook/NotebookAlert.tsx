@@ -21,6 +21,7 @@ import {
   TornBottomEdge,
   WashiTapeOrnament,
 } from './StationeryStickers';
+import { getAlertCornerPixelSticker } from './PixelStickers';
 
 export interface StickerCardFrameProps {
   kind: AlertKind;
@@ -198,6 +199,15 @@ export function StickerCardFrame({
         <div className="min-w-0 flex-1">{children({ tokens })}</div>
       </div>
 
+      {style !== 'torn' && (
+        <div
+          className="pointer-events-none select-none absolute -bottom-2.5 end-2.5 opacity-85 rotate-6"
+          aria-hidden="true"
+        >
+          {getAlertCornerPixelSticker(kind, 26)}
+        </div>
+      )}
+
       {style === 'torn' && (
         <div className="mt-2.5 -mx-2">
           <TornBottomEdge borderStroke={tokens.border} />
@@ -217,6 +227,8 @@ interface NotebookAlertProps {
   style?: string | null;
   tone?: string | null;
   badge?: string | null;
+  align?: string | null;
+  size?: string | null;
 }
 
 export function NotebookAlert({
@@ -229,15 +241,33 @@ export function NotebookAlert({
   style: rawStyle,
   tone: rawTone,
   badge,
+  align,
+  size,
 }: NotebookAlertProps) {
   const displayBadge = badge?.trim() || stampText;
+  const alignCls =
+    align === 'center'
+      ? 'ink-align-center'
+      : align === 'right'
+        ? 'ink-align-right'
+        : '';
+  const rowAlignCls =
+    align === 'center'
+      ? 'justify-center'
+      : align === 'right'
+        ? 'justify-end'
+        : '';
+  const sizeCls =
+    size === 'sm' || size === 'lg' || size === 'xl' || size === '2xl'
+      ? `ink-size-${size}`
+      : 'text-sm';
 
   return (
     <StickerCardFrame kind={kind} style={rawStyle} tone={rawTone}>
       {({ tokens }) => (
-        <>
+        <div className={alignCls || undefined}>
           {/* Tier 1: Stamp Badge + Handwritten Sticker Title */}
-          <div className="flex flex-wrap items-baseline gap-2">
+          <div className={`flex flex-wrap items-baseline gap-2 ${rowAlignCls}`}>
             <span
               className="font-hand text-xs sm:text-sm font-semibold tracking-wide px-2 py-0.5 rounded border border-dashed"
               style={{
@@ -260,7 +290,7 @@ export function NotebookAlert({
 
           {/* Tier 2: Same-Hue Body Copy */}
           <div
-            className="mt-1.5 text-sm leading-relaxed [&_code]:font-mono [&_code]:text-xs [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-semibold"
+            className={`mt-1.5 ${sizeCls} leading-relaxed`}
             style={{ color: tokens.body }}
           >
             <SafeHtml html={bodyHtml} />
@@ -297,7 +327,7 @@ export function NotebookAlert({
               </div>
             </details>
           )}
-        </>
+        </div>
       )}
     </StickerCardFrame>
   );

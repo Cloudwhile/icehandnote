@@ -12,8 +12,16 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { formatShortcutK } from '../components/navigation/SearchTriggerButton';
 import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
+import {
+  getDifficultyPixelSticker,
+  PixelCoffeeMugSticker,
+  PixelIceCrystalSticker,
+  PixelInkQuillSticker,
+  PixelStarStampSticker,
+} from '../components/notebook/PixelStickers';
 import { IconSnowflake } from '../components/ui/Icons';
 import { api, runDirectionalTransition } from '../lib/api';
 import { UI_COPY } from '../lib/i18n';
@@ -91,12 +99,12 @@ export function HomePage({
 
   const firstTrack = tracks[0];
   const primaryHref = firstTrack
-    ? `/${locale}/tracks/${firstTrack.slug}/${firstTrack.first_chapter_slug}/${firstTrack.first_step_slug}`
+    ? `/${locale}/series/${firstTrack.slug}/${firstTrack.first_step_slug}`
     : null;
 
   return (
     <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-14 space-y-16">
-      {/* 1. Dusk Sketch Hero + Parallax Wave Divider */}
+      {/* 1. Dusk Sketch Hero + Pixel Desk Stickers + Parallax Wave Divider */}
       <section className="notebook-sheet-stack">
         <div
           className="notebook-sheet-card relative overflow-hidden pt-8 sm:pt-12 pb-16 px-6 sm:px-10"
@@ -105,10 +113,28 @@ export function HomePage({
               'linear-gradient(160deg, var(--hero-grad-start) 0%, var(--surface-sheet) 72%)',
           }}
         >
-          {/* Decorative Corner Sketch Skyline (aria-hidden, low-contrast §8.3.3) */}
+          {/* Decorative Corner Pixel Art Sticker Cluster + Sketch Skyline */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none select-none hidden md:flex items-center gap-3 absolute end-10 top-8 z-10"
+          >
+            <div className="pixel-sticker-float -rotate-6">
+              <PixelInkQuillSticker size={46} />
+            </div>
+            <div className="pixel-sticker-float translate-y-2 rotate-3">
+              <PixelCoffeeMugSticker size={44} />
+            </div>
+            <div className="pixel-sticker-float -translate-y-1 -rotate-3">
+              <PixelIceCrystalSticker size={42} />
+            </div>
+            <div className="pixel-sticker-float translate-y-3 rotate-12">
+              <PixelStarStampSticker size={36} />
+            </div>
+          </div>
+
           <svg
             aria-hidden="true"
-            className="pointer-events-none hidden md:block absolute end-6 bottom-10 w-64 h-44 opacity-85"
+            className="pointer-events-none hidden md:block absolute end-6 bottom-10 w-64 h-44 opacity-80"
             viewBox="0 0 260 180"
             fill="none"
           >
@@ -174,7 +200,7 @@ export function HomePage({
                 onClick={onOpenSearch}
                 className="min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
               >
-                {copy.heroSecondaryCta}
+                {formatShortcutK(copy.heroSecondaryCta)}
               </button>
             </div>
           </div>
@@ -268,17 +294,27 @@ export function HomePage({
                   : idx === 1
                     ? 'var(--accent-ice-ink)'
                     : 'var(--accent-amber-ink)';
-              const stepUrl = `/${locale}/tracks/${track.slug}/${track.first_chapter_slug}/${track.first_step_slug}`;
+              const stepUrl = `/${locale}/series/${track.slug}/${track.first_step_slug}`;
+
+              const handleOpenTrack = (e: React.MouseEvent<HTMLAnchorElement>) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+                  return;
+                }
+                e.preventDefault();
+                runDirectionalTransition(() => navigate(stepUrl), 'forward');
+              };
 
               return (
                 <article
                   key={track.id}
-                  className="notebook-sheet-stack notebook-track-card flex"
+                  className="notebook-sheet-stack notebook-track-card scroll-reveal-block flex"
                 >
-                  <div
-                    className="notebook-sheet-card p-5 flex flex-col justify-between w-full"
-                    style={{ borderTopWidth: '5px', borderTopColor: topAccentVar }}
-                  >
+                  <div className="notebook-sheet-card relative overflow-hidden p-5 pt-6 flex flex-col justify-between w-full">
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-x-0 top-0 h-1.5"
+                      style={{ backgroundColor: topAccentVar }}
+                    />
                     <div className="space-y-3">
                       <div className="flex items-center justify-between gap-2">
                         <div
@@ -287,9 +323,17 @@ export function HomePage({
                         >
                           <TrackIcon kind={track.icon_kind} />
                         </div>
-                        <span className="text-xs font-semibold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-surface-raised text-ink-secondary border border-border-subtle">
-                          {copy.difficultyLabels[track.difficulty] ?? track.difficulty}
-                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span
+                            aria-hidden="true"
+                            className="pointer-events-none select-none rotate-3"
+                          >
+                            {getDifficultyPixelSticker(track.difficulty, 28)}
+                          </span>
+                          <span className="text-xs font-semibold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-surface-raised text-ink-secondary border border-border-subtle">
+                            {copy.difficultyLabels[track.difficulty] ?? track.difficulty}
+                          </span>
+                        </div>
                       </div>
 
                       <h3
@@ -298,6 +342,7 @@ export function HomePage({
                       >
                         <Link
                           to={stepUrl}
+                          onClick={handleOpenTrack}
                           className="no-underline text-ink-primary hover:text-link-ink transition-colors"
                         >
                           <SafeHtml as="span" html={track.title} />
@@ -329,7 +374,8 @@ export function HomePage({
                         </span>
                         <Link
                           to={stepUrl}
-                          className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
+                          onClick={handleOpenTrack}
+                          className="inline-flex items-center min-h-9 px-2.5 py-1.5 -me-2 rounded-lg font-semibold text-link-ink hover:text-link-hover-ink no-underline transition-colors ink-icon-target"
                         >
                           {copy.openNotebook}
                         </Link>

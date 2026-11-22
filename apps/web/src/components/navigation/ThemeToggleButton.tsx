@@ -20,7 +20,7 @@ export function ThemeToggleButton({
   locale,
   theme,
   onToggleTheme,
-  sizeClass = 'w-8 h-8',
+  sizeClass = 'w-9 h-9',
   radiusClass = 'rounded-xl',
   surfaceClass = 'bg-surface-raised',
 }: ThemeToggleButtonProps) {
@@ -33,7 +33,7 @@ export function ThemeToggleButton({
       onClick={onToggleTheme}
       aria-label={label}
       title={label}
-      className={`${sizeClass} ${radiusClass} text-xs font-semibold ${surfaceClass} border border-border-subtle hover:border-border-ink inline-flex items-center justify-center cursor-pointer transition-colors`}
+      className={`${sizeClass} ${radiusClass} ink-icon-target text-xs font-semibold ${surfaceClass} border border-border-subtle hover:border-border-ink inline-flex items-center justify-center cursor-pointer transition-colors`}
     >
       {theme === 'dark' ? (
         <IconSun className="w-4 h-4 text-accent-amber" />

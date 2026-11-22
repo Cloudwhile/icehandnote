@@ -9,7 +9,7 @@
  *   - `torn`: Corner masking tape + serrated hand-torn bottom edge + 20px graph grid
  */
 
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getLanguageDisplayLabel,
   highlightCodeToLines,
@@ -338,11 +338,18 @@ export function WashiCodeCard({
       )}
     >
       <pre className="washi-code-pre m-0 py-3 w-full max-w-full overflow-x-auto font-mono text-xs sm:text-sm">
-        <code className="block w-max min-w-full">
+        <code
+          className="washi-code-grid"
+          style={
+            {
+              '--code-gutter-width': `calc(${lineDigits}ch + 2.25rem)`,
+            } as CSSProperties
+          }
+        >
           {highlightedLines.map((line, i) => (
             <div
               key={i}
-              className={`washi-code-line flex ${
+              className={`washi-code-line ${
                 line.diffKind === 'added'
                   ? 'washi-code-line-added'
                   : line.diffKind === 'removed'
@@ -352,13 +359,12 @@ export function WashiCodeCard({
             >
               <span
                 aria-hidden="true"
-                className="washi-code-gutter font-hand text-sm shrink-0 ps-3.5 pe-2.5 me-3 text-end select-none tabular-nums"
-                style={{ minWidth: `${lineDigits + 2.6}ch` }}
+                className="washi-code-gutter font-hand text-sm ps-3.5 pe-2.5 text-end select-none tabular-nums"
               >
                 {i + 1}
               </span>
               <span
-                className="pe-5 whitespace-pre flex-1"
+                className="ps-3 pe-5 whitespace-pre"
                 style={{ color: 'var(--code-fg)' }}
                 dangerouslySetInnerHTML={{
                   __html: line.html || ' ',

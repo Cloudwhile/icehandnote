@@ -1,4 +1,5 @@
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
+import { IconCheck } from '../ui/Icons';
 
 interface SectionTaskControl {
   checked: boolean;
@@ -13,6 +14,7 @@ interface SketchHeadingProps {
   level: number;
   number: string;
   text: string;
+  align?: string | null;
   jumpAriaLabel?: string;
   taskControl?: SectionTaskControl;
   /** Suppresses outer top margin when rendered as the top header of `.notebook-section-task` */
@@ -33,10 +35,23 @@ export function SketchHeading({
   level,
   number,
   text,
+  align,
   jumpAriaLabel,
   taskControl,
   inSectionTask = false,
 }: SketchHeadingProps) {
+  const alignWrapClass =
+    align === 'center'
+      ? 'ink-align-center'
+      : align === 'right'
+        ? 'ink-align-right'
+        : '';
+  const svgAlignClass =
+    align === 'center'
+      ? 'mx-auto'
+      : align === 'right'
+        ? 'ms-auto'
+        : '';
   const seed = hashSeed(id + text);
   const y1 = 5.5 + (seed % 3) * 0.6;
   const y2 = 2.4 + ((seed >> 3) % 3) * 0.7;
@@ -74,7 +89,7 @@ export function SketchHeading({
     return (
       <div
         id={id}
-        className={`${inSectionTask ? 'mt-0 mb-3' : 'mt-10 mb-3'} scroll-mt-24 group`}
+        className={`${inSectionTask ? 'mt-0 mb-3' : 'mt-10 mb-3'} scroll-mt-24 group ${alignWrapClass}`.trim()}
       >
         <div className="flex items-start justify-between gap-2">
           <Tag
@@ -83,8 +98,12 @@ export function SketchHeading({
           >
             <label
               className={`flex items-start gap-2.5 min-h-11 py-1 ${
-                isDisabled ? 'cursor-default' : 'cursor-pointer'
-              }`}
+                align === 'center'
+                  ? 'justify-center'
+                  : align === 'right'
+                    ? 'justify-end'
+                    : ''
+              } ${isDisabled ? 'cursor-default' : 'cursor-pointer'}`}
             >
               <input
                 type="checkbox"
@@ -111,8 +130,9 @@ export function SketchHeading({
                   }`}
                 />
                 {isChecked && (
-                  <span className="inline-flex align-middle items-center ms-2 px-2 py-0.5 rounded-md text-xs font-sans font-semibold leading-none ui-badge-pop bg-surface-sheet text-accent-success border border-border-subtle">
-                    ✓ {taskControl.doneLabel}
+                  <span className="inline-flex align-middle items-center gap-1 ms-2 px-2 py-0.5 rounded-md text-xs font-sans font-semibold leading-none ui-badge-pop bg-surface-sheet text-accent-success border border-border-subtle">
+                    <IconCheck className="w-3 h-3" />
+                    <span>{taskControl.doneLabel}</span>
                   </span>
                 )}
               </span>
@@ -131,7 +151,7 @@ export function SketchHeading({
         {/* Hand-drawn SVG wobbly marker underline (shifts to emerald when section task completed) */}
         <svg
           aria-hidden="true"
-          className="h-2.5 w-56 max-w-full -mt-1 block pointer-events-none"
+          className={`h-2.5 w-56 max-w-full -mt-1 block pointer-events-none ${svgAlignClass}`}
           viewBox="0 0 220 11"
           preserveAspectRatio="none"
           fill="none"
@@ -148,7 +168,10 @@ export function SketchHeading({
   }
 
   return (
-    <div id={id} className="mt-10 mb-3 scroll-mt-24 group">
+    <div
+      id={id}
+      className={`mt-10 mb-3 scroll-mt-24 group ${alignWrapClass}`.trim()}
+    >
       <Tag
         className={`${sizeClass} font-semibold text-ink-primary inline-flex items-baseline gap-2.5 leading-snug m-0`}
         style={{ fontFamily: 'var(--font-hand)' }}
@@ -169,7 +192,7 @@ export function SketchHeading({
       {/* Hand-drawn SVG wobbly marker underline */}
       <svg
         aria-hidden="true"
-        className="h-2.5 w-56 max-w-full -mt-0.5 block pointer-events-none"
+        className={`h-2.5 w-56 max-w-full -mt-0.5 block pointer-events-none ${svgAlignClass}`}
         viewBox="0 0 220 11"
         preserveAspectRatio="none"
         fill="none"

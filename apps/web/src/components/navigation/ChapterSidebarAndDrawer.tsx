@@ -9,8 +9,10 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { runDirectionalTransition } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
+import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
 import type {
   ChapterNavDto,
   LocaleCode,
@@ -81,7 +83,13 @@ export function ChapterSidebarAndDrawer({
     };
   }, [tocOpen]);
 
-  const totalArticles = chapters.reduce((acc, c) => acc + c.steps.length, 0);
+  const navigate = useNavigate();
+  const allSteps = chapters.flatMap((ch) => ch.steps);
+  const totalArticles = allSteps.length;
+  const activeStepIdx = Math.max(
+    0,
+    allSteps.findIndex((st) => st.id === currentStepId),
+  );
   const taskTotal = articleTaskStats?.total ?? 0;
   const taskDone = articleTaskStats?.done ?? 0;
   const taskPct = taskTotal > 0 ? Math.round((taskDone / taskTotal) * 100) : 0;
@@ -92,31 +100,54 @@ export function ChapterSidebarAndDrawer({
   );
   const activeAccent = seriesAccentColor(activeTrackIdx);
   const otherSeries = allTracks.filter((t) => t.slug !== trackSlug);
-  const singleChapter = chapters.length === 1;
 
-  const renderStepList = (ch: ChapterNavDto, onSelect?: () => void) => (
+  const navigateSeriesStep = (
+    e: React.MouseEvent<HTMLAnchorElement>,
+    href: string,
+    direction: 'forward' | 'backward',
+    onSelect?: () => void,
+  ) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+      return;
+    }
+    e.preventDefault();
+    onSelect?.();
+    runDirectionalTransition(() => navigate(href), direction);
+  };
+
+  const renderFlatChapterList = (onSelect?: () => void) => (
     <ul className="list-none m-0 p-0 space-y-1">
-      {ch.steps.map((st) => {
+      {allSteps.map((st, idx) => {
         const active = st.id === currentStepId;
+        const href = `/${locale}/series/${trackSlug}/${st.slug}`;
         return (
           <li key={st.id}>
             <Link
-              to={`/${locale}/tracks/${trackSlug}/${ch.slug}/${st.slug}`}
-              onClick={onSelect}
+              to={href}
+              onClick={(e) =>
+                navigateSeriesStep(
+                  e,
+                  href,
+                  idx >= activeStepIdx ? 'forward' : 'backward',
+                  onSelect,
+                )
+              }
               aria-current={active ? 'page' : undefined}
               className={`flex items-start gap-2 min-h-9 px-2.5 py-1.5 rounded-lg text-sm no-underline transition-colors ${
                 active
                   ? 'font-semibold text-ink-primary border-s-3 border-action-bg bg-action-subtle/60'
-                  : 'text-ink-muted hover:text-ink-primary hover:bg-surface-sheet/60'
+                  : 'text-ink-muted hover:text-ink-primary'
               }`}
             >
               <span
                 aria-hidden="true"
                 className="font-mono text-xs mt-0.5 shrink-0 tabular-nums"
               >
-                {String(st.step_number).padStart(2, '0')}.
+                {String(st.step_number || idx + 1).padStart(2, '0')}.
               </span>
-              <span className="leading-snug flex-1">{st.title}</span>
+              <span className="leading-snug flex-1">
+                <SafeHtml as="span" html={st.title} />
+              </span>
               {!st.has_requested_locale && (
                 <span
                   title={copy.fallbackShortTitle}
@@ -142,7 +173,7 @@ export function ChapterSidebarAndDrawer({
         >
           <div className="flex items-start gap-2">
             <span className="text-sm font-semibold text-ink-primary leading-snug">
-              {trackTitle}
+              <SafeHtml as="span" html={trackTitle} />
             </span>
           </div>
 
@@ -170,30 +201,8 @@ export function ChapterSidebarAndDrawer({
           )}
         </div>
 
-        {/* Merged chapters inside the active series */}
-        {singleChapter ? (
-          renderStepList(chapters[0], onSelect)
-        ) : (
-          <div className="space-y-2.5">
-            {chapters.map((ch) => {
-              const containsActive = ch.steps.some(
-                (st) => st.id === currentStepId,
-              );
-              return (
-                <details
-                  key={ch.slug}
-                  open={containsActive}
-                  className="sidebar-chapter-group"
-                >
-                  <summary>{ch.title}</summary>
-                  <div className="pt-1 ps-2">
-                    {renderStepList(ch, onSelect)}
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        )}
+        {/* Flat sequential chapters inside the active series */}
+        {renderFlatChapterList(onSelect)}
       </div>
 
       {/* 2. Other Series Switcher (clearly separates and links all sibling series) */}
@@ -209,13 +218,15 @@ export function ChapterSidebarAndDrawer({
                 allTracks.findIndex((t) => t.slug === series.slug),
               );
               const accent = seriesAccentColor(idx);
-              const href = `/${locale}/tracks/${series.slug}/${series.first_chapter_slug}/${series.first_step_slug}`;
+              const href = `/${locale}/series/${series.slug}/${series.first_step_slug}`;
               return (
                 <li key={series.id}>
                   <Link
                     to={href}
-                    onClick={onSelect}
-                    className="group flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary hover:bg-surface-sheet/70 transition-colors"
+                    onClick={(e) =>
+                      navigateSeriesStep(e, href, 'forward', onSelect)
+                    }
+                    className="group flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
                   >
                     <span
                       aria-hidden="true"
@@ -223,8 +234,8 @@ export function ChapterSidebarAndDrawer({
                       style={{ backgroundColor: accent }}
                     />
                     <span className="min-w-0 flex-1 space-y-0.5">
-                      <span className="block font-semibold leading-snug text-ink-secondary group-hover:text-ink-primary">
-                        {series.title}
+                      <span className="block font-semibold leading-snug text-ink-secondary group-hover:text-ink-primary transition-colors">
+                        <SafeHtml as="span" html={series.title} />
                       </span>
                       <span className="block text-xs text-ink-muted tabular-nums">
                         {copy.formatTrackCounts(
@@ -262,13 +273,13 @@ export function ChapterSidebarAndDrawer({
                 <li key={item.id}>
                   <a
                     href={`#${item.id}`}
-                    className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-link-ink hover:bg-surface-sheet/70 transition-colors"
+                    className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
                     style={{ paddingInlineStart: `${6 + (item.level - 1) * 8}px` }}
                   >
                     <span className="font-mono font-semibold text-link-ink shrink-0">
                       {item.number}
                     </span>
-                    <span className="truncate">{item.text}</span>
+                    <span className="truncate">{stripHtmlTags(item.text)}</span>
                   </a>
                 </li>
               ))}
@@ -344,13 +355,13 @@ export function ChapterSidebarAndDrawer({
                     <a
                       href={`#${item.id}`}
                       onClick={() => setTocOpen(false)}
-                      className="flex items-baseline gap-2 py-1 text-xs no-underline text-ink-secondary hover:text-link-ink transition-colors"
+                      className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
                       style={{ paddingInlineStart: `${(item.level - 1) * 8}px` }}
                     >
                       <span className="font-mono font-semibold text-link-ink shrink-0">
                         {item.number}
                       </span>
-                      <span className="truncate">{item.text}</span>
+                      <span className="truncate">{stripHtmlTags(item.text)}</span>
                     </a>
                   </li>
                 ))}
