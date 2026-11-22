@@ -6,6 +6,9 @@ estimated_minutes = 2
 synced_revision = 1
 canonical_revision = 1
 status = "published"
+author = "IceHandnote"
+published_at = "2026-11-22T00:00:00Z"
+updated_at = "2026-11-22T00:00:00Z"
 tags = ["Welcome", "IceHandnote"]
 +++
 
