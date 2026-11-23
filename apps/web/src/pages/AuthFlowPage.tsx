@@ -21,6 +21,7 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/ToastProvider';
 import { EXT_COPY, type LocalePreference, UI_COPY } from '../lib/i18n';
 import type { ResolvedTheme } from '../lib/theme';
+import { sanitizeReturnTo as sanitizeInternalReturnTo } from '../lib/urlSafety';
 import {
   getEffectiveOAuthProviders,
   type LocaleCode,
@@ -47,16 +48,14 @@ interface AuthFlowPageProps {
 }
 
 function sanitizeReturnTo(raw: string | null, locale: LocaleCode): string {
-  if (!raw) return `/${locale}`;
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return `/${locale}`;
+  const safePath = sanitizeInternalReturnTo(raw, locale);
   if (
-    /^\/[^/]+\/auth(\/|$)/.test(trimmed) ||
-    /^\/[^/]+\/(login|register)(\/|$)/.test(trimmed)
+    /^\/[^/]+\/auth(\/|$)/.test(safePath) ||
+    /^\/[^/]+\/(login|register)(\/|$)/.test(safePath)
   ) {
     return `/${locale}`;
   }
-  return trimmed;
+  return safePath;
 }
 
 export function AuthFlowPage({
@@ -90,10 +89,9 @@ export function AuthFlowPage({
     [locale, searchParams],
   );
   const returnQuerySuffix = useMemo(() => {
-    const raw = searchParams.get('return_to');
-    if (!raw || sanitizeReturnTo(raw, locale) === `/${locale}`) return '';
-    return `?return_to=${encodeURIComponent(raw)}`;
-  }, [locale, searchParams]);
+    if (returnTo === `/${locale}`) return '';
+    return `?return_to=${encodeURIComponent(returnTo)}`;
+  }, [locale, returnTo]);
 
   const resetTokenFromUrl = searchParams.get('reset_token') ?? '';
   const resetEmailFromUrl = searchParams.get('email') ?? '';
@@ -114,13 +112,20 @@ export function AuthFlowPage({
     setHasVerifiedResetToken(Boolean(resetTokenFromUrl));
   }, [mode, resetTokenFromUrl]);
 
-  // Redirect authenticated users away from plain login/register pages
+  // Redirect authenticated users away from plain login/register pages,
+  // except when completing an active anomaly/OAuth-bind OTP challenge.
   useEffect(() => {
     if (!authResolved || !user) return;
+    if (
+      mode === 'login' &&
+      (hasLoginChallenge || searchParams.get('otp_challenge') === '1')
+    ) {
+      return;
+    }
     if (mode === 'login' || mode === 'register') {
       navigate(returnTo, { replace: true });
     }
-  }, [authResolved, mode, navigate, returnTo, user]);
+  }, [authResolved, hasLoginChallenge, mode, navigate, returnTo, searchParams, user]);
 
   const focusHeading = useCallback(() => {
     stepHeadingRef.current?.focus();
@@ -149,7 +154,9 @@ export function AuthFlowPage({
         ? extAuth.anomalyTitle
         : copy.title
       : mode === 'register'
-        ? copy.registerTitle
+        ? regStep === 'otp'
+          ? extAuth.authStepVerifyOtp
+          : copy.registerTitle
         : mode === 'forgot'
           ? extAuth.forgotPasswordTitle
           : mode === 'reset'

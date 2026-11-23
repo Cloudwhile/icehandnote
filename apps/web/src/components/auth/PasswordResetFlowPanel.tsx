@@ -1,6 +1,6 @@
 /*
- * Decoupled 3-Step Password Recovery & Reset Flow (`AuthFlowPage` Modes: `'forgot'` & `'reset'`).
- * Reuses `<StepProgressNav>`, `<FieldErrorText>`, `<OtpInput>`, `<OtpResendButton>`, and `<PasswordInput>`.
+ * Decoupled Password Recovery & Reset Flow (`AuthFlowPage` Modes: `'forgot'` & `'reset'`).
+ * Reuses `<FieldErrorText>`, `<OtpInput>`, `<OtpResendButton>`, and `<PasswordInput>`.
  */
 
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -13,7 +13,6 @@ import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { FieldErrorText } from '../ui/FormControls';
 import { IconCheck } from '../ui/Icons';
 import { PasswordInput } from '../ui/PasswordInput';
-import { StepProgressNav } from '../ui/StepProgressNav';
 import { useToast } from '../ui/ToastProvider';
 import {
   readOtpCooldown,
@@ -51,6 +50,7 @@ export function PasswordResetFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const confirmPwRef = useRef<HTMLInputElement | null>(null);
+  const sendingResetRef = useRef(false);
   const onTokenVerifiedChangeRef = useRef(onTokenVerifiedChange);
   onTokenVerifiedChangeRef.current = onTokenVerifiedChange;
 
@@ -101,12 +101,6 @@ export function PasswordResetFlowPanel({
     }
   }, [newPassword, confirmNewPassword, extAuth.passwordMismatchMsg]);
 
-  const resetFlowSteps = [
-    extAuth.authStepEmail,
-    extAuth.authStepVerifyOtp,
-    extAuth.authStepNewPassword,
-  ];
-
   const handleForgotSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const cleanEmail = normalizeEmail(forgotEmail);
@@ -114,7 +108,7 @@ export function PasswordResetFlowPanel({
       toast.error('INVALID_EMAIL');
       return;
     }
-    if (submitting) return;
+    if (sendingResetRef.current) return;
     const targetUrl = `/${locale}/auth/reset-password?email=${encodeURIComponent(cleanEmail)}${returnQuerySuffix ? `&${returnQuerySuffix.slice(1)}` : ''}`;
     const existingCooldown = readOtpCooldown('reset', cleanEmail);
     if (existingCooldown > 0) {
@@ -122,6 +116,7 @@ export function PasswordResetFlowPanel({
       navigate(targetUrl);
       return;
     }
+    sendingResetRef.current = true;
     setSubmitting(true);
     try {
       const res = await api.forgotPassword(cleanEmail, locale);
@@ -138,6 +133,7 @@ export function PasswordResetFlowPanel({
       }
       toast.error(err);
     } finally {
+      sendingResetRef.current = false;
       setSubmitting(false);
     }
   };
@@ -148,7 +144,8 @@ export function PasswordResetFlowPanel({
       toast.error('INVALID_EMAIL');
       return;
     }
-    if (resending || cooldown > 0) return;
+    if (sendingResetRef.current || cooldown > 0) return;
+    sendingResetRef.current = true;
     setResending(true);
     try {
       const res = await api.forgotPassword(cleanEmail, locale);
@@ -158,6 +155,7 @@ export function PasswordResetFlowPanel({
       applyRateLimitError(err, cleanEmail);
       toast.error(err);
     } finally {
+      sendingResetRef.current = false;
       setResending(false);
     }
   };
@@ -172,7 +170,7 @@ export function PasswordResetFlowPanel({
       return;
     }
     if (cleanCode.length < 6) {
-      toast.error('OTP_CHALLENGE_INVALID');
+      toast.error('VERIFICATION_CODE_REQUIRED');
       return;
     }
     setVerifyingOtp(true);
@@ -213,14 +211,9 @@ export function PasswordResetFlowPanel({
 
   if (mode === 'forgot') {
     return (
-      <div className="flex flex-col gap-5">
-        <StepProgressNav
-          steps={resetFlowSteps}
-          activeIndex={0}
-          ariaLabel={extAuth.stepProgressAria}
-        />
-
+      <div key="forgot-panel" className="flex flex-col gap-5">
         <form
+          key="forgot-email-form"
           ref={formRef}
           method="POST"
           onSubmit={(e) => void handleForgotSubmit(e)}
@@ -280,15 +273,10 @@ export function PasswordResetFlowPanel({
   }
 
   return (
-    <div className="flex flex-col gap-5">
-      <StepProgressNav
-        steps={resetFlowSteps}
-        activeIndex={effectiveResetToken ? 2 : 1}
-        ariaLabel={extAuth.stepProgressAria}
-      />
-
+    <div key="reset-panel" className="flex flex-col gap-5">
       {!effectiveResetToken ? (
         <form
+          key="reset-otp-form"
           ref={formRef}
           method="POST"
           onSubmit={(e) => void handleVerifyResetOtpSubmit(e)}
@@ -383,6 +371,7 @@ export function PasswordResetFlowPanel({
         </form>
       ) : (
         <form
+          key="reset-new-password-form"
           ref={formRef}
           method="POST"
           onSubmit={(e) => void handleResetStep3Submit(e)}

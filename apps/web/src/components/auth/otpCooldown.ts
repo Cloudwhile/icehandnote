@@ -50,7 +50,8 @@ export function readOtpCooldown(flow: OtpFlowKind, subject: string): number {
 export function extractRateLimitCooldown(err: unknown): number | null {
   if (
     err instanceof ApiError &&
-    err.code === 'VERIFICATION_CODE_RATE_LIMITED' &&
+    (err.code === 'VERIFICATION_CODE_RATE_LIMITED' ||
+      err.code === 'MAIL_SEND_IN_PROGRESS') &&
     err.meta &&
     typeof err.meta.retry_after_secs === 'number'
   ) {

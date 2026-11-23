@@ -1,6 +1,6 @@
 /*
  * Decoupled Login & Anomaly OTP Verification Flow (`AuthFlowPage` Mode: `'login'`).
- * Uses shared `<PasswordInput>`, `<FieldErrorText>`, `<StepProgressNav>`, `<OtpInput>`, `<OtpResendButton>`, and `useOtpCooldown`.
+ * Uses shared `<PasswordInput>`, `<FieldErrorText>`, `<OtpInput>`, `<OtpResendButton>`, and `useOtpCooldown`.
  */
 
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -8,6 +8,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { ApiError } from '../../lib/apiError';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
+import { toSafeHttpUrl } from '../../lib/urlSafety';
 import {
   consumePendingOAuthOtpChallenge,
   detectPasskeyCapabilities,
@@ -27,7 +28,6 @@ import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { FieldErrorText } from '../ui/FormControls';
 import { IconKey } from '../ui/Icons';
 import { PasswordInput } from '../ui/PasswordInput';
-import { StepProgressNav } from '../ui/StepProgressNav';
 import { useToast } from '../ui/ToastProvider';
 import { saveOtpCooldown, useOtpCooldown } from './otpCooldown';
 import { OtpInput } from './OtpInput';
@@ -66,6 +66,8 @@ export function LoginFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const conditionalAbortRef = useRef<AbortController | null>(null);
+  const submittingLoginRef = useRef(false);
+  const resendingLoginOtpRef = useRef(false);
   const onChallengeChangeRef = useRef(onChallengeChange);
   onChallengeChangeRef.current = onChallengeChange;
 
@@ -259,9 +261,10 @@ export function LoginFlowPanel({
 
   const handleLoginSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!identifier.trim() || !password || submitting) return;
+    if (!identifier.trim() || !password || submittingLoginRef.current) return;
     conditionalAbortRef.current?.abort();
     conditionalAbortRef.current = null;
+    submittingLoginRef.current = true;
     setSubmitting(true);
     try {
       const result = await api.loginWithPassword(identifier.trim(), password, locale);
@@ -269,6 +272,7 @@ export function LoginFlowPanel({
     } catch (err) {
       toast.error(err, copy.loginFailed);
     } finally {
+      submittingLoginRef.current = false;
       setSubmitting(false);
     }
   };
@@ -293,7 +297,8 @@ export function LoginFlowPanel({
   };
 
   const handleResendLoginOtp = async () => {
-    if (!loginChallenge || resendingLoginOtp || cooldown > 0) return;
+    if (!loginChallenge || resendingLoginOtpRef.current || cooldown > 0) return;
+    resendingLoginOtpRef.current = true;
     setResendingLoginOtp(true);
     try {
       const res = await api.resendLoginOtp(loginChallenge.challenge_id, locale);
@@ -303,6 +308,7 @@ export function LoginFlowPanel({
       applyRateLimitError(err, loginChallenge.challenge_id);
       toast.error(err);
     } finally {
+      resendingLoginOtpRef.current = false;
       setResendingLoginOtp(false);
     }
   };
@@ -323,13 +329,7 @@ export function LoginFlowPanel({
           : extAuth.anomalyDescBoth;
 
     return (
-      <div className="flex flex-col gap-4">
-        <StepProgressNav
-          steps={[copy.signInTab, extAuth.authStepVerifyOtp]}
-          activeIndex={1}
-          ariaLabel={extAuth.stepProgressAria}
-        />
-
+      <div key="login-challenge-panel" className="flex flex-col gap-4">
         <div
           className="p-3.5 rounded-xl border flex flex-col gap-2.5"
           style={{
@@ -337,19 +337,32 @@ export function LoginFlowPanel({
             borderColor: 'var(--alert-warn-border)',
           }}
         >
-          <p className="text-xs text-ink-primary leading-relaxed auth-copy-pretty">
+          <p
+            className="text-xs leading-relaxed auth-copy-pretty"
+            style={{ color: 'var(--alert-warn-body)' }}
+          >
             {anomalyDescription}
           </p>
           <dl className="pt-2 border-t border-dashed border-border-subtle grid grid-cols-1 gap-1.5 text-xs">
             <div className="flex items-center justify-between gap-2">
-              <dt className="text-ink-muted">{extAuth.anomalyIpLabel}</dt>
-              <dd className="font-mono font-semibold text-ink-primary">
+              <dt style={{ color: 'var(--alert-warn-body)' }}>
+                {extAuth.anomalyIpLabel}
+              </dt>
+              <dd
+                className="font-mono font-semibold"
+                style={{ color: 'var(--alert-warn-title)' }}
+              >
                 {loginChallenge.ip_address}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-2">
-              <dt className="text-ink-muted">{extAuth.anomalyDeviceLabel}</dt>
-              <dd className="font-semibold text-ink-primary truncate">
+              <dt style={{ color: 'var(--alert-warn-body)' }}>
+                {extAuth.anomalyDeviceLabel}
+              </dt>
+              <dd
+                className="font-semibold truncate"
+                style={{ color: 'var(--alert-warn-title)' }}
+              >
                 {loginChallenge.device_label}
               </dd>
             </div>
@@ -357,6 +370,7 @@ export function LoginFlowPanel({
         </div>
 
         <form
+          key="login-otp-form"
           ref={formRef}
           method="POST"
           onSubmit={(e) => void handleVerifyLoginOtp(e)}
@@ -421,8 +435,9 @@ export function LoginFlowPanel({
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div key="login-credentials-panel" className="flex flex-col gap-5">
       <form
+        key="login-password-form"
         ref={formRef}
         method="POST"
         onSubmit={(e) => void handleLoginSubmit(e)}
@@ -544,9 +559,9 @@ export function LoginFlowPanel({
               );
             })}
 
-          {ssoEnabled && blogSsoEntryUrl && (
+          {ssoEnabled && toSafeHttpUrl(blogSsoEntryUrl) && (
             <a
-              href={blogSsoEntryUrl}
+              href={toSafeHttpUrl(blogSsoEntryUrl)}
               className="w-full min-h-10 px-4 py-2 rounded-xl text-xs font-semibold bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-primary inline-flex items-center justify-center no-underline transition-colors"
             >
               {copy.blogSsoLink}

@@ -21,6 +21,8 @@ import { PasswordInput } from '../ui/PasswordInput';
 import { UnderlineTabs } from '../ui/Tabs';
 import { useToast } from '../ui/ToastProvider';
 import { AvatarSourcePicker } from './AvatarSourcePicker';
+import { useOtpCooldown } from './otpCooldown';
+import { OtpInput } from './OtpInput';
 import { type UsernameCheckState, UsernameField } from './UsernameField';
 
 export interface OAuthOnboardingPanelProps {
@@ -45,6 +47,7 @@ export function OAuthOnboardingPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+  const sendingCodeRef = useRef(false);
   const onProviderNameResolvedRef = useRef(onProviderNameResolved);
   onProviderNameResolvedRef.current = onProviderNameResolved;
   const toastRef = useRef(toast);
@@ -63,9 +66,31 @@ export function OAuthOnboardingPanel({
 
   const [bindIdentifier, setBindIdentifier] = useState('');
   const [bindPassword, setBindPassword] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [sendingCode, setSendingCode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  useAccessibleFormValidation(formRef, [tab, Boolean(info)]);
+  const { cooldown, startCooldown, applyRateLimitError } = useOtpCooldown(
+    'register',
+    email,
+  );
+
+  const normCurrentEmailForHook = normalizeEmail(email) ?? email.trim().toLowerCase();
+  const normProviderEmailForHook = info
+    ? normalizeEmail(info.email) ?? info.email.trim().toLowerCase()
+    : '';
+  const needsEmailOtpForHook = Boolean(
+    info?.smtp_enabled &&
+      (!info.email_verified ||
+        !normProviderEmailForHook ||
+        normCurrentEmailForHook !== normProviderEmailForHook),
+  );
+
+  useAccessibleFormValidation(formRef, [
+    tab,
+    Boolean(info),
+    needsEmailOtpForHook,
+  ]);
 
   useEffect(() => {
     if (!onboardingToken) {
@@ -106,12 +131,43 @@ export function OAuthOnboardingPanel({
   if (!info) {
     return (
       <div className="py-6 flex flex-col gap-3" aria-busy="true">
-        <div className="h-14 rounded-xl bg-surface-raised animate-pulse" />
-        <div className="h-10 rounded-xl bg-surface-raised animate-pulse" />
-        <div className="h-10 rounded-xl bg-surface-raised animate-pulse" />
+        <div className="h-14 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+        <div className="h-10 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+        <div className="h-10 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
       </div>
     );
   }
+
+  const normCurrentEmail = normalizeEmail(email) ?? email.trim().toLowerCase();
+  const normProviderEmail = normalizeEmail(info.email) ?? info.email.trim().toLowerCase();
+  const needsEmailOtp = Boolean(
+    info.smtp_enabled &&
+      (!info.email_verified ||
+        !normProviderEmail ||
+        normCurrentEmail !== normProviderEmail),
+  );
+
+  const handleSendEmailOtp = async () => {
+    const cleanEmail = normalizeEmail(email);
+    if (!cleanEmail) {
+      toast.error('INVALID_EMAIL');
+      return;
+    }
+    if (sendingCodeRef.current || cooldown > 0) return;
+    sendingCodeRef.current = true;
+    setSendingCode(true);
+    try {
+      const res = await api.sendRegisterVerificationCode(cleanEmail, locale);
+      startCooldown(res.cooldown_seconds || 60, cleanEmail);
+      toast.success(extAuth.codeSentToast(cleanEmail));
+    } catch (err) {
+      applyRateLimitError(err, cleanEmail);
+      toast.error(err);
+    } finally {
+      sendingCodeRef.current = false;
+      setSendingCode(false);
+    }
+  };
 
   const handleAvatarUpload = async (file: File) => {
     if (uploadingAvatar || !onboardingToken) return;
@@ -140,6 +196,11 @@ export function OAuthOnboardingPanel({
       toast.error('INVALID_EMAIL');
       return;
     }
+    const cleanOtp = otpCode.trim();
+    if (needsEmailOtp && cleanOtp.length < 6) {
+      toast.error('VERIFICATION_CODE_REQUIRED');
+      return;
+    }
     setSubmitting(true);
     try {
       const session = await api.completeOAuthRegistration({
@@ -147,6 +208,7 @@ export function OAuthOnboardingPanel({
         username: username.trim(),
         display_name: displayName.trim() || username.trim(),
         email: normalizedEmail,
+        verification_code: needsEmailOtp ? cleanOtp : undefined,
         role: info.allow_author_registration ? role : 'reader',
         avatar_source: avatarSource,
         uploaded_avatar_url: uploadedAvatar,
@@ -218,8 +280,9 @@ export function OAuthOnboardingPanel({
       />
 
       {tab === 'register' && info.allow_registration ? (
-        <div role="tabpanel" aria-labelledby="onb-tab-register">
+        <div key="onb-panel-register" role="tabpanel" aria-labelledby="onb-tab-register">
           <form
+            key="onb-form-register"
             ref={formRef}
             method="POST"
             onSubmit={(e) => void handleRegisterSubmit(e)}
@@ -294,6 +357,40 @@ export function OAuthOnboardingPanel({
               />
             </div>
 
+            {needsEmailOtp && (
+              <div className="auth-field p-3.5 rounded-xl bg-surface-raised border border-border-subtle space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label htmlFor="onb-otp" className="ink-field-label m-0">
+                    {extAuth.verificationCodeLabel}
+                  </label>
+                  <button
+                    type="button"
+                    disabled={sendingCode || cooldown > 0}
+                    onClick={() => void handleSendEmailOtp()}
+                    className="inline-flex items-center min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-link-ink cursor-pointer disabled:text-ink-muted disabled:cursor-not-allowed tabular-nums transition-colors"
+                  >
+                    {sendingCode
+                      ? extAuth.sendingCodeBtn
+                      : cooldown > 0
+                        ? extAuth.resendCodeCountdown(cooldown)
+                        : extAuth.sendCodeBtn}
+                  </button>
+                </div>
+                <OtpInput
+                  id="onb-otp"
+                  value={otpCode}
+                  onChange={setOtpCode}
+                  disabled={submitting}
+                  dataError="onb-otp-err"
+                />
+                <FieldErrorText
+                  id="onb-otp-err"
+                  prefixLabel={extAuth.errorPrefixLabel}
+                  message={extAuth.errOtpLength}
+                />
+              </div>
+            )}
+
             {info.allow_author_registration && (
               <RadioCardGroup
                 name="onb_role"
@@ -325,8 +422,9 @@ export function OAuthOnboardingPanel({
           </form>
         </div>
       ) : (
-        <div role="tabpanel" aria-labelledby="onb-tab-bind">
+        <div key="onb-panel-bind" role="tabpanel" aria-labelledby="onb-tab-bind">
           <form
+            key="onb-form-bind"
             ref={formRef}
             method="POST"
             onSubmit={(e) => void handleBindSubmit(e)}

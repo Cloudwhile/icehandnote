@@ -5,7 +5,7 @@
  */
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { api, getSessionToken } from '../../lib/api';
+import { api } from '../../lib/api';
 import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../lib/email';
 import { EXT_COPY } from '../../lib/i18n';
 import {
@@ -79,6 +79,7 @@ export function ProfileSecurityTab({
   toastRef.current = toast;
   const fetchedForSessionRef = useRef(false);
   const hasLoadedOnceRef = useRef(false);
+  const sendingEmailCodeRef = useRef(false);
 
   const [changingEmail, setChangingEmail] = useState(initialOpenEmailChange);
   const [newEmailInput, setNewEmailInput] = useState('');
@@ -99,6 +100,7 @@ export function ProfileSecurityTab({
   const [savingPw, setSavingPw] = useState(false);
 
   const [unbindingProvider, setUnbindingProvider] = useState<string | null>(null);
+  const [bindingProvider, setBindingProvider] = useState<string | null>(null);
   const [passkeys, setPasskeys] = useState<UserPasskeyDto[]>([]);
   const [passkeyRpId, setPasskeyRpId] = useState('');
   const [passkeyUserId, setPasskeyUserId] = useState('');
@@ -182,13 +184,14 @@ export function ProfileSecurityTab({
       toast.error('INVALID_EMAIL');
       return;
     }
-    if (sendingEmailCode || emailCooldownSecs > 0) {
+    if (sendingEmailCodeRef.current || emailCooldownSecs > 0) {
       return;
     }
     if (clean.toLowerCase() === (user.email || '').trim().toLowerCase()) {
       toast.warning(p.emailSameAsCurrentErr);
       return;
     }
+    sendingEmailCodeRef.current = true;
     setSendingEmailCode(true);
     try {
       const res = await api.sendEmailChangeCode(clean, locale);
@@ -200,6 +203,7 @@ export function ProfileSecurityTab({
       applyRateLimitError(err, clean);
       toast.error(err);
     } finally {
+      sendingEmailCodeRef.current = false;
       setSendingEmailCode(false);
     }
   };
@@ -357,7 +361,19 @@ export function ProfileSecurityTab({
     }
   };
 
-  const sessionToken = getSessionToken();
+  const handleStartBindOAuth = async (providerId: string) => {
+    if (bindingProvider) return;
+    setBindingProvider(providerId);
+    try {
+      const { bind_ticket } = await api.createOAuthBindTicket();
+      const targetUrl = `/api/v1/auth/oauth/authorize?provider=${encodeURIComponent(providerId)}&bind_ticket=${encodeURIComponent(bind_ticket)}&return_to=${encodeURIComponent(returnPath)}`;
+      window.location.assign(targetUrl);
+    } catch (err) {
+      toast.error(err);
+      setBindingProvider(null);
+    }
+  };
+
   const returnPath =
     typeof window !== 'undefined' ? window.location.pathname : `/${locale}`;
   const enabledOAuthProviders = getEffectiveOAuthProviders(siteSettings).filter(
@@ -544,7 +560,7 @@ export function ProfileSecurityTab({
           ) : loadingPasskeys ? (
             <div
               aria-busy="true"
-              className="px-3 py-2.5 rounded-xl bg-surface-sheet/70 border border-transparent text-xs text-transparent select-none animate-pulse"
+              className="px-3 py-2.5 rounded-xl bg-surface-sheet/70 border border-transparent text-xs text-transparent select-none motion-safe:animate-pulse"
             >
               {'\u00A0'}
             </div>
@@ -575,6 +591,8 @@ export function ProfileSecurityTab({
                                 e.preventDefault();
                                 void handleSavePasskeyRename(pk.id);
                               } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                e.stopPropagation();
                                 setRenamingPasskeyId(null);
                               }
                             }}
@@ -666,9 +684,6 @@ export function ProfileSecurityTab({
           <div className="space-y-2">
             {oauthDisplayList.map((prov) => {
               const isBound = boundProviderSet.has(prov.id);
-              const bindUrl = sessionToken
-                ? `/api/v1/auth/oauth/authorize?provider=${encodeURIComponent(prov.id)}&bind_token=${encodeURIComponent(sessionToken)}&return_to=${encodeURIComponent(returnPath)}`
-                : '';
               return (
                 <div
                   key={prov.id}
@@ -698,14 +713,15 @@ export function ProfileSecurityTab({
                         : p.oauthUnbindBtn}
                     </button>
                   ) : (
-                    prov.enabled &&
-                    bindUrl && (
-                      <a
-                        href={bindUrl}
-                        className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-primary no-underline inline-flex items-center transition-colors"
+                    prov.enabled && (
+                      <button
+                        type="button"
+                        disabled={bindingProvider !== null}
+                        onClick={() => void handleStartBindOAuth(prov.id)}
+                        className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-primary cursor-pointer disabled:opacity-50 inline-flex items-center transition-colors"
                       >
                         {p.oauthBindBtn(prov.label)}
-                      </a>
+                      </button>
                     )
                   )}
                 </div>

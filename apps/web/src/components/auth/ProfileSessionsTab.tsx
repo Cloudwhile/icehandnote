@@ -126,8 +126,8 @@ export function ProfileSessionsTab({
 
       {loading ? (
         <div className="space-y-2.5" aria-busy="true">
-          <div className="h-18 rounded-xl bg-surface-raised animate-pulse" />
-          <div className="h-18 rounded-xl bg-surface-raised animate-pulse" />
+          <div className="h-18 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+          <div className="h-18 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
         </div>
       ) : sessions.length === 0 ? (
         <div className="p-5 rounded-xl bg-surface-raised border border-border-subtle text-center text-xs text-ink-muted">

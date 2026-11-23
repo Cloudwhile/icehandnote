@@ -1,6 +1,6 @@
 /*
- * Decoupled 2-Step Registration Flow (`AuthFlowPage` Mode: `'register'`).
- * Reuses `<UsernameField>`, `<PasswordInput>`, `<RadioCardGroup>`, `<StepProgressNav>`, `<OtpInput>`, and `<OtpResendButton>`.
+ * Decoupled Registration Flow (`AuthFlowPage` Mode: `'register'`).
+ * Reuses `<UsernameField>`, `<PasswordInput>`, `<RadioCardGroup>`, `<OtpInput>`, and `<OtpResendButton>`.
  */
 
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -13,7 +13,6 @@ import type { LocaleCode, SiteSettingsDto, UserProfileDto } from '../../lib/type
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { FieldErrorText, RadioCardGroup } from '../ui/FormControls';
 import { PasswordInput } from '../ui/PasswordInput';
-import { StepProgressNav } from '../ui/StepProgressNav';
 import { useToast } from '../ui/ToastProvider';
 import { readOtpCooldown, useOtpCooldown } from './otpCooldown';
 import { OtpInput } from './OtpInput';
@@ -45,6 +44,7 @@ export function RegisterFlowPanel({
 
   const formRef = useRef<HTMLFormElement | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
+  const sendingCodeRef = useRef(false);
   const onStepChangeRef = useRef(onStepChange);
   onStepChangeRef.current = onStepChange;
 
@@ -76,7 +76,8 @@ export function RegisterFlowPanel({
       toast.error('INVALID_EMAIL');
       return false;
     }
-    if (sendingCode) return false;
+    if (sendingCodeRef.current) return false;
+    sendingCodeRef.current = true;
     setSendingCode(true);
     try {
       const res = await api.sendRegisterVerificationCode(cleanEmail, locale);
@@ -88,6 +89,7 @@ export function RegisterFlowPanel({
       toast.error(err);
       return false;
     } finally {
+      sendingCodeRef.current = false;
       setSendingCode(false);
     }
   };
@@ -150,9 +152,9 @@ export function RegisterFlowPanel({
   if (!settingsResolved) {
     return (
       <div className="py-6 flex flex-col gap-3" aria-busy="true">
-        <div className="h-10 rounded-xl bg-surface-raised animate-pulse" />
-        <div className="h-10 rounded-xl bg-surface-raised animate-pulse" />
-        <div className="h-10 rounded-xl bg-surface-raised animate-pulse" />
+        <div className="h-10 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+        <div className="h-10 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+        <div className="h-10 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
       </div>
     );
   }
@@ -173,22 +175,15 @@ export function RegisterFlowPanel({
     );
   }
 
-  return (
-    <div>
-      <StepProgressNav
-        steps={[extAuth.authStepAccount, extAuth.authStepVerifyOtp]}
-        activeIndex={step === 'details' ? 0 : 1}
-        ariaLabel={extAuth.stepProgressAria}
-      />
-
-      {step === 'details' ? (
-        <div className="flex flex-col gap-5">
-          <form
-            ref={formRef}
-            method="POST"
-            onSubmit={(e) => void handleStep1Submit(e)}
-            className="flex flex-col gap-4"
-          >
+  return step === 'details' ? (
+    <div key="register-details-panel" className="flex flex-col gap-5">
+      <form
+        key="register-details-form"
+        ref={formRef}
+        method="POST"
+        onSubmit={(e) => void handleStep1Submit(e)}
+        className="flex flex-col gap-4"
+      >
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start">
               <UsernameField
                 id="auth-reg-user"
@@ -321,15 +316,16 @@ export function RegisterFlowPanel({
             >
               {extAuth.goToLoginLink}
             </Link>
-          </nav>
-        </div>
-      ) : (
-        <form
-          ref={formRef}
-          method="POST"
-          onSubmit={(e) => void handleStep2Submit(e)}
-          className="flex flex-col gap-4"
-        >
+      </nav>
+    </div>
+  ) : (
+    <form
+      key="register-otp-form"
+      ref={formRef}
+      method="POST"
+      onSubmit={(e) => void handleStep2Submit(e)}
+      className="flex flex-col gap-4"
+    >
           <div className="px-3.5 py-2.5 rounded-xl bg-surface-raised border border-border-subtle flex items-center justify-between gap-2 text-xs">
             <span className="font-mono font-semibold text-ink-primary truncate">
               {email.trim()}
@@ -377,16 +373,14 @@ export function RegisterFlowPanel({
             {submitting ? copy.registerSubmitting : extAuth.verifyAndRegisterBtn}
           </button>
 
-          <div className="flex items-center justify-center pt-1 text-xs">
-            <OtpResendButton
-              locale={locale}
-              cooldown={cooldown}
-              sending={sendingCode}
-              onResend={() => void requestRegisterCode(email)}
-            />
-          </div>
-        </form>
-      )}
-    </div>
+      <div className="flex items-center justify-center pt-1 text-xs">
+        <OtpResendButton
+          locale={locale}
+          cooldown={cooldown}
+          sending={sendingCode}
+          onResend={() => void requestRegisterCode(email)}
+        />
+      </div>
+    </form>
   );
 }
