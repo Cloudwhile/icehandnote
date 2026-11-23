@@ -3,6 +3,7 @@ name = "icehandnote-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 ammonia.workspace = true
@@ -18,6 +19,5 @@ ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
 toml.workspace = true
 uuid.workspace = true

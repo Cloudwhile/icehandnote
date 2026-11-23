@@ -3,6 +3,7 @@ name = "icehandnote-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -12,6 +13,5 @@ icehandnote-core = { path = "../core" }
 icehandnote-db = { path = "../db" }
 sqlx.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

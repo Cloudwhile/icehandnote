@@ -152,10 +152,7 @@ fn is_safe_svg(bytes: &[u8]) -> bool {
             return false;
         }
     }
-    if has_dangerous_svg_attr_or_css(&lower) {
-        return false;
-    }
-    true
+    !has_dangerous_svg_attr_or_css(&lower)
 }
 
 pub fn detect_safe_image_format(

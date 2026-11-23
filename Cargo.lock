@@ -1046,7 +1046,6 @@ dependencies = [
  "icehandnote-db",
  "sqlx",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "uuid",
 ]
@@ -1068,7 +1067,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
  "toml",
  "uuid",
 ]
@@ -1086,7 +1084,6 @@ dependencies = [
  "sqlx",
  "tokio",
  "toml",
- "tracing",
  "uuid",
 ]
 
