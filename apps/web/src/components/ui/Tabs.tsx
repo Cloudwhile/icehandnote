@@ -164,7 +164,7 @@ export function SegmentedControl<T extends string | number>({
     <div
       role="group"
       aria-label={ariaLabel}
-      className={`inline-flex items-center gap-0.5 p-0.5 ${
+      className={`inline-flex items-center gap-0.5 p-0.5 max-w-full overflow-x-auto ink-thin-scrollbar ${
         isXs ? 'rounded-lg' : 'rounded-xl'
       } border ${containerBg} ${className}`.trim()}
     >
@@ -177,8 +177,10 @@ export function SegmentedControl<T extends string | number>({
             aria-pressed={active}
             onClick={() => onChange(opt.value)}
             className={`${
-              isXs ? 'min-h-6 px-2 py-0.5 rounded-md' : 'min-h-7 px-2.5 py-1 rounded-lg'
-            } text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
+              isXs
+                ? 'min-h-8 sm:min-h-6 px-2.5 sm:px-2 py-0.5 rounded-md'
+                : 'min-h-7 px-2.5 py-1 rounded-lg'
+            } text-xs inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
               active
                 ? surface === 'sheet'
                   ? 'font-semibold bg-action-subtle text-link-ink'

@@ -565,7 +565,7 @@ export function OAuthSettingsTab({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2.5 min-w-0 max-w-full">
                     <SwitchRow
                       label={st.oauthEnabledLabel}
                       checked={provider.enabled && complete}

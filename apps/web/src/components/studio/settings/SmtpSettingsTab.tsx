@@ -99,7 +99,7 @@ function neutralizeEmailPreviewLinks(rawBodyHtml: string): string {
 
 function buildSandboxedEmailDoc(bodyHtml: string): string {
   const safeBody = neutralizeEmailPreviewLinks(bodyHtml);
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;padding:0;background-color:#f4efe3;background-image:radial-gradient(#cfc5b0 1px,transparent 1px);background-size:18px 18px;overflow:hidden;}a,[role="link"]{color:#4c1d95;}</style></head><body>${safeBody}</body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;padding:0;background-color:#f4efe3;background-image:radial-gradient(#cfc5b0 1px,transparent 1px);background-size:18px 18px;overflow-x:auto;overflow-y:hidden;}a,[role="link"]{color:#4c1d95;}</style></head><body>${safeBody}</body></html>`;
 }
 
 export interface SmtpSettingsTabProps {
@@ -148,7 +148,10 @@ export function SmtpSettingsTab({
     'preview',
   );
   const [previewViewport, setPreviewViewport] = useState<'desktop' | 'mobile'>(
-    'desktop',
+    () =>
+      typeof window !== 'undefined' && window.innerWidth < 640
+        ? 'mobile'
+        : 'desktop',
   );
   const [previewLocale, setPreviewLocale] = useState<LocaleCode>(locale);
   const [templatePreview, setTemplatePreview] = useState<{
@@ -1183,7 +1186,7 @@ export function SmtpSettingsTab({
                   )}
                 </div>
 
-                <div className="p-4 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3.5">
+                <div className="p-3 sm:p-4 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3.5">
                   {activeTemplateKind !== 'email_change' && (
                     <div>
                       <label htmlFor="smtp-tpl-active-subj" className="ink-field-label">
@@ -1243,7 +1246,7 @@ export function SmtpSettingsTab({
                     <div className="space-y-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-xl bg-surface-sheet border border-border-subtle">
                         <div
-                          className="flex-1 text-xs text-ink-primary min-w-44 truncate"
+                          className="flex-1 text-xs text-ink-primary min-w-0 basis-44 truncate"
                           title={templatePreview?.subject || currentTplSubject || ''}
                         >
                           <span className="font-semibold text-ink-muted">
@@ -1254,7 +1257,7 @@ export function SmtpSettingsTab({
                           </span>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
                           <SegmentedControl<LocaleCode>
                             size="xs"
                             ariaLabel={extSettings.smtpPreviewLocaleLabel}
@@ -1280,7 +1283,7 @@ export function SmtpSettingsTab({
                         </div>
                       </div>
 
-                      <div className="rounded-xl bg-surface-sunken border border-border-subtle p-3 flex justify-center overflow-x-auto">
+                      <div className="rounded-xl bg-surface-sunken border border-border-subtle p-2 sm:p-3 overflow-x-auto ink-thin-scrollbar">
                         {loadingPreview && !templatePreview ? (
                           <div className="w-full h-60 flex items-center justify-center text-xs text-ink-muted">
                             {extSettings.smtpPreviewLoading}
@@ -1296,10 +1299,10 @@ export function SmtpSettingsTab({
                               templatePreview?.html ?? '',
                             )}
                             style={{ height: `${previewIframeHeight}px` }}
-                            className={`block rounded-xl border border-border-subtle overflow-hidden transition-[width] ${
+                            className={`block mx-auto rounded-xl border border-border-subtle overflow-hidden transition-[width] ${
                               previewViewport === 'mobile'
-                                ? 'w-[375px] max-w-full'
-                                : 'w-full max-w-[620px]'
+                                ? 'w-full max-w-[375px]'
+                                : 'w-full min-w-[560px] max-w-[620px]'
                             }`}
                           />
                         )}

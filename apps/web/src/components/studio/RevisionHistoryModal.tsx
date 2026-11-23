@@ -268,7 +268,7 @@ export function RevisionHistoryModal({
                         #{selectedRev.edit_seq} · sha256:{selectedRev.content_sha256.slice(0, 10)}
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
                       <UnderlineTabs
                         variant="segmented"
                         ariaLabel={c.historyTitle}
