@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../../../lib/api';
+import { api, getActiveStorageScopeKey } from '../../../lib/api';
 import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../../lib/email';
 import { EXT_COPY, getEnabledLocaleMetas } from '../../../lib/i18n';
 import type {
@@ -16,7 +16,13 @@ import type {
   MailProviderKind,
   SiteSettingsDto,
   SmtpSettingsDto,
+  SmtpStatusResponseDto,
 } from '../../../lib/types';
+import {
+  readViewCache,
+  scopedViewCacheKey,
+  writeViewCache,
+} from '../../../lib/viewCache';
 import { RadioCardGroup, SwitchRow } from '../../ui/FormControls';
 import { IconAlertCircle, IconCheck, IconShield } from '../../ui/Icons';
 import { InkSelect } from '../../ui/InkSelect';
@@ -120,18 +126,38 @@ export function SmtpSettingsTab({
   const extSettings = EXT_COPY[locale].settings;
   const toast = useToast();
 
-  const [loaded, setLoaded] = useState(false);
-  const [smtpDraft, setSmtpDraft] = useState<SmtpSettingsDto>(DEFAULT_SMTP_STATE);
-  const [savedBaseline, setSavedBaseline] =
-    useState<SmtpSettingsDto>(DEFAULT_SMTP_STATE);
-  const [hasPassword, setHasPassword] = useState(false);
-  const [passwordInput, setPasswordInput] = useState('');
-  const [hasCfToken, setHasCfToken] = useState(false);
-  const [cfTokenInput, setCfTokenInput] = useState('');
-  const [activeProvider, setActiveProvider] = useState<MailProviderKind | null>(
-    null,
+  const storageScope = getActiveStorageScopeKey();
+  const smtpCacheKey = scopedViewCacheKey(storageScope, 'studio:smtp:status');
+  const [cachedInitialStatus] = useState<SmtpStatusResponseDto | null>(() =>
+    readViewCache<SmtpStatusResponseDto>(smtpCacheKey),
   );
-  const [guardStatus, setGuardStatus] = useState<MailGuardStatusDto | null>(null);
+
+  const [loaded, setLoaded] = useState(() => Boolean(cachedInitialStatus));
+  const [smtpDraft, setSmtpDraft] = useState<SmtpSettingsDto>(() =>
+    cachedInitialStatus
+      ? { ...DEFAULT_SMTP_STATE, ...cachedInitialStatus.settings }
+      : DEFAULT_SMTP_STATE,
+  );
+  const [savedBaseline, setSavedBaseline] = useState<SmtpSettingsDto>(() =>
+    cachedInitialStatus
+      ? { ...DEFAULT_SMTP_STATE, ...cachedInitialStatus.settings }
+      : DEFAULT_SMTP_STATE,
+  );
+  const [hasPassword, setHasPassword] = useState(
+    () => cachedInitialStatus?.has_password ?? false,
+  );
+  const [passwordInput, setPasswordInput] = useState('');
+  const [hasCfToken, setHasCfToken] = useState(
+    () => cachedInitialStatus?.has_cloudflare_api_token ?? false,
+  );
+  const [cfTokenInput, setCfTokenInput] = useState('');
+  const [activeProvider, setActiveProvider] =
+    useState<MailProviderKind | null>(
+      () => cachedInitialStatus?.active_provider ?? null,
+    );
+  const [guardStatus, setGuardStatus] = useState<MailGuardStatusDto | null>(
+    () => cachedInitialStatus?.guard_status ?? null,
+  );
   const [savingSmtp, setSavingSmtp] = useState(false);
   const [testEmailAddr, setTestEmailAddr] = useState('');
   const [testingSmtp, setTestingSmtp] = useState(false);
@@ -140,6 +166,7 @@ export function SmtpSettingsTab({
   const savingRef = useRef(false);
   const testingRef = useRef(false);
   const guardActionRef = useRef(false);
+  const isDirtyRef = useRef(false);
 
   const [templatesOpen, setTemplatesOpen] = useState(true);
   const [activeTemplateKind, setActiveTemplateKind] =
@@ -154,17 +181,40 @@ export function SmtpSettingsTab({
         : 'desktop',
   );
   const [previewLocale, setPreviewLocale] = useState<LocaleCode>(locale);
+  const previewCacheKey = scopedViewCacheKey(
+    storageScope,
+    `studio:smtp:preview:${activeTemplateKind}:${previewLocale}`,
+  );
+  const previewHeightCacheKey = scopedViewCacheKey(
+    storageScope,
+    `studio:smtp:height:${previewViewport}`,
+  );
+  const previewHeightCacheKeyRef = useRef(previewHeightCacheKey);
+  previewHeightCacheKeyRef.current = previewHeightCacheKey;
+  const hasCompletedInitialPreviewRef = useRef(false);
+
   const [templatePreview, setTemplatePreview] = useState<{
     subject: string;
     html: string;
-  } | null>(null);
+  } | null>(() =>
+    readViewCache<{ subject: string; html: string }>(previewCacheKey),
+  );
   const [loadingPreview, setLoadingPreview] = useState(false);
 
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const previewResizeObserverRef = useRef<ResizeObserver | null>(null);
   const onDirtyAndSavingChangeRef = useRef(onDirtyAndSavingChange);
   onDirtyAndSavingChangeRef.current = onDirtyAndSavingChange;
-  const [previewIframeHeight, setPreviewIframeHeight] = useState<number>(480);
+  const [previewIframeHeight, setPreviewIframeHeight] = useState<number>(
+    () => readViewCache<number>(previewHeightCacheKey) ?? 480,
+  );
+
+  useEffect(() => {
+    const cachedHeight = readViewCache<number>(previewHeightCacheKey);
+    if (cachedHeight && cachedHeight > 40) {
+      setPreviewIframeHeight(cachedHeight);
+    }
+  }, [previewHeightCacheKey]);
 
   useEffect(() => {
     setPreviewLocale(locale);
@@ -177,22 +227,22 @@ export function SmtpSettingsTab({
   }, [enabledLocales, previewLocale]);
 
   const applyStatusResponse = useCallback(
-    (res: {
-      settings: SmtpSettingsDto;
-      has_password: boolean;
-      has_cloudflare_api_token: boolean;
-      active_provider: MailProviderKind | null;
-      guard_status: MailGuardStatusDto;
-    }) => {
+    (
+      res: SmtpStatusResponseDto,
+      options?: { preserveDirtyDraft?: boolean },
+    ) => {
+      writeViewCache(smtpCacheKey, res);
       const merged = { ...DEFAULT_SMTP_STATE, ...res.settings };
-      setSmtpDraft(merged);
+      if (!(options?.preserveDirtyDraft && isDirtyRef.current)) {
+        setSmtpDraft(merged);
+      }
       setSavedBaseline(merged);
       setHasPassword(res.has_password);
       setHasCfToken(res.has_cloudflare_api_token);
       setActiveProvider(res.active_provider);
       setGuardStatus(res.guard_status);
     },
-    [],
+    [smtpCacheKey],
   );
 
   useEffect(() => {
@@ -201,7 +251,7 @@ export function SmtpSettingsTab({
       .adminGetSmtp()
       .then((res) => {
         if (!active) return;
-        applyStatusResponse(res);
+        applyStatusResponse(res, { preserveDirtyDraft: true });
       })
       .catch(() => {})
       .finally(() => {
@@ -217,6 +267,7 @@ export function SmtpSettingsTab({
     (JSON.stringify(smtpDraft) !== JSON.stringify(savedBaseline) ||
       passwordInput.trim().length > 0 ||
       cfTokenInput.trim().length > 0);
+  isDirtyRef.current = isDirty;
 
   useEffect(() => {
     onDirtyAndSavingChangeRef.current(isDirty, savingSmtp);
@@ -430,7 +481,17 @@ export function SmtpSettingsTab({
       return;
     }
     let active = true;
-    setLoadingPreview(true);
+    const cachedPreview = readViewCache<{ subject: string; html: string }>(
+      previewCacheKey,
+    );
+    if (cachedPreview) {
+      setTemplatePreview(cachedPreview);
+      setLoadingPreview(false);
+    } else {
+      setLoadingPreview(true);
+    }
+    const delayMs =
+      !hasCompletedInitialPreviewRef.current || !cachedPreview ? 0 : 180;
     const timer = window.setTimeout(() => {
       void api
         .adminPreviewSmtpTemplate({
@@ -441,15 +502,18 @@ export function SmtpSettingsTab({
           email_footer_text: smtpDraft.email_footer_text,
         })
         .then((res) => {
-          if (active) setTemplatePreview(res);
+          if (!active) return;
+          hasCompletedInitialPreviewRef.current = true;
+          writeViewCache(previewCacheKey, res);
+          setTemplatePreview(res);
         })
         .catch(() => {
-          if (active) setTemplatePreview(null);
+          if (active && !cachedPreview) setTemplatePreview(null);
         })
         .finally(() => {
           if (active) setLoadingPreview(false);
         });
-    }, 180);
+    }, delayMs);
     return () => {
       active = false;
       window.clearTimeout(timer);
@@ -463,6 +527,7 @@ export function SmtpSettingsTab({
     currentTplHtml,
     smtpDraft.email_footer_text,
     previewLocale,
+    previewCacheKey,
     settings.logo_url,
     settings.site_name,
   ]);
@@ -495,6 +560,7 @@ export function SmtpSettingsTab({
           : Math.ceil(doc.body.scrollHeight);
         if (measured > 40) {
           setPreviewIframeHeight(measured);
+          writeViewCache(previewHeightCacheKeyRef.current, measured);
         }
       };
       syncHeight();
@@ -589,7 +655,7 @@ export function SmtpSettingsTab({
   return (
     <SettingsSectionCard title={extSettings.smtpGroup} trailing={headerTrailing}>
       {!loaded ? (
-        <div className="space-y-4" aria-busy="true">
+        <div className="space-y-4 ui-skeleton-delayed" aria-busy="true">
           <div className="h-9 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
           <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
           <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
@@ -1298,7 +1364,10 @@ export function SmtpSettingsTab({
                             srcDoc={buildSandboxedEmailDoc(
                               templatePreview?.html ?? '',
                             )}
-                            style={{ height: `${previewIframeHeight}px` }}
+                            style={{
+                              height: `${previewIframeHeight}px`,
+                              backgroundColor: '#f4efe3',
+                            }}
                             className={`block mx-auto rounded-xl border border-border-subtle overflow-hidden transition-[width] ${
                               previewViewport === 'mobile'
                                 ? 'w-full max-w-[375px]'

@@ -1,5 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  Link,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  useParams,
+} from 'react-router-dom';
 import { ChapterSidebarAndDrawer } from '../components/navigation/ChapterSidebarAndDrawer';
 import { CcLicenseCard } from '../components/notebook/CcLicenseCard';
 import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
@@ -33,6 +46,11 @@ import {
 } from '../lib/api';
 import { resolveLocalizedError } from '../lib/apiError';
 import { EXT_COPY, normalizeLocale, UI_COPY } from '../lib/i18n';
+import {
+  readViewCache,
+  scopedViewCacheKey,
+  writeViewCache,
+} from '../lib/viewCache';
 import { runLayoutTransition } from '../lib/motion';
 import {
   buildOptimisticHtmlFromMarkdown,
@@ -121,13 +139,33 @@ export function StepReaderPage({
   const { track = '', chapter = '', step = '' } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const navigationType = useNavigationType();
+  const scrollCacheKey = `scroll:${location.pathname}`;
+  const restoredScrollPathRef = useRef<string | null>(null);
+  const canPersistScrollRef = useRef(false);
   const copy = UI_COPY[locale];
   const extCopy = EXT_COPY[locale];
   const toast = useToast();
   const articleSheetRef = useRef<HTMLDivElement>(null);
 
-  const [detail, setDetail] = useState<StepDetailDto | null>(null);
-  const [allTracks, setAllTracks] = useState<TrackSummaryDto[]>([]);
+  const storageScope = getActiveStorageScopeKey();
+  const detailCacheKey = scopedViewCacheKey(
+    storageScope,
+    `step:${locale}:${track}:${chapter || '-'}:${step}`,
+  );
+  const siblingTracksCacheKey = scopedViewCacheKey(
+    storageScope,
+    `home:tracks:${locale}`,
+  );
+  const routeKey = `${locale}:${track}:${chapter || '-'}:${step}`;
+  const prevRouteKeyRef = useRef(routeKey);
+
+  const [detail, setDetail] = useState<StepDetailDto | null>(() =>
+    readViewCache<StepDetailDto>(detailCacheKey),
+  );
+  const [allTracks, setAllTracks] = useState<TrackSummaryDto[]>(
+    () => readViewCache<TrackSummaryDto[]>(siblingTracksCacheKey) ?? [],
+  );
   const [notFound, setNotFound] = useState(false);
   const [checkedTaskIds, setCheckedTaskIds] = useState<Set<string>>(new Set());
   const [marginNotes, setMarginNotes] = useState<UserMarginNoteDto[]>([]);
@@ -141,7 +179,7 @@ export function StepReaderPage({
       : false,
   );
   const [keyboardBottomInset, setKeyboardBottomInset] = useState(0);
-  const [likes, setLikes] = useState(0);
+  const [likes, setLikes] = useState(() => detail?.likes_count ?? 0);
   const [likedSession, setLikedSession] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const pendingToggleCountRef = useRef(0);
@@ -211,20 +249,42 @@ export function StepReaderPage({
   // Load all sibling series once per locale so the sidebar cleanly distinguishes series
   useEffect(() => {
     let active = true;
+    const cachedList = readViewCache<TrackSummaryDto[]>(siblingTracksCacheKey);
+    if (cachedList) {
+      setAllTracks(cachedList);
+    }
     void api
       .listTracks(locale)
       .then((list) => {
-        if (active) setAllTracks(list);
+        if (!active) return;
+        writeViewCache(siblingTracksCacheKey, list);
+        setAllTracks(list);
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [locale]);
+  }, [locale, siblingTracksCacheKey]);
 
   // Fetch article detail ONLY on route/locale changes (never on `#hash` changes)
   useEffect(() => {
     let active = true;
+    const isRouteNavigation = prevRouteKeyRef.current !== routeKey;
+    prevRouteKeyRef.current = routeKey;
+    let didScrollTop = false;
+    const shouldResetScrollTop =
+      isRouteNavigation && navigationType !== 'POP' && !window.location.hash;
+    const cachedDetail = readViewCache<StepDetailDto>(detailCacheKey);
+    if (cachedDetail) {
+      setDetail(cachedDetail);
+      setLikes(cachedDetail.likes_count);
+      if (shouldResetScrollTop) {
+        didScrollTop = true;
+        window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+      }
+    } else if (isRouteNavigation) {
+      setDetail(null);
+    }
     setNotFound(false);
 
     const req =
@@ -235,21 +295,76 @@ export function StepReaderPage({
     void req
       .then((stepData) => {
         if (!active) return;
+        writeViewCache(detailCacheKey, stepData);
         setDetail(stepData);
         setLikes(stepData.likes_count);
-        setLikedSession(false);
-        if (!window.location.hash) {
-          window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+        if (isRouteNavigation) {
+          setLikedSession(false);
+          if (!didScrollTop && shouldResetScrollTop) {
+            window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+          }
         }
       })
       .catch(() => {
-        if (active) setNotFound(true);
+        if (active && !cachedDetail) setNotFound(true);
       });
 
     return () => {
       active = false;
     };
-  }, [locale, track, chapter, step]);
+  }, [locale, track, chapter, step, detailCacheKey, routeKey, navigationType]);
+
+  // Restore saved scroll offset synchronously before paint on reload/back-forward navigation
+  useLayoutEffect(() => {
+    if (!detail) return;
+    if (restoredScrollPathRef.current === location.pathname) {
+      canPersistScrollRef.current = true;
+      return;
+    }
+    restoredScrollPathRef.current = location.pathname;
+    if (navigationType === 'POP' && !window.location.hash) {
+      const savedY = readViewCache<number>(scrollCacheKey);
+      if (typeof savedY === 'number' && savedY > 0) {
+        window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+        const rafId = window.requestAnimationFrame(() => {
+          if (window.scrollY === 0) {
+            window.scrollTo({
+              top: savedY,
+              behavior: 'instant' as ScrollBehavior,
+            });
+          }
+          canPersistScrollRef.current = true;
+        });
+        return () => window.cancelAnimationFrame(rafId);
+      }
+    }
+    canPersistScrollRef.current = true;
+  }, [detail, location.pathname, navigationType, scrollCacheKey]);
+
+  // Persist active route scroll offset into sessionStorage for SPA reloads
+  useEffect(() => {
+    let rafId = 0;
+    const saveScroll = () => {
+      if (!canPersistScrollRef.current) return;
+      writeViewCache(scrollCacheKey, Math.max(0, Math.round(window.scrollY)));
+    };
+    const onScroll = () => {
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        saveScroll();
+      });
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('pagehide', saveScroll);
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      saveScroll();
+      canPersistScrollRef.current = false;
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('pagehide', saveScroll);
+    };
+  }, [scrollCacheKey]);
 
   // Smooth/accurate `#hash` scrolling without refetching article detail
   useEffect(() => {
@@ -933,7 +1048,7 @@ export function StepReaderPage({
   if (!detail) {
     return (
       <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 py-12">
-        <div className="h-96 rounded-2xl bg-surface-sheet/50 border border-border-subtle motion-safe:animate-pulse" />
+        <div className="h-96 rounded-2xl bg-surface-sheet/50 border border-border-subtle motion-safe:animate-pulse ui-skeleton-delayed" />
       </main>
     );
   }

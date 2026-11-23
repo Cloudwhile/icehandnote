@@ -4,8 +4,8 @@
  * Avoids flashing default `'local'` / `'icehandnote'` fields before `adminGetStorage` resolves.
  */
 
-import { useEffect, useState } from 'react';
-import { api } from '../../../lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, getActiveStorageScopeKey } from '../../../lib/api';
 import { EXT_COPY, UI_COPY } from '../../../lib/i18n';
 import type {
   LocaleCode,
@@ -13,6 +13,11 @@ import type {
   PostgresSslMode,
   StorageStatusDto,
 } from '../../../lib/types';
+import {
+  readViewCache,
+  scopedViewCacheKey,
+  writeViewCache,
+} from '../../../lib/viewCache';
 import { RadioPillGroup, SwitchRow } from '../../ui/FormControls';
 import { IconCheck } from '../../ui/Icons';
 import { InkSelect } from '../../ui/InkSelect';
@@ -41,6 +46,20 @@ function normalizePgSslMode(raw: string | undefined): PostgresSslMode {
     default:
       return 'prefer';
   }
+}
+
+function extractPgFields(
+  stRes: StorageStatusDto,
+): PostgresConnectionFieldsDto {
+  return stRes.postgres
+    ? {
+        host: stRes.postgres.host || '127.0.0.1',
+        port: stRes.postgres.port || 5432,
+        database: stRes.postgres.database || 'icehandnote',
+        username: stRes.postgres.username || 'postgres',
+        ssl_mode: normalizePgSslMode(stRes.postgres.ssl_mode),
+      }
+    : DEFAULT_PG_FIELDS;
 }
 
 function safeDecodeUriPart(raw: string): string {
@@ -166,22 +185,62 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
   const extSettings = EXT_COPY[locale].settings;
   const toast = useToast();
 
-  const [loaded, setLoaded] = useState(false);
-  const [storageStatus, setStorageStatus] = useState<StorageStatusDto | null>(null);
-  const [storageMode, setStorageMode] = useState<'local' | 'postgres'>('local');
+  const storageCacheKey = scopedViewCacheKey(
+    getActiveStorageScopeKey(),
+    'studio:storage:status',
+  );
+  const [cachedInitialStorage] = useState<StorageStatusDto | null>(() =>
+    readViewCache<StorageStatusDto>(storageCacheKey),
+  );
+  const initialPgFields = cachedInitialStorage
+    ? extractPgFields(cachedInitialStorage)
+    : DEFAULT_PG_FIELDS;
+
+  const [loaded, setLoaded] = useState(() => Boolean(cachedInitialStorage));
+  const [storageStatus, setStorageStatus] = useState<StorageStatusDto | null>(
+    () => cachedInitialStorage,
+  );
+  const [storageMode, setStorageMode] = useState<'local' | 'postgres'>(
+    () => cachedInitialStorage?.active_backend ?? 'local',
+  );
   const [pgInputMode, setPgInputMode] = useState<'fields' | 'url'>('fields');
-  const [pgFields, setPgFields] =
-    useState<PostgresConnectionFieldsDto>(DEFAULT_PG_FIELDS);
+  const [pgFields, setPgFields] = useState<PostgresConnectionFieldsDto>(
+    () => initialPgFields,
+  );
   const [savedPgBaseline, setSavedPgBaseline] =
-    useState<PostgresConnectionFieldsDto>(DEFAULT_PG_FIELDS);
-  const [pgPortText, setPgPortText] = useState('5432');
-  const [hasSavedPgPassword, setHasSavedPgPassword] = useState(false);
+    useState<PostgresConnectionFieldsDto>(() => initialPgFields);
+  const [pgPortText, setPgPortText] = useState(() =>
+    String(initialPgFields.port),
+  );
+  const [hasSavedPgPassword, setHasSavedPgPassword] = useState(() =>
+    Boolean(cachedInitialStorage?.has_saved_password),
+  );
   const [pgPasswordInput, setPgPasswordInput] = useState('');
   const [clearPgPassword, setClearPgPassword] = useState(false);
-  const [postgresUrl, setPostgresUrl] = useState('');
+  const [postgresUrl, setPostgresUrl] = useState(
+    () => cachedInitialStorage?.database_url_masked || '',
+  );
   const [syncContent, setSyncContent] = useState(true);
   const [testingStorage, setTestingStorage] = useState(false);
   const [switchingStorage, setSwitchingStorage] = useState(false);
+  const isStorageDirtyRef = useRef(false);
+
+  const applyStorageResponse = useCallback(
+    (stRes: StorageStatusDto, options?: { preserveDirty?: boolean }) => {
+      writeViewCache(storageCacheKey, stRes);
+      const incomingPg = extractPgFields(stRes);
+      setStorageStatus(stRes);
+      setSavedPgBaseline(incomingPg);
+      setHasSavedPgPassword(Boolean(stRes.has_saved_password));
+      if (!(options?.preserveDirty && isStorageDirtyRef.current)) {
+        setStorageMode(stRes.active_backend);
+        setPostgresUrl(stRes.database_url_masked || '');
+        setPgFields(incomingPg);
+        setPgPortText(String(incomingPg.port));
+      }
+    },
+    [storageCacheKey],
+  );
 
   useEffect(() => {
     let active = true;
@@ -189,22 +248,7 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
       .adminGetStorage()
       .then((stRes) => {
         if (!active) return;
-        setStorageStatus(stRes);
-        setStorageMode(stRes.active_backend);
-        setPostgresUrl(stRes.database_url_masked || '');
-        const incomingPg: PostgresConnectionFieldsDto = stRes.postgres
-          ? {
-              host: stRes.postgres.host || '127.0.0.1',
-              port: stRes.postgres.port || 5432,
-              database: stRes.postgres.database || 'icehandnote',
-              username: stRes.postgres.username || 'postgres',
-              ssl_mode: normalizePgSslMode(stRes.postgres.ssl_mode),
-            }
-          : DEFAULT_PG_FIELDS;
-        setPgFields(incomingPg);
-        setSavedPgBaseline(incomingPg);
-        setPgPortText(String(incomingPg.port));
-        setHasSavedPgPassword(Boolean(stRes.has_saved_password));
+        applyStorageResponse(stRes, { preserveDirty: true });
       })
       .catch(() => {})
       .finally(() => {
@@ -213,7 +257,7 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyStorageResponse]);
 
   const parsedPgPortNum = Number.parseInt(pgPortText, 10);
   const effectivePgPort =
@@ -307,22 +351,7 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
               sync_content: syncContent,
             },
       );
-      setStorageStatus(res);
-      setStorageMode(res.active_backend);
-      setPostgresUrl(res.database_url_masked || '');
-      const updatedPg: PostgresConnectionFieldsDto = res.postgres
-        ? {
-            host: res.postgres.host || '127.0.0.1',
-            port: res.postgres.port || 5432,
-            database: res.postgres.database || 'icehandnote',
-            username: res.postgres.username || 'postgres',
-            ssl_mode: normalizePgSslMode(res.postgres.ssl_mode),
-          }
-        : DEFAULT_PG_FIELDS;
-      setPgFields(updatedPg);
-      setSavedPgBaseline(updatedPg);
-      setPgPortText(String(updatedPg.port));
-      setHasSavedPgPassword(Boolean(res.has_saved_password));
+      applyStorageResponse(res);
       setPgPasswordInput('');
       setClearPgPassword(false);
       toast.success(st.storageSwitchedMsg);
@@ -365,11 +394,12 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
             : postgresUrl.trim() !==
               (storageStatus.database_url_masked || '').trim()))),
   );
+  isStorageDirtyRef.current = isStorageDirty;
 
   return (
     <SettingsSectionCard>
       {!loaded ? (
-        <div className="space-y-3" aria-busy="true">
+        <div className="space-y-3 ui-skeleton-delayed" aria-busy="true">
           <div className="h-9 w-56 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
           <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
         </div>

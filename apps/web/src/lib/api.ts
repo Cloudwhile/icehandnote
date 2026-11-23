@@ -1,4 +1,5 @@
 import { ApiError, parseApiErrorResponse } from './apiError';
+import { clearUserViewCaches } from './viewCache';
 import type {
   AcceptInviteResponseDto,
   ArticleTaskChecksDto,
@@ -235,6 +236,7 @@ export function clearAuthSession(): void {
   void import('./offlineNoteQueue')
     .then((m) => m.clearUserOfflineNoteOps())
     .catch(() => {});
+  clearUserViewCaches();
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

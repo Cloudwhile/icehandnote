@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   BrowserRouter,
+  Navigate,
   Route,
   Routes,
   useLocation,
@@ -49,12 +50,22 @@ import type {
 import { HomePage } from './pages/HomePage';
 import { StepReaderPage } from './pages/StepReaderPage';
 
-const AuthFlowPage = lazy(() =>
-  import('./pages/AuthFlowPage').then((m) => ({ default: m.AuthFlowPage })),
-);
-const StudioPage = lazy(() =>
-  import('./pages/StudioPage').then((m) => ({ default: m.StudioPage })),
-);
+const loadAuthFlowPage = () =>
+  import('./pages/AuthFlowPage').then((m) => ({ default: m.AuthFlowPage }));
+const loadStudioPage = () =>
+  import('./pages/StudioPage').then((m) => ({ default: m.StudioPage }));
+
+const AuthFlowPage = lazy(loadAuthFlowPage);
+const StudioPage = lazy(loadStudioPage);
+
+if (typeof window !== 'undefined') {
+  const path = window.location.pathname;
+  if (/^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?studio(?:\/|$)/.test(path)) {
+    void loadStudioPage();
+  } else if (/^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?(?:login|register|auth)(?:\/|$)/.test(path)) {
+    void loadAuthFlowPage();
+  }
+}
 const UserProfileModal = lazy(() =>
   import('./components/auth/UserProfileModal').then((m) => ({
     default: m.UserProfileModal,
@@ -666,7 +677,7 @@ function LocaleShellInner({
         {!isKnownLocale ? (
           <NotFoundPage locale={locale} />
         ) : (
-          <Suspense fallback={<div className="flex-1" aria-busy="true" />}>
+          <Suspense fallback={<div className="flex-1 ui-skeleton-delayed" aria-busy="true" />}>
             <Routes>
               <Route
                 index
@@ -839,20 +850,18 @@ function LocaleShell() {
 function RootRedirect({ subpath = '' }: { subpath?: string }) {
   const navigate = useNavigate();
   const location = useLocation();
-  useEffect(() => {
-    let active = true;
-    const suffix = `${subpath}${location.search}${location.hash}`;
-    const initial = readInitialSiteSettings();
-    if (initial.ready) {
-      const target = resolvePreferredLocale(
+  const suffix = `${subpath}${location.search}${location.hash}`;
+  const initial = readInitialSiteSettings();
+  const syncTarget = initial.ready
+    ? `/${resolvePreferredLocale(
         initial.settings.enabled_locales,
         initial.settings.default_locale,
-      );
-      navigate(`/${target}${suffix}`, { replace: true });
-      return () => {
-        active = false;
-      };
-    }
+      )}${suffix}`
+    : null;
+
+  useEffect(() => {
+    if (syncTarget) return;
+    let active = true;
 
     fetch('/api/v1/settings')
       .then((r) => (r.ok ? r.json() : null))
@@ -880,7 +889,11 @@ function RootRedirect({ subpath = '' }: { subpath?: string }) {
     return () => {
       active = false;
     };
-  }, [location.hash, location.search, navigate, subpath]);
+  }, [navigate, suffix, syncTarget]);
+
+  if (syncTarget) {
+    return <Navigate to={syncTarget} replace />;
+  }
   return null;
 }
 

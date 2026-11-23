@@ -50,6 +50,11 @@ import {
 import { stripHtmlTags } from '../lib/sanitizer';
 import type { ResolvedTheme } from '../lib/theme';
 import {
+  readViewCache,
+  scopedViewCacheKey,
+  writeViewCache,
+} from '../lib/viewCache';
+import {
   getEffectiveOAuthProviders,
   type LocaleCode,
   type SiteSettingsDto,
@@ -177,8 +182,21 @@ export function StudioPage({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
 
-  const [tracks, setTracks] = useState<StudioTrackDto[]>([]);
-  const [usersList, setUsersList] = useState<UserProfileDto[]>([]);
+  const tracksCacheKey = user?.id
+    ? scopedViewCacheKey(`user:${user.id}`, `studio:tracks:${locale}`)
+    : null;
+  const usersCacheKey =
+    user?.id && user.role === 'admin'
+      ? scopedViewCacheKey(`user:${user.id}`, 'studio:users')
+      : null;
+  const hasSwitchedSectionRef = useRef(false);
+
+  const [tracks, setTracks] = useState<StudioTrackDto[]>(() =>
+    tracksCacheKey ? readViewCache<StudioTrackDto[]>(tracksCacheKey) ?? [] : [],
+  );
+  const [usersList, setUsersList] = useState<UserProfileDto[]>(() =>
+    usersCacheKey ? readViewCache<UserProfileDto[]>(usersCacheKey) ?? [] : [],
+  );
 
   // Quick new step modal (shared across Overview, Sidebar, Editor, and Catalog)
   const [creatingNewStep, setCreatingNewStep] = useState(false);
@@ -216,6 +234,7 @@ export function StudioPage({
 
   const handleSelectSettingsTab = useCallback(
     (tab: StudioSettingsTabId) => {
+      hasSwitchedSectionRef.current = true;
       setActiveSettingsTab(tab);
       scrollWorkspaceToTop();
     },
@@ -330,6 +349,9 @@ export function StudioPage({
     if (!canAuthor) return undefined;
     try {
       const list = await api.studioOverview(locale);
+      if (tracksCacheKey) {
+        writeViewCache(tracksCacheKey, list);
+      }
       setTracks(list);
       if (list.length > 0) {
         const curTrack = selTrackRef.current;
@@ -361,22 +383,51 @@ export function StudioPage({
     } catch {
       return undefined;
     }
-  }, [canAuthor, locale]);
+  }, [canAuthor, locale, tracksCacheKey]);
 
   useEffect(() => {
     if (!authResolved || !canAuthor) return;
+    if (tracksCacheKey) {
+      const cached = readViewCache<StudioTrackDto[]>(tracksCacheKey);
+      if (cached) setTracks(cached);
+    }
     void refreshOverview();
-  }, [authResolved, canAuthor, refreshOverview]);
+  }, [authResolved, canAuthor, refreshOverview, tracksCacheKey]);
 
   useEffect(() => {
     if (!authResolved || !isAdmin) return;
+    if (usersCacheKey) {
+      const cachedUsers = readViewCache<UserProfileDto[]>(usersCacheKey);
+      if (cachedUsers) setUsersList(cachedUsers);
+    }
     void api
       .adminListUsers()
-      .then(setUsersList)
+      .then((list) => {
+        if (usersCacheKey) {
+          writeViewCache(usersCacheKey, list);
+        }
+        setUsersList(list);
+      })
       .catch(() => {});
-  }, [authResolved, isAdmin, activeSection]);
+  }, [authResolved, isAdmin, activeSection, usersCacheKey]);
+
+  const handleUsersListChange = useCallback(
+    (
+      next: UserProfileDto[] | ((prev: UserProfileDto[]) => UserProfileDto[]),
+    ) => {
+      setUsersList((prev) => {
+        const resolved = typeof next === 'function' ? next(prev) : next;
+        if (usersCacheKey) {
+          writeViewCache(usersCacheKey, resolved);
+        }
+        return resolved;
+      });
+    },
+    [usersCacheKey],
+  );
 
   const handleSwitchSection = useCallback((next: StudioSectionId) => {
+    hasSwitchedSectionRef.current = true;
     runLayoutTransition(mainScrollRef.current, () => {
       setActiveSection(next);
     });
@@ -661,7 +712,12 @@ export function StudioPage({
       <main ref={mainScrollRef} className="studio-main">
         <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-16 space-y-6">
           {activeSection === 'overview' && (
-            <div key="studio-sec-overview" className="ui-panel-enter">
+            <div
+              key="studio-sec-overview"
+              className={
+                hasSwitchedSectionRef.current ? 'ui-panel-enter' : undefined
+              }
+            >
               <StudioOverviewPanel
                 locale={locale}
                 isAdmin={isAdmin}
@@ -680,7 +736,12 @@ export function StudioPage({
           )}
 
           {activeSection === 'editor' && (
-            <div key="studio-sec-editor" className="ui-panel-enter">
+            <div
+              key="studio-sec-editor"
+              className={
+                hasSwitchedSectionRef.current ? 'ui-panel-enter' : undefined
+              }
+            >
               <StudioEditorPanel
                 locale={locale}
                 theme={theme}
@@ -707,7 +768,12 @@ export function StudioPage({
           )}
 
           {activeSection === 'catalog' && (
-            <div key="studio-sec-catalog" className="ui-panel-enter">
+            <div
+              key="studio-sec-catalog"
+              className={
+                hasSwitchedSectionRef.current ? 'ui-panel-enter' : undefined
+              }
+            >
               <StudioCatalogPanel
                 locale={locale}
                 isAdmin={isAdmin}
@@ -723,12 +789,17 @@ export function StudioPage({
           )}
 
           {isAdmin && activeSection === 'users' && (
-            <div key="studio-sec-users" className="ui-panel-enter">
+            <div
+              key="studio-sec-users"
+              className={
+                hasSwitchedSectionRef.current ? 'ui-panel-enter' : undefined
+              }
+            >
               <StudioUsersPanel
                 locale={locale}
                 currentUser={user}
                 usersList={usersList}
-                onUsersListChange={setUsersList}
+                onUsersListChange={handleUsersListChange}
               />
             </div>
           )}
@@ -736,7 +807,9 @@ export function StudioPage({
           {isAdmin && activeSection === 'settings' && (
             <div
               key={`studio-sec-settings-${activeSettingsTab}`}
-              className="ui-panel-enter"
+              className={
+                hasSwitchedSectionRef.current ? 'ui-panel-enter' : undefined
+              }
             >
               <StudioSettingsPanel
                 locale={locale}

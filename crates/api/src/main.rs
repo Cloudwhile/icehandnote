@@ -885,7 +885,12 @@ async fn security_headers_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let is_immutable_asset = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && req.uri().path().starts_with("/assets/");
     let mut resp = next.run(req).await;
+    let status = resp.status();
     let h = resp.headers_mut();
     h.insert(
         HeaderName::from_static("x-content-type-options"),
@@ -907,6 +912,15 @@ async fn security_headers_middleware(
         h.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("frame-ancestors 'none'"),
+        );
+    }
+    if is_immutable_asset
+        && (status.is_success() || status == axum::http::StatusCode::NOT_MODIFIED)
+        && !h.contains_key(header::CACHE_CONTROL)
+    {
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
         );
     }
     resp
@@ -1068,6 +1082,128 @@ mod tests {
         assert!(out.contains("data-default-href=\"data:image/svg+xml,default\""));
         assert!(out.contains("window.__ICEHANDNOTE_SITE_SETTINGS__="));
         assert!(!out.contains("</script> & Notes"));
+    }
+
+    #[tokio::test]
+    async fn assets_receive_immutable_cache_control_while_html_and_api_do_not() {
+        let test_root = env::temp_dir().join(format!("icehandnote-cache-test-{}", Uuid::new_v4()));
+        let web_dir = test_root.join("web");
+        let assets_dir = web_dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(
+            web_dir.join("index.html"),
+            "<!DOCTYPE html><html><head><title></title><!-- ihn-bootstrap-slot --></head><body></body></html>",
+        )
+        .unwrap();
+        std::fs::write(assets_dir.join("index-abc123.js"), "console.log('ok');").unwrap();
+
+        let content_dir = resolve_content_dir(None);
+        let store_path = test_root.join("store.json");
+        let uploads_dir = test_root.join("uploads");
+        let secrets_path = test_root.join("secrets.json");
+        let repo = LocalSeedRepository::from_content_dir(&content_dir, store_path.clone()).unwrap();
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+
+        let app = build_router(state, CorsLayer::permissive(), Some(web_dir));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let asset_resp = client
+            .get(format!("{base}/assets/index-abc123.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(asset_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            asset_resp
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
+
+        let missing_asset_resp = client
+            .get(format!("{base}/assets/missing-chunk.js"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing_asset_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            missing_asset_resp
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+
+        let html_resp = client.get(format!("{base}/zh-CN")).send().await.unwrap();
+        assert_eq!(html_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            html_resp
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+
+        let health_resp = client
+            .get(format!("{base}/api/v1/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health_resp.status(), reqwest::StatusCode::OK);
+        let health_cc = health_resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(!health_cc.contains("immutable"), "health_cc={health_cc}");
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(&test_root);
     }
 
     #[test]

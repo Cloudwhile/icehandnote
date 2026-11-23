@@ -55,6 +55,14 @@
         if (plainTitle) document.title = plainTitle;
       }
 
+      var pathSeg = (location.pathname.split("/")[1] || "").trim();
+      var supportedLangs = { "zh-CN": 1, "zh-TW": 1, en: 1, ja: 1 };
+      if (supportedLangs[pathSeg]) {
+        document.documentElement.lang = pathSeg;
+      } else if (bootSettings && supportedLangs[bootSettings.default_locale]) {
+        document.documentElement.lang = bootSettings.default_locale;
+      }
+
       var iconEl = document.querySelector('link[rel="icon"]');
       if (iconEl && bootSettings) {
         var rawLogo = typeof bootSettings.logo_url === "string" ? bootSettings.logo_url.trim() : "";
@@ -71,15 +79,53 @@
       }
     } catch (_) {}
   </script>
+  <style id="ihn-critical-canvas">
+    :root {
+      color-scheme: light dark;
+      --ihn-boot-bg: #efeadd;
+      --ihn-boot-ink: #1f1411;
+      --ihn-boot-dot: rgba(31, 20, 17, 0.13);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --ihn-boot-bg: #11121f;
+        --ihn-boot-ink: #f6fbfd;
+        --ihn-boot-dot: rgba(246, 251, 253, 0.085);
+      }
+    }
+    :root:has(> head > meta[name="color-scheme"][content="light"]) {
+      color-scheme: light;
+      --ihn-boot-bg: #efeadd;
+      --ihn-boot-ink: #1f1411;
+      --ihn-boot-dot: rgba(31, 20, 17, 0.13);
+    }
+    :root:has(> head > meta[name="color-scheme"][content="dark"]) {
+      color-scheme: dark;
+      --ihn-boot-bg: #11121f;
+      --ihn-boot-ink: #f6fbfd;
+      --ihn-boot-dot: rgba(246, 251, 253, 0.085);
+    }
+    html,
+    body {
+      margin: 0;
+      min-height: 100svh;
+      background-color: var(--ihn-boot-bg);
+      color: var(--ihn-boot-ink);
+    }
+    body {
+      background-image: radial-gradient(var(--ihn-boot-dot) 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+  </style>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/lxgwwenkaigbscreen.css" media="print" onload="this.media='all'" />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Noto+Sans+JP:wght@400;600;700&family=Noto+Sans+SC:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" media="print" onload="this.media='all'" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" media="print" onload="this.media='all'" />
   <noscript>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='8' fill='%23fffffa' stroke='%231f1411' stroke-width='2.5'/%3E%3Cg stroke='%23006bb4' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M16 7v18M7 16h18M9.6 9.6l12.8 12.8M22.4 9.6 9.6 22.4'/%3E%3C/g%3E%3Ccircle cx='16' cy='16' r='3' fill='%236018f0'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/lxgwwenkaigbscreen.css" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Noto+Sans+JP:wght@400;600;700&family=Noto+Sans+SC:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=JetBrains+Mono:wght@400;600&family=Klee+One:wght@600&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" />
   </noscript>
 </head>
 <body>

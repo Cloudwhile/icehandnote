@@ -23,9 +23,18 @@ import {
   PixelStarStampSticker,
 } from '../components/notebook/PixelStickers';
 import { IconSnowflake } from '../components/ui/Icons';
-import { api, runDirectionalTransition } from '../lib/api';
+import {
+  api,
+  getActiveStorageScopeKey,
+  runDirectionalTransition,
+} from '../lib/api';
 import { UI_COPY } from '../lib/i18n';
 import { SafeHtml } from '../lib/sanitizer';
+import {
+  readViewCache,
+  scopedViewCacheKey,
+  writeViewCache,
+} from '../lib/viewCache';
 import type {
   LocaleCode,
   SiteSettingsDto,
@@ -68,23 +77,38 @@ export function HomePage({
 }: HomePageProps) {
   const copy = UI_COPY[locale];
   const navigate = useNavigate();
-  const [tracks, setTracks] = useState<TrackSummaryDto[]>([]);
-  const [loading, setLoading] = useState(true);
+  const tracksCacheKey = scopedViewCacheKey(
+    getActiveStorageScopeKey(),
+    `home:tracks:${locale}`,
+  );
+  const [tracks, setTracks] = useState<TrackSummaryDto[]>(
+    () => readViewCache<TrackSummaryDto[]>(tracksCacheKey) ?? [],
+  );
+  const [loading, setLoading] = useState(
+    () => readViewCache<TrackSummaryDto[]>(tracksCacheKey) === null,
+  );
   const [loadError, setLoadError] = useState(false);
 
   const loadData = useCallback(() => {
     let active = true;
-    setLoading(true);
+    const cached = readViewCache<TrackSummaryDto[]>(tracksCacheKey);
+    if (cached) {
+      setTracks(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setLoadError(false);
 
     void api
       .listTracks(locale)
       .then((tr) => {
         if (!active) return;
+        writeViewCache(tracksCacheKey, tr);
         setTracks(tr);
       })
       .catch(() => {
-        if (active) setLoadError(true);
+        if (active && !cached) setLoadError(true);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -93,7 +117,7 @@ export function HomePage({
     return () => {
       active = false;
     };
-  }, [locale]);
+  }, [locale, tracksCacheKey]);
 
   useEffect(() => loadData(), [loadData]);
 
@@ -256,7 +280,7 @@ export function HomePage({
         </h2>
 
         {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6" aria-busy="true">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 ui-skeleton-delayed" aria-busy="true">
             {[0, 1, 2].map((n) => (
               <div
                 key={n}
