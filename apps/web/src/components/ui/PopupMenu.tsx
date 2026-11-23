@@ -34,12 +34,6 @@ function supportsInvokers(): boolean {
   );
 }
 
-function supportsFocusgroup(): boolean {
-  return (
-    typeof window !== 'undefined' && 'focusGroup' in HTMLElement.prototype
-  );
-}
-
 function supportsAnchorArea(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -165,8 +159,7 @@ export function PopupMenu({
     const group = groupRef.current;
     if (!group) return;
 
-    const nativeFg = variant === 'menu' && supportsFocusgroup();
-    if (variant === 'menu' && !nativeFg) {
+    if (variant === 'menu') {
       group.setAttribute('role', 'menu');
       group.querySelectorAll('button:not([role]), a:not([role])').forEach((el) => {
         el.setAttribute('role', 'menuitem');
@@ -186,9 +179,6 @@ export function PopupMenu({
         return;
       }
       if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-      if (nativeFg && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-        return;
-      }
 
       const items = getEnabledItems();
       if (items.length === 0) return;
@@ -308,7 +298,7 @@ export function PopupMenu({
         {triggerLabel}
         {showChevron && (
           <IconChevronDown
-            className={`w-3.5 h-3.5 text-ink-muted transition-transform ${
+            className={`w-3.5 h-3.5 text-ink-muted motion-safe:transition-transform ${
               open ? 'rotate-180' : ''
             }`}
           />

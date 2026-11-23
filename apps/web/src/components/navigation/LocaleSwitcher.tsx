@@ -74,7 +74,7 @@ export function LocaleSwitcher({
         <div
           role="group"
           aria-label={copy.navLanguageAria}
-          className="grid grid-cols-4 gap-1 rounded-xl p-1 bg-surface-raised border border-border-subtle"
+          className="grid grid-cols-[repeat(auto-fit,minmax(4rem,1fr))] gap-1 rounded-xl p-1 bg-surface-raised border border-border-subtle"
         >
           {localesToRender.map((item) => {
             const active = localePref === item.code;

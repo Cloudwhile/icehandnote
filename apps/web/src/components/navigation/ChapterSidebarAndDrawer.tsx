@@ -212,7 +212,9 @@ export function ChapterSidebarAndDrawer({
             {copy.otherSeriesHeading}
           </div>
           <ul className="list-none m-0 p-0 space-y-1">
-            {otherSeries.map((series) => {
+            {otherSeries
+              .filter((series) => Boolean(series.first_step_slug))
+              .map((series) => {
               const idx = Math.max(
                 0,
                 allTracks.findIndex((t) => t.slug === series.slug),
@@ -309,7 +311,7 @@ export function ChapterSidebarAndDrawer({
       {toc.length > 0 && (
         <div
           ref={tocContainerRef}
-          className="lg:hidden fixed end-4 bottom-5 z-40"
+          className="lg:hidden fixed end-4 bottom-5 z-20"
         >
           <button
             ref={tocTriggerRef}
@@ -341,7 +343,7 @@ export function ChapterSidebarAndDrawer({
                     setTocOpen(false);
                     tocTriggerRef.current?.focus();
                   }}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer"
+                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer ink-icon-target"
                 >
                   <IconClose className="w-3.5 h-3.5" />
                 </button>

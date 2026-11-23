@@ -5,7 +5,10 @@ import { CcLicenseCard } from '../components/notebook/CcLicenseCard';
 import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
 import { NotebookAlert } from '../components/notebook/NotebookAlert';
 import { NotebookBlockRenderer } from '../components/notebook/NotebookBlockRenderer';
-import type { MarginNoteEditPatch } from '../components/notebook/MarginNoteLayer';
+import {
+  MarginNoteEditorForm,
+  type MarginNoteEditPatch,
+} from '../components/notebook/MarginNoteLayer';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
 import {
   PixelCatBookmarkSticker,
@@ -13,16 +16,33 @@ import {
   PixelPaperPlaneSticker,
   PixelStarStampSticker,
 } from '../components/notebook/PixelStickers';
-import { IconCheck, IconHeart, IconHome, IconMenu } from '../components/ui/Icons';
+import { IconCheck, IconHeart, IconHome, IconMenu, IconPen } from '../components/ui/Icons';
 import { useToast } from '../components/ui/ToastProvider';
 import { UserAvatar } from '../components/ui/UserAvatar';
 import {
   buildBlockAnnotationTarget,
   buildNoteEtag,
+  captureSelectionWithinContainer,
+  type SelectionAnchorDraft,
 } from '../lib/annotationAnchor';
-import { api, runDirectionalTransition } from '../lib/api';
+import {
+  api,
+  getActiveStorageScopeKey,
+  isLikelyOfflineNetworkError,
+  runDirectionalTransition,
+} from '../lib/api';
+import { resolveLocalizedError } from '../lib/apiError';
 import { EXT_COPY, normalizeLocale, UI_COPY } from '../lib/i18n';
 import { runLayoutTransition } from '../lib/motion';
+import {
+  buildOptimisticHtmlFromMarkdown,
+  enqueueOfflineCreateNote,
+  enqueueOfflineDeleteNote,
+  enqueueOfflineUpdateNote,
+  flushOfflineNoteQueue,
+  isOfflineTempNoteId,
+  mergeOfflineQueueIntoNotes,
+} from '../lib/offlineNoteQueue';
 import { SafeHtml, stripHtmlTags } from '../lib/sanitizer';
 import { writeCachedRouteTitle } from '../lib/siteSettings';
 import type { ResolvedTheme } from '../lib/theme';
@@ -40,21 +60,26 @@ interface StepReaderPageProps {
   theme: ResolvedTheme;
   siteSettings: SiteSettingsDto;
   settingsReady?: boolean;
+  authScopeKey?: string;
   onChangeLocale: (next: LocaleCode) => void;
 }
 
-function taskChecksStorageKey(stepId: string): string {
-  return `icehandnote_task_checks_${stepId}`;
+function taskChecksStorageKey(scopeKey: string, stepId: string): string {
+  return `icehandnote_task_checks::${scopeKey}::${stepId}`;
 }
 
 function readLocalTaskChecks(
+  scopeKey: string,
   stepId: string,
   defaultCheckedIds: string[],
 ): { ids: Set<string>; hasRecord: boolean } {
   try {
     const raw =
-      localStorage.getItem(taskChecksStorageKey(stepId)) ??
-      localStorage.getItem(`icetowne_task_checks_${stepId}`);
+      localStorage.getItem(taskChecksStorageKey(scopeKey, stepId)) ??
+      (scopeKey.startsWith('anon:')
+        ? localStorage.getItem(`icehandnote_task_checks_${stepId}`) ??
+          localStorage.getItem(`icetowne_task_checks_${stepId}`)
+        : null);
     if (raw) {
       const parsed = JSON.parse(raw) as { ids?: unknown };
       if (Array.isArray(parsed.ids)) {
@@ -70,10 +95,14 @@ function readLocalTaskChecks(
   return { ids: new Set(defaultCheckedIds), hasRecord: false };
 }
 
-function writeLocalTaskChecks(stepId: string, ids: Set<string>): void {
+function writeLocalTaskChecks(
+  scopeKey: string,
+  stepId: string,
+  ids: Set<string>,
+): void {
   try {
     localStorage.setItem(
-      taskChecksStorageKey(stepId),
+      taskChecksStorageKey(scopeKey, stepId),
       JSON.stringify({ ids: Array.from(ids) }),
     );
   } catch {
@@ -86,6 +115,7 @@ export function StepReaderPage({
   theme,
   siteSettings,
   settingsReady = true,
+  authScopeKey = 'anon',
   onChangeLocale,
 }: StepReaderPageProps) {
   const { track = '', chapter = '', step = '' } = useParams();
@@ -101,6 +131,8 @@ export function StepReaderPage({
   const [notFound, setNotFound] = useState(false);
   const [checkedTaskIds, setCheckedTaskIds] = useState<Set<string>>(new Set());
   const [marginNotes, setMarginNotes] = useState<UserMarginNoteDto[]>([]);
+  const [selectionDraft, setSelectionDraft] = useState<SelectionAnchorDraft | null>(null);
+  const [selectionComposing, setSelectionComposing] = useState(false);
   const [likes, setLikes] = useState(0);
   const [likedSession, setLikedSession] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
@@ -182,6 +214,7 @@ export function StepReaderPage({
     };
   }, [locale]);
 
+  // Fetch article detail ONLY on route/locale changes (never on `#hash` changes)
   useEffect(() => {
     let active = true;
     setNotFound(false);
@@ -192,48 +225,13 @@ export function StepReaderPage({
         : api.getStepDetail(locale, track, chapter, step);
 
     void req
-      .then(async (stepData) => {
+      .then((stepData) => {
         if (!active) return;
         setDetail(stepData);
         setLikes(stepData.likes_count);
         setLikedSession(false);
-
-        const defaultCheckedIds = stepData.blocks.flatMap((b) => {
-          if (b.type === 'heading' && b.is_task && b.default_checked) {
-            return [b.block_id];
-          }
-          if (b.type === 'steps') {
-            return b.items.filter((it) => it.default_checked).map((it) => it.item_id);
-          }
-          return [];
-        });
-        const local = readLocalTaskChecks(stepData.step_id, defaultCheckedIds);
-        setCheckedTaskIds(local.ids);
-
-        // Preserve `#hash` anchor navigation instead of forcing scroll to top
-        if (location.hash) {
-          requestAnimationFrame(() => {
-            const targetId = decodeURIComponent(location.hash.slice(1));
-            document.getElementById(targetId)?.scrollIntoView();
-          });
-        } else {
+        if (!window.location.hash) {
           window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
-        }
-
-        const [notes, serverChecks] = await Promise.all([
-          siteSettings.enable_margin_notes
-            ? api.listMarginNotes(stepData.step_id, locale).catch(() => [])
-            : Promise.resolve([]),
-          siteSettings.enable_progress_tracking
-            ? api.getTaskChecks(stepData.step_id).catch(() => null)
-            : Promise.resolve(null),
-        ]);
-        if (!active) return;
-        setMarginNotes(notes);
-        if (serverChecks && serverChecks.checked_item_ids.length > 0) {
-          const synced = new Set(serverChecks.checked_item_ids);
-          setCheckedTaskIds(synced);
-          writeLocalTaskChecks(stepData.step_id, synced);
         }
       })
       .catch(() => {
@@ -243,12 +241,71 @@ export function StepReaderPage({
     return () => {
       active = false;
     };
+  }, [locale, track, chapter, step]);
+
+  // Smooth/accurate `#hash` scrolling without refetching article detail
+  useEffect(() => {
+    if (!detail?.step_id || !location.hash) return;
+    const raf = window.requestAnimationFrame(() => {
+      try {
+        const targetId = decodeURIComponent(location.hash.slice(1));
+        if (targetId) {
+          document.getElementById(targetId)?.scrollIntoView();
+        }
+      } catch {
+        // Ignore malformed percent-encoding in URL hash
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [detail?.step_id, location.hash]);
+
+  // Load/reload user-isolated margin notes & task checks whenever article or auth identity changes
+  useEffect(() => {
+    if (!detail) return;
+    let active = true;
+    const stepId = detail.step_id;
+    const scopeKey = getActiveStorageScopeKey();
+    const defaultCheckedIds = detail.blocks.flatMap((b) => {
+      if (b.type === 'heading' && b.is_task && b.default_checked) {
+        return [b.block_id];
+      }
+      if (b.type === 'steps') {
+        return b.items.filter((it) => it.default_checked).map((it) => it.item_id);
+      }
+      return [];
+    });
+
+    const local = readLocalTaskChecks(scopeKey, stepId, defaultCheckedIds);
+    setCheckedTaskIds(local.ids);
+    setMarginNotes([]);
+
+    void Promise.all([
+      siteSettings.enable_margin_notes
+        ? api.listMarginNotes(stepId, locale).catch(() => [])
+        : Promise.resolve([]),
+      siteSettings.enable_progress_tracking
+        ? api.getTaskChecks(stepId).catch(() => null)
+        : Promise.resolve(null),
+    ]).then(async ([notes, serverChecks]) => {
+      const mergedNotes = siteSettings.enable_margin_notes
+        ? await mergeOfflineQueueIntoNotes(stepId, locale, notes, scopeKey)
+        : [];
+      if (!active) return;
+      setMarginNotes(mergedNotes);
+      if (serverChecks !== null) {
+        const synced = new Set(serverChecks.checked_item_ids);
+        setCheckedTaskIds(synced);
+        writeLocalTaskChecks(scopeKey, stepId, synced);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
   }, [
+    detail,
     locale,
-    track,
-    chapter,
-    step,
-    location.hash,
+    authScopeKey,
     siteSettings.enable_margin_notes,
     siteSettings.enable_progress_tracking,
   ]);
@@ -257,26 +314,144 @@ export function StepReaderPage({
   useEffect(() => {
     if (!detail?.step_id || !siteSettings.enable_margin_notes) return;
     const stepId = detail.step_id;
+    const scopeKey = getActiveStorageScopeKey();
     const onNotesChanged = () => {
       void api
         .listMarginNotes(stepId, locale)
-        .then((notes) => setMarginNotes(notes))
+        .then((notes) => mergeOfflineQueueIntoNotes(stepId, locale, notes, scopeKey))
+        .then((merged) => setMarginNotes(merged))
         .catch(() => {});
     };
     window.addEventListener('ihn:notes-changed', onNotesChanged);
     return () => window.removeEventListener('ihn:notes-changed', onNotesChanged);
-  }, [detail?.step_id, locale, siteSettings.enable_margin_notes]);
+  }, [detail?.step_id, locale, authScopeKey, siteSettings.enable_margin_notes]);
+
+  // Auto-flush IndexedDB offline note queue when network reconnects or article opens online
+  useEffect(() => {
+    if (!detail?.step_id || !siteSettings.enable_margin_notes) return;
+    const stepId = detail.step_id;
+    const scopeKey = getActiveStorageScopeKey();
+    let active = true;
+
+    const syncOfflineQueue = async () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const result = await flushOfflineNoteQueue(api, scopeKey);
+      if (!active) return;
+      if (result.synced > 0) {
+        toast.success(extCopy.notes.offlineSyncedToast(result.synced));
+      }
+      if (result.conflicts > 0 || result.dropped > 0) {
+        toast.warning(resolveLocalizedError('CONFLICT', locale));
+      }
+      if (result.synced > 0 || result.dropped > 0) {
+        const latest = await api.listMarginNotes(stepId, locale).catch(() => null);
+        if (active && latest) {
+          const merged = await mergeOfflineQueueIntoNotes(stepId, locale, latest, scopeKey);
+          if (active) setMarginNotes(merged);
+        }
+      }
+    };
+
+    void syncOfflineQueue();
+    const onOnline = () => {
+      void syncOfflineQueue();
+    };
+    window.addEventListener('online', onOnline);
+    return () => {
+      active = false;
+      window.removeEventListener('online', onOnline);
+    };
+  }, [
+    detail?.step_id,
+    locale,
+    authScopeKey,
+    siteSettings.enable_margin_notes,
+    extCopy.notes,
+    toast,
+  ]);
+
+  // Capture passage text selections for semantic `<mark>` highlight & annotation popover
+  useEffect(() => {
+    if (!detail?.step_id || !siteSettings.enable_margin_notes) {
+      setSelectionDraft(null);
+      setSelectionComposing(false);
+      return;
+    }
+
+    const handleSelectionCheck = (e: Event) => {
+      const target = e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-selection-popover="true"]')
+      ) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        const container = articleSheetRef.current;
+        if (!container) return;
+        const captured = captureSelectionWithinContainer(
+          container,
+          detail.step_id,
+          locale,
+          detail.synced_revision,
+        );
+        if (captured) {
+          setSelectionDraft(captured);
+          setSelectionComposing(false);
+        } else {
+          setSelectionDraft(null);
+          setSelectionComposing(false);
+        }
+      });
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectionDraft(null);
+        setSelectionComposing(false);
+      }
+    };
+
+    const handleViewportChange = () => {
+      setSelectionDraft((prev) => {
+        if (!prev) return null;
+        return selectionComposing ? prev : null;
+      });
+    };
+
+    document.addEventListener('mouseup', handleSelectionCheck);
+    document.addEventListener('touchend', handleSelectionCheck);
+    document.addEventListener('keyup', handleSelectionCheck);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleViewportChange, { passive: true });
+    window.addEventListener('resize', handleViewportChange, { passive: true });
+    return () => {
+      document.removeEventListener('mouseup', handleSelectionCheck);
+      document.removeEventListener('touchend', handleSelectionCheck);
+      document.removeEventListener('keyup', handleSelectionCheck);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleViewportChange);
+      window.removeEventListener('resize', handleViewportChange);
+    };
+  }, [
+    detail?.step_id,
+    detail?.synced_revision,
+    locale,
+    selectionComposing,
+    siteSettings.enable_margin_notes,
+  ]);
 
   const handleToggleTaskCheck = useCallback(
     (itemId: string, checked: boolean) => {
       if (!detail) return;
       const stepId = detail.step_id;
+      const scopeKey = getActiveStorageScopeKey();
 
       setCheckedTaskIds((prev) => {
         const next = new Set(prev);
         if (checked) next.add(itemId);
         else next.delete(itemId);
-        writeLocalTaskChecks(stepId, next);
+        writeLocalTaskChecks(scopeKey, stepId, next);
         return next;
       });
 
@@ -288,7 +463,7 @@ export function StepReaderPage({
           if (pendingToggleCountRef.current <= 1) {
             const synced = new Set(res.checked_item_ids);
             setCheckedTaskIds(synced);
-            writeLocalTaskChecks(stepId, synced);
+            writeLocalTaskChecks(scopeKey, stepId, synced);
           }
         })
         .catch(() => {
@@ -305,12 +480,13 @@ export function StepReaderPage({
     (itemIds: string[]) => {
       if (!detail || itemIds.length === 0) return;
       const stepId = detail.step_id;
+      const scopeKey = getActiveStorageScopeKey();
       const toUncheck = itemIds.filter((id) => checkedTaskIds.has(id));
 
       setCheckedTaskIds((prev) => {
         const next = new Set(prev);
         for (const id of itemIds) next.delete(id);
-        writeLocalTaskChecks(stepId, next);
+        writeLocalTaskChecks(scopeKey, stepId, next);
         return next;
       });
 
@@ -336,49 +512,87 @@ export function StepReaderPage({
   const handleAddNote = useCallback(
     async (blockId: string, patch: MarginNoteEditPatch) => {
       if (!detail) return;
-      try {
-        const hostBlock = detail.blocks.find((b) => b.block_id === blockId);
-        const target = hostBlock
+      const hostBlock = detail.blocks.find((b) => b.block_id === blockId);
+      const target =
+        patch.target ??
+        (hostBlock
           ? buildBlockAnnotationTarget(
               detail.step_id,
               locale,
               detail.synced_revision,
               hostBlock,
             )
-          : undefined;
-        const created = await api.createMarginNote({
-          step_id: detail.step_id,
-          locale_code: locale,
-          block_anchor_id: blockId,
-          note_color: patch.note_color,
-          tone: patch.tone,
-          style: patch.style,
-          tag: patch.tag,
-          target,
-          content: patch.content,
-        });
+          : undefined);
+      const payload = {
+        step_id: detail.step_id,
+        locale_code: locale,
+        block_anchor_id: blockId,
+        note_color: patch.note_color,
+        tone: patch.tone,
+        style: patch.style,
+        tag: patch.tag,
+        motivation: patch.motivation,
+        target,
+        content: patch.content,
+      };
+      try {
+        const created = await api.createMarginNote(payload);
         runLayoutTransition(articleSheetRef.current, () => {
           setMarginNotes((prev) => [...prev, created]);
         });
       } catch (err) {
+        if (isLikelyOfflineNetworkError(err)) {
+          try {
+            const optimistic = await enqueueOfflineCreateNote(payload);
+            runLayoutTransition(articleSheetRef.current, () => {
+              setMarginNotes((prev) => [...prev, optimistic]);
+            });
+            toast.info(extCopy.notes.offlineQueuedToast);
+            return;
+          } catch {
+            // fall through if IndexedDB unavailable
+          }
+        }
         toast.error(err);
       }
     },
-    [detail, locale, toast],
+    [detail, extCopy.notes.offlineQueuedToast, locale, toast],
   );
 
   const handleUpdateNote = useCallback(
     async (note: UserMarginNoteDto, patch: MarginNoteEditPatch) => {
+      const updateBody = {
+        content: patch.content,
+        tone: patch.tone,
+        style: patch.style,
+        tag: patch.tag,
+        note_color: patch.note_color,
+      };
+      if (isOfflineTempNoteId(note.id)) {
+        await enqueueOfflineUpdateNote(note.id, updateBody);
+        setMarginNotes((prev) =>
+          prev.map((n) =>
+            n.id === note.id
+              ? {
+                  ...n,
+                  raw_content: patch.content,
+                  content_html: buildOptimisticHtmlFromMarkdown(patch.content),
+                  tone: patch.tone,
+                  style: patch.style,
+                  tag: patch.tag,
+                  note_color: patch.note_color,
+                  pendingSync: true,
+                }
+              : n,
+          ),
+        );
+        toast.info(extCopy.notes.offlineQueuedToast);
+        return;
+      }
       try {
         const updated = await api.updateMarginNote(
           note.id,
-          {
-            content: patch.content,
-            tone: patch.tone,
-            style: patch.style,
-            tag: patch.tag,
-            note_color: patch.note_color,
-          },
+          updateBody,
           buildNoteEtag(note),
         );
         runLayoutTransition(articleSheetRef.current, () => {
@@ -388,28 +602,81 @@ export function StepReaderPage({
         });
         toast.success(extCopy.notes.noteUpdatedToast);
       } catch (err) {
+        if (isLikelyOfflineNetworkError(err)) {
+          try {
+            await enqueueOfflineUpdateNote(
+              note.id,
+              updateBody,
+              buildNoteEtag(note),
+            );
+            setMarginNotes((prev) =>
+              prev.map((n) =>
+                n.id === note.id
+                  ? {
+                      ...n,
+                      raw_content: patch.content,
+                      content_html: buildOptimisticHtmlFromMarkdown(patch.content),
+                      tone: patch.tone,
+                      style: patch.style,
+                      tag: patch.tag,
+                      note_color: patch.note_color,
+                      pendingSync: true,
+                    }
+                  : n,
+              ),
+            );
+            toast.info(extCopy.notes.offlineQueuedToast);
+            return;
+          } catch {
+            // fall through
+          }
+        }
         toast.error(err);
       }
     },
-    [extCopy.notes.noteUpdatedToast, toast],
+    [
+      extCopy.notes.noteUpdatedToast,
+      extCopy.notes.offlineQueuedToast,
+      toast,
+    ],
   );
 
   const handleRebindNote = useCallback(
     async (note: UserMarginNoteDto, targetBlock: NotebookBlock) => {
       if (!detail) return;
-      try {
-        const target = buildBlockAnnotationTarget(
-          detail.step_id,
-          locale,
-          detail.synced_revision,
-          targetBlock,
+      const target = buildBlockAnnotationTarget(
+        detail.step_id,
+        locale,
+        detail.synced_revision,
+        targetBlock,
+      );
+      const rebindBody = {
+        block_anchor_id: targetBlock.block_id,
+        motivation: 'commenting' as const,
+        target,
+      };
+      if (isOfflineTempNoteId(note.id)) {
+        await enqueueOfflineUpdateNote(note.id, rebindBody);
+        setMarginNotes((prev) =>
+          prev.map((n) =>
+            n.id === note.id
+              ? {
+                  ...n,
+                  block_anchor_id: targetBlock.block_id,
+                  motivation: 'commenting',
+                  target,
+                  pendingSync: true,
+                }
+              : n,
+          ),
         );
+        toast.info(extCopy.notes.offlineQueuedToast);
+        return;
+      }
+      try {
         const updated = await api.updateMarginNote(
           note.id,
-          {
-            block_anchor_id: targetBlock.block_id,
-            target,
-          },
+          rebindBody,
           buildNoteEtag(note),
         );
         runLayoutTransition(articleSheetRef.current, () => {
@@ -419,14 +686,53 @@ export function StepReaderPage({
         });
         toast.success(extCopy.notes.rebindSuccessToast);
       } catch (err) {
+        if (isLikelyOfflineNetworkError(err)) {
+          try {
+            await enqueueOfflineUpdateNote(
+              note.id,
+              rebindBody,
+              buildNoteEtag(note),
+            );
+            setMarginNotes((prev) =>
+              prev.map((n) =>
+                n.id === note.id
+                  ? {
+                      ...n,
+                      block_anchor_id: targetBlock.block_id,
+                      target,
+                      pendingSync: true,
+                    }
+                  : n,
+              ),
+            );
+            toast.info(extCopy.notes.offlineQueuedToast);
+            return;
+          } catch {
+            // fall through
+          }
+        }
         toast.error(err);
       }
     },
-    [detail, extCopy.notes.rebindSuccessToast, locale, toast],
+    [
+      detail,
+      extCopy.notes.offlineQueuedToast,
+      extCopy.notes.rebindSuccessToast,
+      locale,
+      toast,
+    ],
   );
 
   const handleDeleteNote = useCallback(
     async (note: UserMarginNoteDto) => {
+      if (isOfflineTempNoteId(note.id)) {
+        await enqueueOfflineDeleteNote(note.id);
+        runLayoutTransition(articleSheetRef.current, () => {
+          setMarginNotes((prev) => prev.filter((n) => n.id !== note.id));
+        });
+        toast.info(extCopy.notes.noteDeletedToast);
+        return;
+      }
       try {
         const res = await api.deleteMarginNote(note.id, buildNoteEtag(note));
         if (!res.deleted) return;
@@ -451,12 +757,25 @@ export function StepReaderPage({
           },
         });
       } catch (err) {
+        if (isLikelyOfflineNetworkError(err)) {
+          try {
+            await enqueueOfflineDeleteNote(note.id, buildNoteEtag(note));
+            runLayoutTransition(articleSheetRef.current, () => {
+              setMarginNotes((prev) => prev.filter((n) => n.id !== note.id));
+            });
+            toast.info(extCopy.notes.offlineQueuedToast);
+            return;
+          } catch {
+            // fall through
+          }
+        }
         toast.error(err);
       }
     },
     [
       extCopy.notes.noteDeletedToast,
       extCopy.notes.noteRestoredToast,
+      extCopy.notes.offlineQueuedToast,
       extCopy.notes.undoDeleteBtn,
       toast,
     ],
@@ -519,7 +838,7 @@ export function StepReaderPage({
   if (!detail) {
     return (
       <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 py-12">
-        <div className="h-96 rounded-2xl bg-surface-sheet/50 border border-border-subtle animate-pulse" />
+        <div className="h-96 rounded-2xl bg-surface-sheet/50 border border-border-subtle motion-safe:animate-pulse" />
       </main>
     );
   }
@@ -985,6 +1304,105 @@ export function StepReaderPage({
               </footer>
             </div>
           </article>
+
+          {selectionDraft && siteSettings.enable_margin_notes && (
+            <div
+              data-selection-popover="true"
+              role="dialog"
+              aria-modal="false"
+              aria-label={extCopy.notes.annotateSelectionBtn}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setSelectionComposing(false);
+                  setSelectionDraft(null);
+                }
+              }}
+              style={{
+                position: 'fixed',
+                top: `${Math.max(
+                  16,
+                  Math.min(
+                    window.innerHeight - (selectionComposing ? 360 : 68),
+                    selectionDraft.rect.top - 52,
+                  ),
+                )}px`,
+                left: `${Math.max(
+                  12,
+                  Math.min(
+                    window.innerWidth - (selectionComposing ? 340 : 210),
+                    selectionDraft.rect.left - (selectionComposing ? 160 : 95),
+                  ),
+                )}px`,
+              }}
+              className="z-(--z-popover) max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-xl border border-border-ink bg-surface-sheet shadow-(--shadow-floating) p-2"
+            >
+              {!selectionComposing ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const draft = selectionDraft;
+                      window.getSelection()?.removeAllRanges();
+                      setSelectionDraft(null);
+                      void handleAddNote(draft.blockId, {
+                        content: draft.exact.slice(0, 2000),
+                        tone: 'amber',
+                        style: 'tape',
+                        tag: 'star',
+                        note_color: 'amber:tape:star',
+                        motivation: 'highlighting',
+                        target: draft.target,
+                      });
+                    }}
+                    className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="w-2.5 h-2.5 rounded-sm border-b-2 border-current"
+                      style={{ backgroundColor: 'var(--inline-hl-amber)' }}
+                    />
+                    <span>{extCopy.notes.highlightSelectionBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectionComposing(true)}
+                    className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold bg-surface-raised border border-border-ink text-ink-primary hover:border-action-bg inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                  >
+                    <IconPen className="w-3.5 h-3.5" />
+                    <span>{extCopy.notes.annotateSelectionBtn}</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="w-[min(20rem,calc(100vw-2rem))] space-y-2">
+                  <blockquote className="m-0 px-2.5 py-1.5 rounded-lg bg-surface-raised border-s-2 border-border-ink text-xs text-ink-secondary line-clamp-2 italic">
+                    {selectionDraft.exact}
+                  </blockquote>
+                  <MarginNoteEditorForm
+                    copy={copy}
+                    notesCopy={extCopy.notes}
+                    compact
+                    onCancel={() => {
+                      setSelectionComposing(false);
+                      setSelectionDraft(null);
+                    }}
+                    onSubmit={async (patch) => {
+                      const draft = selectionDraft;
+                      await handleAddNote(draft.blockId, {
+                        ...patch,
+                        motivation: 'commenting',
+                        target: draft.target,
+                      });
+                      window.getSelection()?.removeAllRanges();
+                      setSelectionComposing(false);
+                      setSelectionDraft(null);
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </main>
       </div>
     </>

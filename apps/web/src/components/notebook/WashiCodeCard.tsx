@@ -301,7 +301,7 @@ export function WashiCodeCard({
           <button
             type="button"
             onClick={() => void handleCopy()}
-            className="min-h-7 px-2.5 py-1 rounded-lg font-hand text-xs sm:text-sm font-semibold border-[1.5px] inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-transform active:translate-x-px active:translate-y-px"
+            className="min-h-7 px-2.5 py-1 rounded-lg font-hand text-xs sm:text-sm font-semibold border-[1.5px] inline-flex items-center gap-1.5 shrink-0 cursor-pointer motion-safe:transition-transform active:translate-x-px active:translate-y-px"
             style={
               copyState === 'copied'
                 ? {
@@ -319,9 +319,9 @@ export function WashiCodeCard({
             }
           >
             {copyState === 'copied' ? (
-              <IconCheck className="w-3.5 h-3.5 shrink-0" />
+              <IconCheck className="w-3.5 h-3.5 shrink-0 text-current" />
             ) : (
-              <IconCopy className="w-3.5 h-3.5 shrink-0" />
+              <IconCopy className="w-3.5 h-3.5 shrink-0 text-ink-muted" />
             )}
             <span>
               {copyState === 'copied'
@@ -337,7 +337,11 @@ export function WashiCodeCard({
         </>
       )}
     >
-      <pre className="washi-code-pre m-0 py-3 w-full max-w-full overflow-x-auto font-mono text-xs sm:text-sm">
+      <pre
+        tabIndex={0}
+        aria-label={filename ? `${langLabel}: ${filename}` : langLabel}
+        className="washi-code-pre m-0 py-3 w-full max-w-full overflow-x-auto font-mono text-xs sm:text-sm"
+      >
         <code
           className="washi-code-grid"
           style={

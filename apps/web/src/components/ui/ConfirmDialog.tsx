@@ -77,16 +77,8 @@ export function ConfirmDialog({
           onClick={onSubmit ? undefined : onConfirm}
           className={
             isDanger
-              ? 'min-h-9 px-4 py-2 rounded-xl text-xs font-semibold text-white border-2 border-border-ink cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
+              ? 'min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-danger cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
               : 'min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
-          }
-          style={
-            isDanger
-              ? {
-                  backgroundColor: 'var(--palette-danger-500)',
-                  boxShadow: 'var(--shadow-control)',
-                }
-              : undefined
           }
         >
           {confirmLabel}

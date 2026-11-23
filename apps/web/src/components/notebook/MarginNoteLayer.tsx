@@ -8,14 +8,18 @@
  *   RFC 7396 partial updates (`PATCH` + `If-Match`), and W3C Web Annotation re-anchoring indicators.
  */
 
-import { type CSSProperties, type ReactNode, useState } from 'react';
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react';
 import {
+  applySemanticNoteHighlights,
+  extractQuoteExcerpt,
+  isSelectionNote,
   MAX_NOTE_CHARS,
   type ResolvedBlockNote,
 } from '../../lib/annotationAnchor';
 import type { ExtendedMessages, UiMessages } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type {
+  AnnotationTarget,
   MarginStickerTag,
   StickerStyle,
   StickerTone,
@@ -53,6 +57,8 @@ export interface MarginNoteEditPatch {
   style: StickerStyle;
   tag: MarginStickerTag;
   note_color: string;
+  motivation?: string;
+  target?: AnnotationTarget;
 }
 
 export function MarginStickerCard({
@@ -61,6 +67,9 @@ export function MarginStickerCard({
   badgeIcon,
   badgeLabel,
   reanchoredLabel,
+  pendingSyncLabel,
+  quoteExcerpt,
+  focused = false,
   tiltDeg = -0.7,
   onEdit,
   editAriaLabel,
@@ -73,6 +82,9 @@ export function MarginStickerCard({
   badgeIcon: ReactNode;
   badgeLabel: string;
   reanchoredLabel?: string;
+  pendingSyncLabel?: string;
+  quoteExcerpt?: string;
+  focused?: boolean;
   tiltDeg?: number;
   onEdit?: () => void;
   editAriaLabel?: string;
@@ -111,7 +123,7 @@ export function MarginStickerCard({
   return (
     <div
       data-sticker-style={style}
-      className={`sticker-card text-xs ${padClass}`}
+      className={`sticker-card text-xs ${padClass} ${focused ? 'ring-2 ring-link-ink/50' : ''}`}
       style={{
         ...customVars,
         borderRadius: radius,
@@ -200,13 +212,24 @@ export function MarginStickerCard({
             </span>
             {reanchoredLabel && (
               <span
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-dashed opacity-80"
+                className="text-xs font-mono px-1.5 py-0.5 rounded border border-dashed"
                 style={{
                   borderColor: tokens.border,
                   color: tokens.badgeFg,
                 }}
               >
                 {reanchoredLabel}
+              </span>
+            )}
+            {pendingSyncLabel && (
+              <span
+                className="text-xs font-mono px-1.5 py-0.5 rounded border border-dashed"
+                style={{
+                  borderColor: tokens.border,
+                  color: tokens.badgeFg,
+                }}
+              >
+                {pendingSyncLabel}
               </span>
             )}
           </div>
@@ -219,7 +242,7 @@ export function MarginStickerCard({
                   aria-label={editAriaLabel}
                   title={editAriaLabel}
                   onClick={onEdit}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors"
+                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
                   style={{ color: tokens.badgeFg }}
                 >
                   <IconPen className="w-3.5 h-3.5" />
@@ -231,7 +254,7 @@ export function MarginStickerCard({
                   aria-label={deleteAriaLabel}
                   title={deleteAriaLabel}
                   onClick={onDelete}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors"
+                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
                   style={{ color: tokens.badgeFg }}
                 >
                   <IconClose className="w-3.5 h-3.5" />
@@ -240,6 +263,15 @@ export function MarginStickerCard({
             </div>
           )}
         </div>
+
+        {quoteExcerpt && (
+          <blockquote
+            className="mb-1.5 ps-2 border-s-2 border-dashed text-xs opacity-80 line-clamp-2 italic"
+            style={{ borderColor: tokens.border, color: tokens.body }}
+          >
+            {quoteExcerpt}
+          </blockquote>
+        )}
 
         <div
           className="font-hand leading-relaxed text-sm sm:text-base break-words [&_code]:font-mono [&_code]:text-[0.85em] [&_code]:px-1 [&_code]:rounded [&_code]:bg-surface-sheet/65 [&_ul]:ps-4 [&_ul]:my-1 [&_ol]:ps-4 [&_ol]:my-1 [&_p]:my-0.5"
@@ -411,11 +443,11 @@ export function MarginNoteEditorForm({
           className="w-full rounded-xl px-3 py-2 font-hand text-base leading-relaxed border-2 resize-y"
           style={{
             backgroundColor: activeTokens.bg,
-            borderColor: isTooLong ? 'var(--accent-danger)' : activeTokens.border,
+            borderColor: isTooLong ? 'var(--accent-danger-ink)' : activeTokens.border,
             color: activeTokens.title,
           }}
         />
-        <div className="flex items-center justify-between gap-2 px-0.5 text-[11px]">
+        <div className="flex items-center justify-between gap-2 px-0.5 text-xs">
           <span className="text-ink-muted truncate">
             {notesCopy?.markdownHint ?? ''}
           </span>
@@ -489,6 +521,41 @@ export function BlockWithMargin({
 }: BlockWithMarginProps) {
   const [composing, setComposing] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
+  const contentHostRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const host = contentHostRef.current;
+    if (!host) return;
+
+    const noteItems = userNotes.map((entry) => entry.note);
+    const observer = new MutationObserver(() => {
+      syncHighlights();
+    });
+
+    const syncHighlights = () => {
+      const target = contentHostRef.current;
+      if (!target) return;
+      observer.disconnect();
+      try {
+        applySemanticNoteHighlights(target, noteItems, (hitId) => {
+          setFocusedNoteId(hitId);
+          window.setTimeout(() => {
+            setFocusedNoteId((prev) => (prev === hitId ? null : prev));
+          }, 1800);
+        });
+      } finally {
+        observer.takeRecords();
+        observer.observe(host, { childList: true, subtree: true });
+      }
+    };
+
+    syncHighlights();
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [userNotes, blockId]);
 
   const hasMarginStickies = Boolean(authorNote || userNotes.length > 0);
 
@@ -503,7 +570,9 @@ export function BlockWithMargin({
     >
       {/* Main Content Column */}
       <div className="relative min-w-0 max-w-full">
-        {children}
+        <div ref={contentHostRef} data-annotatable-block={blockId}>
+          {children}
+        </div>
 
         <button
           type="button"
@@ -511,7 +580,7 @@ export function BlockWithMargin({
           aria-expanded={composing}
           className={`mt-1.5 min-h-7 px-2 -ms-1 rounded-lg inline-flex items-center gap-1 font-hand text-xs sm:text-sm font-semibold text-ink-muted hover:text-ink-primary transition-all cursor-pointer ${
             compactTrigger && !composing && userNotes.length === 0
-              ? 'opacity-45 sm:opacity-0 sm:group-hover/margin:opacity-100 focus-visible:opacity-100'
+              ? '[@media(hover:hover)]:sm:opacity-0 [@media(hover:hover)]:sm:group-hover/margin:opacity-100 focus-visible:opacity-100'
               : ''
           }`}
         >
@@ -580,6 +649,9 @@ export function BlockWithMargin({
                 badgeIcon={MARGIN_TAG_ICONS[spec.tag]}
                 badgeLabel={tagLabel}
                 reanchoredLabel={reanchored ? notesCopy?.reanchoredBadge : undefined}
+                pendingSyncLabel={note.pendingSync ? notesCopy?.pendingSyncBadge : undefined}
+                quoteExcerpt={isSelectionNote(note) ? extractQuoteExcerpt(note) : undefined}
+                focused={focusedNoteId === note.id}
                 tiltDeg={idx % 2 === 0 ? 0.7 : -0.6}
                 onEdit={onUpdateNote ? () => setEditingNoteId(note.id) : undefined}
                 editAriaLabel={notesCopy?.editNoteAria}

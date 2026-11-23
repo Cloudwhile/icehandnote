@@ -7,7 +7,7 @@
  *   and standards-compliant export (RFC 7763 Markdown + W3C Web Annotation JSON-LD).
  */
 
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   buildNoteEtag,
@@ -58,8 +58,10 @@ export function MyNotesModal({
   const [exporting, setExporting] = useState<'markdown' | 'w3c-jsonld' | null>(
     null,
   );
+  const loadSeqRef = useRef(0);
 
   const loadNotes = useCallback(async () => {
+    const seq = (loadSeqRef.current += 1);
     setLoading(true);
     try {
       const list = await api.listAllMarginNotes({
@@ -67,11 +69,15 @@ export function MyNotesModal({
         q: query.trim() || undefined,
         limit: 200,
       });
+      if (loadSeqRef.current !== seq) return;
       setNotes(list);
     } catch (err) {
+      if (loadSeqRef.current !== seq) return;
       toast.error(err);
     } finally {
-      setLoading(false);
+      if (loadSeqRef.current === seq) {
+        setLoading(false);
+      }
     }
   }, [activeTag, query, toast]);
 
@@ -159,7 +165,7 @@ export function MyNotesModal({
           titleId={titleId}
           title={notesCopy.myNotesTitle}
           icon={<IconBook className="w-5 h-5 text-link-ink shrink-0" />}
-          closeLabel={ui.cancelBtn}
+          closeLabel={ui.closeLabel}
           onClose={onClose}
           handFont
           trailing={
@@ -221,33 +227,35 @@ export function MyNotesModal({
               })}
             </div>
 
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                disabled={exporting !== null || notes.length === 0}
-                onClick={() => void handleExport('markdown')}
-                className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
-              >
-                {notesCopy.exportMdBtn}
-              </button>
-              <button
-                type="button"
-                disabled={exporting !== null || notes.length === 0}
-                onClick={() => void handleExport('w3c-jsonld')}
-                className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
-              >
-                {notesCopy.exportJsonLdBtn}
-              </button>
-            </div>
+            {notes.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={exporting !== null}
+                  onClick={() => void handleExport('markdown')}
+                  className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {notesCopy.exportMdBtn}
+                </button>
+                <button
+                  type="button"
+                  disabled={exporting !== null}
+                  onClick={() => void handleExport('w3c-jsonld')}
+                  className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {notesCopy.exportJsonLdBtn}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Notes List */}
-        <div className="max-h-[56vh] overflow-y-auto ink-thin-scrollbar space-y-2.5 pe-1">
+        <div className="max-h-[56dvh] overflow-y-auto ink-thin-scrollbar space-y-2.5 pe-1">
           {loading ? (
             <div className="space-y-2.5 py-2">
-              <div className="h-20 rounded-xl bg-surface-raised animate-pulse" />
-              <div className="h-20 rounded-xl bg-surface-raised animate-pulse" />
+              <div className="h-20 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+              <div className="h-20 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
             </div>
           ) : notes.length === 0 ? (
             <div className="py-10 px-4 text-center rounded-2xl border border-dashed border-border-subtle bg-surface-raised/60 space-y-1.5">
@@ -304,7 +312,7 @@ export function MyNotesModal({
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[11px] font-mono text-ink-muted tabular-nums">
+                      <span className="text-xs font-mono text-ink-muted tabular-nums">
                         {note.locale_code} · {stampDate}
                       </span>
                       {note.track_slug && note.step_slug && (
@@ -321,7 +329,7 @@ export function MyNotesModal({
                         onClick={() => void handleDelete(note)}
                         aria-label={ui.deleteStickyAria}
                         title={ui.deleteStickyAria}
-                        className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger cursor-pointer transition-colors"
+                        className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-accent-danger cursor-pointer transition-colors ink-icon-target"
                       >
                         <IconTrash className="w-3.5 h-3.5" />
                       </button>

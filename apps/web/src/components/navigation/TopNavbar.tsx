@@ -10,6 +10,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { EXT_COPY, type LocalePreference, UI_COPY } from '../../lib/i18n';
 import type { ResolvedTheme } from '../../lib/theme';
 import type { LocaleCode, SiteSettingsDto, UserProfileDto } from '../../lib/types';
+import { toSafeHttpUrl } from '../../lib/urlSafety';
 import { IconBook, IconClose, IconMenu, IconPen } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { UserAvatar } from '../ui/UserAvatar';
@@ -54,9 +55,10 @@ export function TopNavbar({
   const profCopy = EXT_COPY[locale].profile;
   const notesCopy = EXT_COPY[locale].notes;
 
+  const safeBlogOriginUrl = toSafeHttpUrl(siteSettings.blog_origin_url);
   const showBlogLink = Boolean(
     settingsReady &&
-      siteSettings.blog_origin_url.trim() &&
+      safeBlogOriginUrl &&
       siteSettings.blog_nav_label.trim(),
   );
   const location = useLocation();
@@ -172,9 +174,9 @@ export function TopNavbar({
 
               {showBlogLink && (
                 <a
-                  href={siteSettings.blog_origin_url}
+                  href={safeBlogOriginUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="no-underline text-ink-muted hover:text-ink-primary px-2.5 py-1.5 rounded-lg text-sm transition-colors hidden xl:inline"
                 >
                   {siteSettings.blog_nav_label}
@@ -247,9 +249,7 @@ export function TopNavbar({
           <div
             ref={mobileMenuRef}
             id={mobileMenuId}
-            role="region"
-            aria-label={copy.navPrimaryAria}
-            className="ui-popover-enter origin-top-right md:hidden absolute end-0 mt-2 w-[min(20rem,calc(100dvw-1.5rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-40"
+            className="ui-popover-enter origin-top-right md:hidden absolute end-0 mt-2 w-[min(20rem,calc(100dvw-1.5rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-(--z-popover)"
           >
             <nav aria-label={copy.navPrimaryAria} className="space-y-1">
               <Link
@@ -292,9 +292,9 @@ export function TopNavbar({
               )}
               {showBlogLink && (
                 <a
-                  href={siteSettings.blog_origin_url}
+                  href={safeBlogOriginUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="block no-underline px-3 py-2 rounded-lg text-sm text-ink-secondary hover:text-ink-primary"
                 >
                   {siteSettings.blog_nav_label}

@@ -8,7 +8,7 @@ import {
 } from '../../lib/licenses';
 import type { UiMessages } from '../../lib/locales';
 import { UI_COPY } from '../../lib/i18n';
-import type { LocaleCode } from '../../lib/types';
+import type { LicenseId, LocaleCode } from '../../lib/types';
 
 /**
  * Finely engraved Creative Commons / Copyright double-ring coin medallion.
@@ -305,22 +305,59 @@ export function CcLicenseSelector({
       ? 'default'
       : normalizeLicenseId(value);
 
+  const optionValues: Array<LicenseId | ''> = [
+    ...(allowFollowSite ? ([''] as const) : []),
+    ...ALL_LICENSE_OPTIONS.map((opt) => opt.id),
+  ];
+
+  const handleRadioKeyDown = (
+    e: React.KeyboardEvent<HTMLButtonElement>,
+    idx: number,
+  ) => {
+    if (!['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
+      return;
+    }
+    e.preventDefault();
+    const last = optionValues.length - 1;
+    let nextIdx = idx;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      nextIdx = idx >= last ? 0 : idx + 1;
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      nextIdx = idx <= 0 ? last : idx - 1;
+    } else if (e.key === 'Home') {
+      nextIdx = 0;
+    } else if (e.key === 'End') {
+      nextIdx = last;
+    }
+    onChange(optionValues[nextIdx]);
+    const group = e.currentTarget.parentElement;
+    const radios = group?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+    radios?.[nextIdx]?.focus();
+  };
+
+  const activeIndex = optionValues.findIndex((optVal) =>
+    optVal === '' ? normalizedVal === 'default' : normalizedVal === optVal,
+  );
+
   return (
-    <div
-      role="radiogroup"
-      aria-label={ui.licenseSelectAria}
-      className={`grid grid-cols-1 sm:grid-cols-2 gap-2 ${className}`.trim()}
-    >
-      {allowFollowSite && (
-        <button
-          type="button"
-          role="radio"
-          aria-checked={normalizedVal === 'default'}
-          onClick={() => onChange('')}
-          className={`cc-selector-option sm:col-span-2 ${
-            normalizedVal === 'default' ? 'cc-selector-option--active' : ''
-          }`}
-        >
+    <div className={`@container ${className}`.trim()}>
+      <div
+        role="radiogroup"
+        aria-label={ui.licenseSelectAria}
+        className="grid grid-cols-1 @[32rem]:grid-cols-2 gap-2"
+      >
+        {allowFollowSite && (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={normalizedVal === 'default'}
+            tabIndex={activeIndex === 0 || activeIndex < 0 ? 0 : -1}
+            onClick={() => onChange('')}
+            onKeyDown={(e) => handleRadioKeyDown(e, 0)}
+            className={`cc-selector-option @[32rem]:col-span-2 ${
+              normalizedVal === 'default' ? 'cc-selector-option--active' : ''
+            }`}
+          >
           <span className="cc-selector-radio" aria-hidden="true">
             {normalizedVal === 'default' && <span className="cc-selector-dot" />}
           </span>
@@ -348,7 +385,8 @@ export function CcLicenseSelector({
         </button>
       )}
 
-      {ALL_LICENSE_OPTIONS.map((opt) => {
+      {ALL_LICENSE_OPTIONS.map((opt, mapIdx) => {
+        const optionIdx = allowFollowSite ? mapIdx + 1 : mapIdx;
         const isActive = normalizedVal === opt.id;
         return (
           <button
@@ -356,7 +394,11 @@ export function CcLicenseSelector({
             type="button"
             role="radio"
             aria-checked={isActive}
+            tabIndex={
+              isActive || (activeIndex < 0 && optionIdx === 0) ? 0 : -1
+            }
             onClick={() => onChange(opt.id)}
+            onKeyDown={(e) => handleRadioKeyDown(e, optionIdx)}
             className={`cc-selector-option ${
               isActive ? 'cc-selector-option--active' : ''
             }`}
@@ -386,6 +428,7 @@ export function CcLicenseSelector({
           </button>
         );
       })}
+      </div>
     </div>
   );
 }

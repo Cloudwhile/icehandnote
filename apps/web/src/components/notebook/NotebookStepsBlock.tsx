@@ -15,6 +15,7 @@ interface NotebookStepsBlockProps {
   onToggle?: (itemId: string, checked: boolean) => void;
   onResetBlock?: (itemIds: string[]) => void;
   readOnly?: boolean;
+  omitRootId?: boolean;
   copy: UiMessages;
 }
 
@@ -28,6 +29,7 @@ export function NotebookStepsBlock({
   onToggle,
   onResetBlock,
   readOnly = false,
+  omitRootId = false,
   copy,
 }: NotebookStepsBlockProps) {
   const headingId = useId();
@@ -43,7 +45,7 @@ export function NotebookStepsBlock({
 
     return (
       <div
-        id={blockId}
+        id={omitRootId ? undefined : blockId}
         className={
           isParagraphScope ? 'notebook-task-paragraph' : 'notebook-task-section'
         }
@@ -112,7 +114,7 @@ export function NotebookStepsBlock({
 
   return (
     <section
-      id={blockId}
+      id={omitRootId ? undefined : blockId}
       aria-labelledby={headingId}
       data-scope={scope}
       className="notebook-steps-card"

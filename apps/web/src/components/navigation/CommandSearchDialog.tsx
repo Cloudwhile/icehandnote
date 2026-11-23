@@ -39,6 +39,7 @@ export function CommandSearchDialog({
     const trimmed = query.trim();
     if (!trimmed) {
       setHits([]);
+      setLoading(false);
       return;
     }
 
@@ -115,12 +116,12 @@ export function CommandSearchDialog({
           {query && (
             <button
               type="button"
-              aria-label={copy.closeLabel}
+              aria-label={copy.clearSearchLabel}
               onClick={() => {
                 setQuery('');
                 inputRef.current?.focus();
               }}
-              className="absolute end-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors"
+              className="absolute end-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors ink-icon-target"
             >
               <IconClose className="w-3.5 h-3.5" />
             </button>
@@ -129,6 +130,9 @@ export function CommandSearchDialog({
 
         {query.trim() && (
           <div className="max-h-80 overflow-y-auto overscroll-contain space-y-2">
+            <div className="sr-only" aria-live="polite" aria-atomic="true">
+              {!loading && hits.length === 0 ? copy.searchEmptyTitle : ''}
+            </div>
             {loading ? (
               <p className="text-xs text-ink-muted py-4 text-center">…</p>
             ) : hits.length === 0 ? (
@@ -145,14 +149,14 @@ export function CommandSearchDialog({
                   className="w-full text-start p-3 rounded-xl bg-surface-raised hover:bg-action-subtle/60 border border-border-subtle transition-colors cursor-pointer block space-y-1"
                 >
                   <div className="flex items-baseline justify-between gap-2 text-xs text-ink-muted">
-                    <span>{hit.track_title}</span>
+                    <SafeHtml as="span" html={hit.track_title} />
                     <span className="font-mono uppercase tracking-wider">{hit.locale}</span>
                   </div>
                   <div
                     className="text-sm font-semibold text-ink-primary"
                     style={{ fontFamily: 'var(--font-hand)' }}
                   >
-                    {hit.title}
+                    <SafeHtml as="span" html={hit.title} />
                   </div>
                   <SafeHtml
                     html={hit.snippet_html}

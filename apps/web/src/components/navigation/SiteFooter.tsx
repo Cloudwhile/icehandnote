@@ -8,6 +8,7 @@ import { Link } from 'react-router-dom';
 import { UI_COPY } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { LocaleCode, SiteSettingsDto } from '../../lib/types';
+import { toSafeHttpUrl } from '../../lib/urlSafety';
 
 interface SiteFooterProps {
   locale: LocaleCode;
@@ -21,9 +22,10 @@ export function SiteFooter({
   settingsReady = true,
 }: SiteFooterProps) {
   const copy = UI_COPY[locale];
+  const safeBlogOriginUrl = toSafeHttpUrl(siteSettings.blog_origin_url);
   const showBlogLink = Boolean(
     settingsReady &&
-      siteSettings.blog_origin_url.trim() &&
+      safeBlogOriginUrl &&
       siteSettings.blog_nav_label.trim(),
   );
 
@@ -34,7 +36,7 @@ export function SiteFooter({
           {!settingsReady ? (
             <span
               aria-hidden="true"
-              className="inline-block w-44 h-4 rounded bg-surface-raised animate-pulse"
+              className="inline-block w-44 h-4 rounded bg-surface-raised motion-safe:animate-pulse"
             />
           ) : (
             <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
@@ -70,7 +72,7 @@ export function SiteFooter({
           </a>
         </div>
 
-        <nav aria-label={copy.navPrimaryAria} className="flex flex-wrap items-center gap-3">
+        <nav aria-label={copy.navFooterAria} className="flex flex-wrap items-center gap-3">
           <Link
             to={`/${locale}`}
             className="inline-flex items-center min-h-7 px-1.5 rounded no-underline text-ink-muted hover:text-ink-primary transition-colors"
@@ -79,9 +81,9 @@ export function SiteFooter({
           </Link>
           {showBlogLink && (
             <a
-              href={siteSettings.blog_origin_url}
+              href={safeBlogOriginUrl}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="inline-flex items-center min-h-7 px-1.5 rounded no-underline text-ink-muted hover:text-ink-primary transition-colors"
             >
               {siteSettings.blog_nav_label}

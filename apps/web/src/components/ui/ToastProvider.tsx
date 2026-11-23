@@ -9,6 +9,7 @@ import {
   useState,
 } from 'react';
 import { resolveLocalizedError } from '../../lib/apiError';
+import { UI_COPY } from '../../lib/i18n';
 import type { LocaleCode } from '../../lib/types';
 import { IconAlertCircle, IconCheck, IconClose } from './Icons';
 
@@ -130,14 +131,23 @@ export function ToastProvider({
     [locale, push],
   );
 
+  const latestPoliteMsg =
+    items.filter((it) => it.tone !== 'error').at(-1)?.message ?? '';
+  const latestAlertMsg =
+    items.filter((it) => it.tone === 'error').at(-1)?.message ?? '';
+
   return (
     <ToastContext.Provider value={apiValue}>
       {children}
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {latestPoliteMsg}
+      </div>
+      <div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true">
+        {latestAlertMsg}
+      </div>
       <div
         ref={stackRef}
         popover="manual"
-        aria-live="polite"
-        aria-atomic="false"
         className="ink-toast-stack flex flex-col gap-2.5"
       >
         {items.map((item) => {
@@ -202,8 +212,8 @@ export function ToastProvider({
               <button
                 type="button"
                 onClick={() => dismiss(item.id)}
-                aria-label="Close"
-                className="w-6 h-6 -me-1 -mt-0.5 rounded-lg inline-flex items-center justify-center opacity-75 hover:opacity-100 cursor-pointer shrink-0"
+                aria-label={UI_COPY[locale].closeLabel}
+                className="w-6 h-6 -me-1 -mt-0.5 rounded-lg inline-flex items-center justify-center opacity-75 hover:opacity-100 cursor-pointer shrink-0 ink-icon-target"
               >
                 <IconClose className="w-3.5 h-3.5" />
               </button>

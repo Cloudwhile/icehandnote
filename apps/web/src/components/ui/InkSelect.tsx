@@ -38,7 +38,7 @@ export function InkSelect<T extends string = string>({
   placeholder = '',
   disabled = false,
   align = 'start',
-  triggerClassName = 'w-full min-h-9 px-3 py-1.5 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-sm',
+  triggerClassName = 'w-full min-h-9 px-3 py-1.5 rounded-xl bg-surface-raised text-ink-primary border border-border-control text-sm',
   wrapperClassName = 'w-full min-w-0',
   minWidthClass = 'min-w-[10rem]',
 }: InkSelectProps<T>) {

@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom';
 import { UI_COPY } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { LocaleCode, SiteSettingsDto } from '../../lib/types';
+import { toSafeMediaUrl } from '../../lib/urlSafety';
 
 export interface SiteBrandProps {
   locale: LocaleCode;
@@ -53,7 +54,7 @@ export function SiteBrand({
   surfaceClass = 'bg-surface-raised',
 }: SiteBrandProps) {
   const copy = UI_COPY[locale];
-  const logoUrl = siteSettings.logo_url?.trim() ?? '';
+  const logoUrl = toSafeMediaUrl(siteSettings.logo_url);
   const [logoFailed, setLogoFailed] = useState(false);
 
   useEffect(() => {
@@ -72,7 +73,7 @@ export function SiteBrand({
         className={`${boxSizeCls} flex items-center justify-center border border-border-ink ${surfaceClass} overflow-hidden shrink-0`}
       >
         {!settingsReady ? (
-          <span className="w-full h-full bg-surface-raised animate-pulse" />
+          <span className="w-full h-full bg-surface-raised motion-safe:animate-pulse" />
         ) : logoUrl && !logoFailed ? (
           <img
             src={logoUrl}
@@ -93,7 +94,7 @@ export function SiteBrand({
         {!settingsReady ? (
           <span
             aria-hidden="true"
-            className="inline-block w-24 h-4 rounded bg-surface-raised animate-pulse"
+            className="inline-block w-24 h-4 rounded bg-surface-raised motion-safe:animate-pulse"
           />
         ) : (
           <>
@@ -125,7 +126,7 @@ export function SiteBrand({
     <Link
       to={targetHref}
       title={title}
-      className="inline-flex items-center gap-2 sm:gap-2.5 no-underline text-ink-primary min-w-0 shrink-0"
+      className="inline-flex items-center gap-2 sm:gap-2.5 no-underline text-ink-primary min-w-0 shrink"
     >
       {content}
     </Link>

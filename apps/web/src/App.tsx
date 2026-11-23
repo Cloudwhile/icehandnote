@@ -30,7 +30,9 @@ import {
   UI_COPY,
 } from './lib/i18n';
 import { savePendingOAuthOtpChallenge } from './lib/passkeys';
+import { clearUserOfflineNoteOps } from './lib/offlineNoteQueue';
 import { stripHtmlTags } from './lib/sanitizer';
+import { toSafeHttpUrl } from './lib/urlSafety';
 import {
   readCachedRouteTitle,
   readInitialSiteSettings,
@@ -90,10 +92,10 @@ function NotFoundPage({ locale }: { locale: LocaleCode }) {
 }
 
 function buildSsoEntryUrl(settings: SiteSettingsDto): string {
-  const origin = settings.blog_origin_url.trim().replace(/\/+$/, '');
-  if (!origin) return '';
+  const safeOrigin = toSafeHttpUrl(settings.blog_origin_url).replace(/\/+$/, '');
+  if (!safeOrigin) return '';
   const param = settings.sso_query_param?.trim() || 'sso_login';
-  return `${origin}/?${encodeURIComponent(param)}=1`;
+  return `${safeOrigin}/?${encodeURIComponent(param)}=1`;
 }
 
 function LocaleShellInner({
@@ -124,9 +126,26 @@ function LocaleShellInner({
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [notesMounted, setNotesMounted] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [profileMounted, setProfileMounted] = useState(false);
   const [activeCollabInvite, setActiveCollabInvite] = useState('');
+  const [inviteMounted, setInviteMounted] = useState(false);
+  const [lastInviteToken, setLastInviteToken] = useState('');
   const [pendingCollabInvite, setPendingCollabInvite] = useState('');
+
+  useEffect(() => {
+    if (profileOpen) setProfileMounted(true);
+  }, [profileOpen]);
+  useEffect(() => {
+    if (notesOpen) setNotesMounted(true);
+  }, [notesOpen]);
+  useEffect(() => {
+    if (activeCollabInvite) {
+      setInviteMounted(true);
+      setLastInviteToken(activeCollabInvite);
+    }
+  }, [activeCollabInvite]);
   const [user, setUserState] = useState<UserProfileDto | null>(() =>
     getCachedSessionUser(),
   );
@@ -141,7 +160,10 @@ function LocaleShellInner({
   }, []);
 
   useEffect(() => {
-    const onExpired = () => updateUser(null);
+    const onExpired = () => {
+      void clearUserOfflineNoteOps();
+      updateUser(null);
+    };
     window.addEventListener('ihn:session-expired', onExpired);
     return () => window.removeEventListener('ihn:session-expired', onExpired);
   }, [updateUser]);
@@ -558,9 +580,13 @@ function LocaleShellInner({
   );
 
   const handleLogout = async () => {
-    await api.logout();
-    updateUser(null);
-    toast.info(extAuth.signedOutMsg);
+    try {
+      await api.logout();
+    } finally {
+      await clearUserOfflineNoteOps();
+      updateUser(null);
+      toast.info(extAuth.signedOutMsg);
+    }
   };
 
   const handleSettingsUpdated = (next: SiteSettingsDto) => {
@@ -672,6 +698,7 @@ function LocaleShellInner({
                     theme={theme}
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
+                    authScopeKey={user ? `user:${user.id}` : 'anon'}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
@@ -684,6 +711,7 @@ function LocaleShellInner({
                     theme={theme}
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
+                    authScopeKey={user ? `user:${user.id}` : 'anon'}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
@@ -696,6 +724,7 @@ function LocaleShellInner({
                     theme={theme}
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
+                    authScopeKey={user ? `user:${user.id}` : 'anon'}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
@@ -748,7 +777,7 @@ function LocaleShellInner({
         locale={locale}
       />
 
-      {profileOpen && (
+      {profileMounted && (
         <Suspense fallback={null}>
           <UserProfileModal
             open={profileOpen}
@@ -762,7 +791,7 @@ function LocaleShellInner({
         </Suspense>
       )}
 
-      {notesOpen && (
+      {notesMounted && (
         <Suspense fallback={null}>
           <MyNotesModal
             open={notesOpen}
@@ -772,11 +801,11 @@ function LocaleShellInner({
         </Suspense>
       )}
 
-      {activeCollabInvite && (
+      {inviteMounted && lastInviteToken && (
         <Suspense fallback={null}>
           <CollabInviteModal
             open={Boolean(activeCollabInvite)}
-            token={activeCollabInvite}
+            token={activeCollabInvite || lastInviteToken}
             locale={locale}
             user={user}
             onClose={() => setActiveCollabInvite('')}

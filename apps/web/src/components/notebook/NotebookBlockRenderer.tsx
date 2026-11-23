@@ -379,6 +379,7 @@ export function NotebookBlockRenderer({
             spec={block.spec}
             caption={block.caption}
             theme={theme}
+            defaultAriaLabel={copy.studio.visual.types.rough_diagram}
           />
         );
         if (interactive) {
@@ -600,6 +601,7 @@ export function NotebookBlockRenderer({
             onToggle={stepChecks?.onToggle}
             onResetBlock={stepChecks?.onResetIds}
             readOnly={stepChecks ? Boolean(stepChecks.readOnly) : true}
+            omitRootId={Boolean(interactive)}
             copy={copy}
           />
         );
@@ -766,6 +768,9 @@ export function NotebookBlockRenderer({
                       tone={spec.tone}
                       badgeIcon={MARGIN_TAG_ICONS[spec.tag]}
                       badgeLabel={tagLabel}
+                      pendingSyncLabel={
+                        note.pendingSync ? notesCopy?.pendingSyncBadge : undefined
+                      }
                       tiltDeg={idx % 2 === 0 ? 0.4 : -0.4}
                       onEdit={() => setEditingOrphanId(note.id)}
                       editAriaLabel={notesCopy?.editNoteAria}
@@ -792,7 +797,7 @@ export function NotebookBlockRenderer({
                       className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-border-subtle bg-surface-sheet text-ink-secondary cursor-pointer"
                     >
                       <option value="" disabled>
-                        {notesCopy?.rebindPlaceholder ?? 'Re-attach to block…'}
+                        {notesCopy?.rebindPlaceholder || copy.addStickyBtn}
                       </option>
                       {rebindableBlocks.map(({ block, preview }) => (
                         <option key={block.block_id} value={block.block_id}>

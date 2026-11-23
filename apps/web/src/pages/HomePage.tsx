@@ -97,10 +97,11 @@ export function HomePage({
 
   useEffect(() => loadData(), [loadData]);
 
-  const firstTrack = tracks[0];
-  const primaryHref = firstTrack
-    ? `/${locale}/series/${firstTrack.slug}/${firstTrack.first_step_slug}`
-    : null;
+  const firstTrack = tracks.find((t) => Boolean(t.first_step_slug));
+  const primaryHref =
+    firstTrack && firstTrack.first_step_slug
+      ? `/${locale}/series/${firstTrack.slug}/${firstTrack.first_step_slug}`
+      : null;
 
   return (
     <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-14 space-y-16">
@@ -161,7 +162,7 @@ export function HomePage({
               {!settingsReady ? (
                 <span
                   aria-hidden="true"
-                  className="inline-block w-64 max-w-full h-9 rounded-xl bg-surface-raised animate-pulse"
+                  className="inline-block w-64 max-w-full h-9 rounded-xl bg-surface-raised motion-safe:animate-pulse"
                 />
               ) : (
                 <SafeHtml
@@ -259,7 +260,7 @@ export function HomePage({
             {[0, 1, 2].map((n) => (
               <div
                 key={n}
-                className="h-64 rounded-2xl bg-surface-sheet/60 border border-border-subtle animate-pulse"
+                className="h-64 rounded-2xl bg-surface-sheet/60 border border-border-subtle motion-safe:animate-pulse"
               />
             ))}
           </div>
@@ -294,9 +295,12 @@ export function HomePage({
                   : idx === 1
                     ? 'var(--accent-ice-ink)'
                     : 'var(--accent-amber-ink)';
-              const stepUrl = `/${locale}/series/${track.slug}/${track.first_step_slug}`;
+              const stepUrl = track.first_step_slug
+                ? `/${locale}/series/${track.slug}/${track.first_step_slug}`
+                : null;
 
               const handleOpenTrack = (e: React.MouseEvent<HTMLAnchorElement>) => {
+                if (!stepUrl) return;
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
                   return;
                 }
@@ -340,13 +344,17 @@ export function HomePage({
                         className="text-xl font-semibold text-ink-primary leading-snug"
                         style={{ fontFamily: 'var(--font-hand)' }}
                       >
-                        <Link
-                          to={stepUrl}
-                          onClick={handleOpenTrack}
-                          className="no-underline text-ink-primary hover:text-link-ink transition-colors"
-                        >
+                        {stepUrl ? (
+                          <Link
+                            to={stepUrl}
+                            onClick={handleOpenTrack}
+                            className="no-underline text-ink-primary hover:text-link-ink transition-colors"
+                          >
+                            <SafeHtml as="span" html={track.title} />
+                          </Link>
+                        ) : (
                           <SafeHtml as="span" html={track.title} />
-                        </Link>
+                        )}
                       </h3>
 
                       <SafeHtml
@@ -372,13 +380,15 @@ export function HomePage({
                         <span className="text-ink-muted font-mono tabular-nums">
                           {copy.formatTrackCounts(track.chapter_count, track.step_count)}
                         </span>
-                        <Link
-                          to={stepUrl}
-                          onClick={handleOpenTrack}
-                          className="inline-flex items-center min-h-9 px-2.5 py-1.5 -me-2 rounded-lg font-semibold text-link-ink hover:text-link-hover-ink no-underline transition-colors ink-icon-target"
-                        >
-                          {copy.openNotebook}
-                        </Link>
+                        {stepUrl && (
+                          <Link
+                            to={stepUrl}
+                            onClick={handleOpenTrack}
+                            className="inline-flex items-center min-h-9 px-2.5 py-1.5 -me-2 rounded-lg font-semibold text-link-ink hover:text-link-hover-ink no-underline transition-colors ink-icon-target"
+                          >
+                            {copy.openNotebook}
+                          </Link>
+                        )}
                       </div>
                     </div>
                   </div>

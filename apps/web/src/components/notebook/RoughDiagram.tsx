@@ -15,6 +15,7 @@ interface RoughDiagramProps {
   spec: SketchSpec;
   caption?: string | null;
   theme: ResolvedTheme;
+  defaultAriaLabel?: string;
 }
 
 function readToken(styles: CSSStyleDeclaration, name: string, fallback: string): string {
@@ -47,7 +48,12 @@ export function computeEdgeEndpoints(src: SketchNode, dst: SketchNode) {
   return { x1: scx, y1: src.y - 4, x2: dcx, y2: dst.y + dh + 6 };
 }
 
-export function RoughDiagram({ spec, caption, theme }: RoughDiagramProps) {
+export function RoughDiagram({
+  spec,
+  caption,
+  theme,
+  defaultAriaLabel,
+}: RoughDiagramProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const roughLayerRef = useRef<SVGGElement | null>(null);
 
@@ -152,13 +158,16 @@ export function RoughDiagram({ spec, caption, theme }: RoughDiagramProps) {
   }, [spec, theme]);
 
   return (
-    <figure className="my-7 mx-0 rounded-xl border border-border-subtle bg-surface-raised/60 p-4 overflow-x-auto overscroll-x-contain ink-thin-scrollbar">
+    <figure
+      tabIndex={0}
+      className="my-7 mx-0 rounded-xl border border-border-subtle bg-surface-raised/60 p-4 overflow-x-auto overscroll-x-contain ink-thin-scrollbar focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--focus-ring)"
+    >
       <svg
         ref={svgRef}
         viewBox={`0 0 ${maxX} ${maxY}`}
         className={`w-full h-auto block ${maxX > 720 ? 'min-w-[420px] sm:min-w-0' : 'min-w-0'}`}
         role="img"
-        aria-label={caption ?? 'Hand-drawn architecture diagram'}
+        aria-label={caption || defaultAriaLabel || 'Hand-drawn architecture diagram'}
       >
         <g ref={roughLayerRef} />
         {/* Crisp text labels layered above Rough.js hachure boxes using semantic tokens */}

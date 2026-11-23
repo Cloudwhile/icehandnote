@@ -32,7 +32,11 @@ export function UserAccountMenu({
 }: UserAccountMenuProps) {
   const copy = UI_COPY[locale];
   const profCopy = EXT_COPY[locale].profile;
-  const canAuthor = user.role === 'author' || user.role === 'admin';
+  const canAuthor = Boolean(
+    user.role === 'author' ||
+      user.role === 'admin' ||
+      user.has_collaborations,
+  );
   const isStudio = context === 'studio';
 
   return (

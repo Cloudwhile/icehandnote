@@ -59,13 +59,13 @@ export function ToneSwatchPicker({
             aria-label={copy.stickyColorAria(copy.stickerTones[tone])}
             aria-pressed={active}
             onClick={() => onChange(tone)}
-            className={`w-6 h-6 rounded-full border-2 inline-flex items-center justify-center cursor-pointer transition-transform ${
+            className={`w-6 h-6 rounded-full border-2 inline-flex items-center justify-center cursor-pointer motion-safe:transition-transform ink-icon-target ${
               active ? `scale-110 ring-2 ring-ink-primary ring-offset-1 ${ringOffsetClass}` : ''
             }`}
             style={{
               backgroundColor: cfg.swatch,
               borderColor: 'var(--border-ink)',
-              color: '#ffffff',
+              color: cfg.swatchFg,
             }}
           >
             {active && <IconCheck className="w-3 h-3" />}

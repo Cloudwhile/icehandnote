@@ -74,6 +74,7 @@ export interface StickerToneTokens {
   badgeBg: string;
   badgeFg: string;
   swatch: string;
+  swatchFg: string;
 }
 
 export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
@@ -85,6 +86,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-tip-badge-bg)',
     badgeFg: 'var(--alert-tip-badge-fg)',
     swatch: '#f59e0b',
+    swatchFg: '#1f1411',
   },
   mint: {
     bg: 'var(--alert-mint-bg)',
@@ -94,6 +96,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-mint-badge-bg)',
     badgeFg: 'var(--alert-mint-badge-fg)',
     swatch: '#129854',
+    swatchFg: '#1f1411',
   },
   ice: {
     bg: 'var(--alert-info-bg)',
@@ -103,6 +106,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-info-badge-bg)',
     badgeFg: 'var(--alert-info-badge-fg)',
     swatch: '#0aa8d6',
+    swatchFg: '#1f1411',
   },
   violet: {
     bg: 'var(--alert-note-bg)',
@@ -112,6 +116,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-note-badge-bg)',
     badgeFg: 'var(--alert-note-badge-fg)',
     swatch: '#8b3dff',
+    swatchFg: '#ffffff',
   },
   coral: {
     bg: 'var(--alert-danger-bg)',
@@ -121,6 +126,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-danger-badge-bg)',
     badgeFg: 'var(--alert-danger-badge-fg)',
     swatch: '#e02454',
+    swatchFg: '#ffffff',
   },
   kraft: {
     bg: 'var(--alert-kraft-bg)',
@@ -130,6 +136,7 @@ export const STICKER_TONE_TOKENS: Record<StickerTone, StickerToneTokens> = {
     badgeBg: 'var(--alert-kraft-badge-bg)',
     badgeFg: 'var(--alert-kraft-badge-fg)',
     swatch: '#a47449',
+    swatchFg: '#1f1411',
   },
 };
 
