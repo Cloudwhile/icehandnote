@@ -253,6 +253,219 @@ pub struct StepRevisionDto {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffOpKind {
+    Equal,
+    Delete,
+    Insert,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLineDto {
+    pub op: DiffOpKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_line: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionDiffDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision_id: Option<Uuid>,
+    pub base_edit_seq: i64,
+    pub target_revision_id: Uuid,
+    pub target_edit_seq: i64,
+    pub locale_code: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub unchanged: usize,
+    pub lines: Vec<DiffLineDto>,
+}
+
+fn split_normalized_lines(raw: &str) -> Vec<&str> {
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    raw.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect()
+}
+
+/// Compute line-level LCS diff operations with prefix/suffix trimming and quadratic guard.
+pub fn compute_line_diff_ops(old_text: &str, new_text: &str) -> Vec<DiffLineDto> {
+    let old_lines = split_normalized_lines(old_text);
+    let new_lines = split_normalized_lines(new_text);
+
+    let mut prefix = 0usize;
+    let min_len = old_lines.len().min(new_lines.len());
+    while prefix < min_len && old_lines[prefix] == new_lines[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < (old_lines.len() - prefix).min(new_lines.len() - prefix)
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let mut out = Vec::with_capacity(old_lines.len().max(new_lines.len()));
+    for (idx, line) in old_lines.iter().enumerate().take(prefix) {
+        out.push(DiffLineDto {
+            op: DiffOpKind::Equal,
+            left_line: Some(idx + 1),
+            right_line: Some(idx + 1),
+            text: (*line).to_string(),
+        });
+    }
+
+    let mid_old = &old_lines[prefix..old_lines.len() - suffix];
+    let mid_new = &new_lines[prefix..new_lines.len() - suffix];
+    let n = mid_old.len();
+    let m = mid_new.len();
+
+    if n == 0 {
+        for (j, line) in mid_new.iter().enumerate() {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Insert,
+                left_line: None,
+                right_line: Some(prefix + j + 1),
+                text: (*line).to_string(),
+            });
+        }
+    } else if m == 0 {
+        for (i, line) in mid_old.iter().enumerate() {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Delete,
+                left_line: Some(prefix + i + 1),
+                right_line: None,
+                text: (*line).to_string(),
+            });
+        }
+    } else if n.saturating_mul(m) > 1_000_000 {
+        for (i, line) in mid_old.iter().enumerate() {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Delete,
+                left_line: Some(prefix + i + 1),
+                right_line: None,
+                text: (*line).to_string(),
+            });
+        }
+        for (j, line) in mid_new.iter().enumerate() {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Insert,
+                left_line: None,
+                right_line: Some(prefix + j + 1),
+                text: (*line).to_string(),
+            });
+        }
+    } else {
+        let cols = m + 1;
+        let mut dp = vec![0u32; (n + 1) * cols];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                dp[i * cols + j] = if mid_old[i] == mid_new[j] {
+                    dp[(i + 1) * cols + (j + 1)] + 1
+                } else {
+                    dp[(i + 1) * cols + j].max(dp[i * cols + (j + 1)])
+                };
+            }
+        }
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < n && j < m {
+            if mid_old[i] == mid_new[j] {
+                out.push(DiffLineDto {
+                    op: DiffOpKind::Equal,
+                    left_line: Some(prefix + i + 1),
+                    right_line: Some(prefix + j + 1),
+                    text: mid_old[i].to_string(),
+                });
+                i += 1;
+                j += 1;
+            } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
+                out.push(DiffLineDto {
+                    op: DiffOpKind::Delete,
+                    left_line: Some(prefix + i + 1),
+                    right_line: None,
+                    text: mid_old[i].to_string(),
+                });
+                i += 1;
+            } else {
+                out.push(DiffLineDto {
+                    op: DiffOpKind::Insert,
+                    left_line: None,
+                    right_line: Some(prefix + j + 1),
+                    text: mid_new[j].to_string(),
+                });
+                j += 1;
+            }
+        }
+        while i < n {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Delete,
+                left_line: Some(prefix + i + 1),
+                right_line: None,
+                text: mid_old[i].to_string(),
+            });
+            i += 1;
+        }
+        while j < m {
+            out.push(DiffLineDto {
+                op: DiffOpKind::Insert,
+                left_line: None,
+                right_line: Some(prefix + j + 1),
+                text: mid_new[j].to_string(),
+            });
+            j += 1;
+        }
+    }
+
+    for k in 0..suffix {
+        let old_idx = old_lines.len() - suffix + k;
+        let new_idx = new_lines.len() - suffix + k;
+        out.push(DiffLineDto {
+            op: DiffOpKind::Equal,
+            left_line: Some(old_idx + 1),
+            right_line: Some(new_idx + 1),
+            text: old_lines[old_idx].to_string(),
+        });
+    }
+    out
+}
+
+pub fn build_revision_diff(
+    base: Option<&StepRevisionDto>,
+    target: &StepRevisionDto,
+) -> RevisionDiffDto {
+    let old_text = base.map(|r| r.body_markdown.as_str()).unwrap_or("");
+    let lines = compute_line_diff_ops(old_text, &target.body_markdown);
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    let mut unchanged = 0usize;
+    for l in &lines {
+        match l.op {
+            DiffOpKind::Insert => additions += 1,
+            DiffOpKind::Delete => deletions += 1,
+            DiffOpKind::Equal => unchanged += 1,
+        }
+    }
+    RevisionDiffDto {
+        base_revision_id: base.map(|r| r.id),
+        base_edit_seq: base.map(|r| r.edit_seq).unwrap_or(0),
+        target_revision_id: target.id,
+        target_edit_seq: target.edit_seq,
+        locale_code: target.locale_code.clone(),
+        additions,
+        deletions,
+        unchanged,
+        lines,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollaborationAuditLogDto {
     pub id: Uuid,
@@ -434,7 +647,13 @@ pub fn is_deliverable_email(raw: &str) -> bool {
         || domain_lower.ends_with(".example.net")
         || domain_lower.ends_with(".example.org")
         || domain_lower.ends_with(".example")
-        || domain_lower.ends_with(".test");
+        || domain_lower.ends_with(".test")
+        || domain_lower.ends_with(".internal")
+        || domain_lower.ends_with(".lan")
+        || domain_lower.ends_with(".home")
+        || domain_lower.ends_with(".arpa")
+        || domain_lower.ends_with(".corp")
+        || domain_lower.ends_with(".localdomain");
     !is_reserved_sinkhole
 }
 
@@ -824,6 +1043,7 @@ pub struct UpdateUserProfileInput {
     pub uploaded_avatar_url: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn format_step_markdown_file(
     title: &str,
     summary: &str,
@@ -882,6 +1102,25 @@ pub fn format_step_markdown_file_with_author(
     )
 }
 
+fn escape_toml_basic_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn format_step_markdown_file_with_meta(
     title: &str,
@@ -898,8 +1137,43 @@ pub fn format_step_markdown_file_with_meta(
     tags: &[String],
     body_markdown: &str,
 ) -> String {
-    let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
-    let escaped_summary = summary.replace('\\', "\\\\").replace('"', "\\\"");
+    format_step_markdown_file_with_full_meta(
+        title,
+        summary,
+        step_number,
+        estimated_minutes,
+        synced_revision,
+        canonical_revision,
+        status,
+        license,
+        author,
+        published_at,
+        updated_at,
+        tags,
+        None,
+        body_markdown,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_step_markdown_file_with_full_meta(
+    title: &str,
+    summary: &str,
+    step_number: i32,
+    estimated_minutes: i32,
+    synced_revision: i32,
+    canonical_revision: i32,
+    status: &str,
+    license: &str,
+    author: &str,
+    published_at: Option<&str>,
+    updated_at: Option<&str>,
+    tags: &[String],
+    step_id: Option<Uuid>,
+    body_markdown: &str,
+) -> String {
+    let escaped_title = escape_toml_basic_string(title);
+    let escaped_summary = escape_toml_basic_string(summary);
     let clean_status = if status == "draft" {
         "draft"
     } else {
@@ -914,27 +1188,30 @@ pub fn format_step_markdown_file_with_meta(
     let author_line = if author.trim().is_empty() {
         String::new()
     } else {
-        let escaped_author = author.trim().replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_author = escape_toml_basic_string(author.trim());
         format!("author = \"{escaped_author}\"\n")
     };
     let published_line = published_at
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| format!("published_at = \"{s}\"\n"))
+        .map(|s| format!("published_at = \"{}\"\n", escape_toml_basic_string(s)))
         .unwrap_or_default();
     let updated_line = updated_at
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| format!("updated_at = \"{s}\"\n"))
+        .map(|s| format!("updated_at = \"{}\"\n", escape_toml_basic_string(s)))
+        .unwrap_or_default();
+    let step_id_line = step_id
+        .map(|id| format!("step_id = \"{id}\"\n"))
         .unwrap_or_default();
     let tags_toml = tags
         .iter()
-        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .map(|t| format!("\"{}\"", escape_toml_basic_string(t.trim())))
         .collect::<Vec<_>>()
         .join(", ");
 
     format!(
-        "+++\ntitle = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{author_line}{published_line}{updated_line}tags = [{tags_toml}]\n+++\n\n{}\n",
+        "+++\n{step_id_line}title = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{author_line}{published_line}{updated_line}tags = [{tags_toml}]\n+++\n\n{}\n",
         body_markdown.trim()
     )
 }
@@ -968,6 +1245,7 @@ mod tests {
             avatar_url: "https://blog.example.com/avatar.png".to_string(),
             wp_roles: vec!["administrator".to_string()],
             blog_origin: "https://blog.example.com".to_string(),
+            jti: "test-jti-1".to_string(),
             iat: now,
             exp: now + 300,
         };
@@ -1206,5 +1484,80 @@ mod tests {
             evaluate_login_anomaly("198.51.100.10", "dev:a:chrome", &[], true, &[]),
             Some("new_ip_and_device")
         );
+    }
+
+    #[test]
+    fn computes_lcs_line_diff_and_revision_diff_summary() {
+        let old_md = "# Intro\nline two\nline three\nfooter";
+        let new_md = "# Intro\nline two edited\nline extra\nline three\nfooter";
+        let ops = compute_line_diff_ops(old_md, new_md);
+        assert!(ops.iter().any(|l| l.op == DiffOpKind::Equal && l.text == "# Intro"));
+        assert!(ops
+            .iter()
+            .any(|l| l.op == DiffOpKind::Delete && l.text == "line two"));
+        assert!(ops
+            .iter()
+            .any(|l| l.op == DiffOpKind::Insert && l.text == "line two edited"));
+        assert!(ops
+            .iter()
+            .any(|l| l.op == DiffOpKind::Insert && l.text == "line extra"));
+        assert!(ops.iter().any(|l| l.op == DiffOpKind::Equal && l.text == "footer"));
+
+        let base_rev = StepRevisionDto {
+            id: Uuid::new_v4(),
+            step_id: Uuid::new_v4(),
+            locale_code: "zh-CN".to_string(),
+            edit_seq: 1,
+            synced_revision: 1,
+            status: "published".to_string(),
+            title: "t".to_string(),
+            summary: String::new(),
+            body_markdown: old_md.to_string(),
+            content_sha256: "a".to_string(),
+            author_user_id: None,
+            author_name: "A".to_string(),
+            change_note: String::new(),
+            created_at: Utc::now(),
+        };
+        let target_rev = StepRevisionDto {
+            id: Uuid::new_v4(),
+            edit_seq: 2,
+            body_markdown: new_md.to_string(),
+            ..base_rev.clone()
+        };
+        let diff = build_revision_diff(Some(&base_rev), &target_rev);
+        assert_eq!(diff.base_edit_seq, 1);
+        assert_eq!(diff.target_edit_seq, 2);
+        assert_eq!(diff.additions, 2);
+        assert_eq!(diff.deletions, 1);
+        assert_eq!(diff.unchanged, 3);
+    }
+
+    #[test]
+    fn rejects_overlong_passwords_and_preserves_sso_jti_claims() {
+        let overlong = "a".repeat(513);
+        let argon_hash = hash_password("alice", "ValidPass123!");
+        assert!(!verify_password("alice", &overlong, &argon_hash));
+
+        let legacy_overlong = crate::crypto::legacy_sha256_password("alice", &overlong);
+        assert!(!verify_password("alice", &overlong, &legacy_overlong));
+
+        let secret = "icehandnote-super-secret-bridge-key-2026";
+        let now = Utc::now().timestamp();
+        let claims = BlogSsoClaims {
+            wp_user_id: 7,
+            username: "alice".to_string(),
+            display_name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+            avatar_url: String::new(),
+            wp_roles: vec!["author".to_string()],
+            blog_origin: "https://blog.example.com".to_string(),
+            jti: "sso-jti-unique-99".to_string(),
+            iat: now,
+            exp: now + 120,
+        };
+        let token = sign_blog_sso_token(&claims, secret).unwrap();
+        let verified = verify_blog_sso_token(&token, secret).unwrap();
+        assert_eq!(verified.jti, "sso-jti-unique-99");
     }
 }

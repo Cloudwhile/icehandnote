@@ -90,20 +90,25 @@ pub struct ContentBundle {
     pub tracks: Vec<LoadedTrack>,
 }
 
+type StepFileMap = BTreeMap<String, BTreeMap<String, (String, DateTime<Utc>, DateTime<Utc>)>>;
+
 fn load_steps_from_dir(
     track_slug: &str,
     ch_slug: &str,
     dir: &Path,
 ) -> Result<Vec<LoadedStep>> {
-    let mut step_files_by_slug: BTreeMap<
-        String,
-        BTreeMap<String, (String, DateTime<Utc>, DateTime<Utc>)>,
-    > = BTreeMap::new();
+    let mut step_files_by_slug: StepFileMap = BTreeMap::new();
 
     if dir.exists() {
+        if crate::is_symlink_path(dir) {
+            anyhow::bail!("Refusing symlink chapter directory: {}", dir.display());
+        }
         for f_entry in fs::read_dir(dir)?.flatten() {
             let p = f_entry.path();
-            if !p.is_file() {
+            if crate::is_symlink_path(&p)
+                || !p.is_file()
+                || crate::ensure_within_dir(dir, &p).is_err()
+            {
                 continue;
             }
             let Some(fname) = p.file_name().and_then(|s| s.to_str()) else {
@@ -119,6 +124,11 @@ fn load_steps_from_dir(
             };
             let step_slug = without_md[..dot_idx].to_string();
             let locale = without_md[dot_idx + 1..].to_string();
+            if !crate::is_valid_step_slug_segment(&step_slug)
+                || !crate::is_supported_locale_code(&locale)
+            {
+                continue;
+            }
             let raw_md = fs::read_to_string(&p)?;
             let meta = fs::metadata(&p).ok();
             let mtime = meta
@@ -143,15 +153,9 @@ fn load_steps_from_dir(
     for (step_slug, locale_map) in step_files_by_slug {
         let mut translations = BTreeMap::new();
         let mut canonical_rev = 1;
-        let mut step_num = 1;
-        let mut est_mins = 10;
 
         for (loc, (raw_md, ctime, mtime)) in locale_map {
             let compiled = compile_notebook_markdown(&raw_md);
-            if loc == "zh-CN" || canonical_rev == 1 {
-                step_num = compiled.frontmatter.step_number;
-                est_mins = compiled.frontmatter.estimated_minutes;
-            }
             if let Some(c_rev) = compiled.frontmatter.canonical_revision {
                 canonical_rev = canonical_rev.max(c_rev);
             }
@@ -196,7 +200,21 @@ fn load_steps_from_dir(
                 .unwrap_or_else(|| "zh-CN".to_string())
         };
 
-        let step_id = deterministic_uuid(&format!("step:{track_slug}:{ch_slug}:{step_slug}"));
+        let meta_tr = translations
+            .get(&default_locale)
+            .or_else(|| translations.values().next());
+        let step_num = meta_tr
+            .map(|t| t.compiled.frontmatter.step_number)
+            .unwrap_or(1);
+        let est_mins = meta_tr
+            .map(|t| t.compiled.frontmatter.estimated_minutes)
+            .unwrap_or(10);
+
+        let step_id = translations
+            .get(&default_locale)
+            .and_then(|t| t.compiled.frontmatter.step_id)
+            .or_else(|| translations.values().find_map(|t| t.compiled.frontmatter.step_id))
+            .unwrap_or_else(|| deterministic_uuid(&format!("step:{track_slug}:{ch_slug}:{step_slug}")));
         loaded_steps.push(LoadedStep {
             id: step_id,
             slug: step_slug,
@@ -218,30 +236,59 @@ pub fn load_content_directory(content_root: &Path) -> Result<ContentBundle> {
     if !content_root.exists() {
         return Ok(bundle);
     }
+    if crate::is_symlink_path(content_root) {
+        anyhow::bail!(
+            "Refusing symlink content directory: {}",
+            content_root.display()
+        );
+    }
 
     let mut track_dirs: Vec<_> = fs::read_dir(content_root)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            let p = e.path();
+            !crate::is_symlink_path(&p)
+                && p.is_dir()
+                && crate::ensure_within_dir(content_root, &p).is_ok()
+        })
         .collect();
     track_dirs.sort_by_key(|e| e.file_name());
 
     for entry in track_dirs {
         let track_dir = entry.path();
         let manifest_path = track_dir.join("track.toml");
-        if !manifest_path.exists() {
+        if !manifest_path.exists()
+            || crate::is_symlink_path(&manifest_path)
+            || crate::ensure_within_dir(&track_dir, &manifest_path).is_err()
+        {
             continue;
         }
         let manifest_str = fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?;
         let manifest: TrackManifest = toml::from_str(&manifest_str)
             .with_context(|| format!("parsing {}", manifest_path.display()))?;
+        if !crate::is_valid_slug_segment(&manifest.slug) {
+            anyhow::bail!(
+                "Invalid track slug '{}' in {}",
+                manifest.slug,
+                manifest_path.display()
+            );
+        }
 
         let track_id = deterministic_uuid(&format!("track:{}", manifest.slug));
         let mut chapters = Vec::new();
 
         for ch_meta in &manifest.chapters {
+            if !crate::is_valid_slug_segment(&ch_meta.slug) {
+                anyhow::bail!(
+                    "Invalid chapter slug '{}' in {}",
+                    ch_meta.slug,
+                    manifest_path.display()
+                );
+            }
             let ch_id = deterministic_uuid(&format!("chapter:{}:{}", manifest.slug, ch_meta.slug));
             let ch_dir = track_dir.join(&ch_meta.slug);
+            crate::ensure_within_dir(&track_dir, &ch_dir)?;
             let loaded_steps = load_steps_from_dir(&manifest.slug, &ch_meta.slug, &ch_dir)?;
 
             chapters.push(LoadedChapter {

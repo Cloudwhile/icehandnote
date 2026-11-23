@@ -6,6 +6,134 @@ pub mod studio_auth;
 pub use local_seed::LocalSeedRepository;
 pub use postgres::PostgresRepository;
 
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+pub(crate) fn is_valid_slug_segment(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 96
+        && !slug.contains('/')
+        && !slug.contains('\\')
+        && !slug.contains("..")
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub(crate) fn is_valid_step_slug_segment(slug: &str) -> bool {
+    is_valid_slug_segment(slug) && slug != "-"
+}
+
+pub(crate) fn is_supported_locale_code(locale: &str) -> bool {
+    let trimmed = locale.trim();
+    icehandnote_core::SUPPORTED_LOCALES
+        .iter()
+        .any(|(code, _)| *code == trimmed)
+}
+
+pub(crate) fn is_symlink_path(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+pub(crate) fn ensure_within_dir(base: &Path, target: &Path) -> anyhow::Result<PathBuf> {
+    let checked = target.strip_prefix(base).unwrap_or(target);
+    if checked
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        anyhow::bail!("Refusing parent-directory traversal in {}", target.display());
+    }
+    let canon_base = fs::canonicalize(base)?;
+    let mut suffix = PathBuf::new();
+    let mut cursor = target.to_path_buf();
+    while !cursor.exists() {
+        if is_symlink_path(&cursor) {
+            anyhow::bail!("Refusing symlink path inside directory: {}", cursor.display());
+        }
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        suffix = PathBuf::from(name).join(suffix);
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent.to_path_buf();
+    }
+    if is_symlink_path(&cursor) {
+        anyhow::bail!("Refusing symlink path inside directory: {}", cursor.display());
+    }
+    let canon_existing = fs::canonicalize(&cursor)?;
+    let resolved = if suffix.as_os_str().is_empty() {
+        canon_existing
+    } else {
+        canon_existing.join(&suffix)
+    };
+    if !resolved.starts_with(&canon_base) {
+        anyhow::bail!(
+            "Path {} escapes base directory {}",
+            resolved.display(),
+            canon_base.display()
+        );
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    if is_symlink_path(path) {
+        anyhow::bail!("Refusing to overwrite symlink at {}", path.display());
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp_name = format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let tmp_path = parent.join(tmp_name);
+    let write_res = (|| -> anyhow::Result<()> {
+        let mut f = fs::File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+pub(crate) fn atomic_write_str(path: &Path, text: &str) -> anyhow::Result<()> {
+    atomic_write_bytes(path, text.as_bytes())
+}
+
+pub(crate) fn escape_like_pattern(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn domain_err(
     code: icehandnote_core::error::ErrorCode,
     detail: impl Into<String>,
@@ -99,7 +227,6 @@ use icehandnote_core::{
     SearchHitDto, StepDetailDto, TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
 };
 use chrono::{DateTime, Utc};
-use std::path::Path;
 use uuid::Uuid;
 
 #[async_trait]
@@ -339,6 +466,13 @@ pub trait TutorialRepository: Send + Sync {
         step_slug: &str,
         locale: &str,
     ) -> Result<StudioStepEditorDto>;
+    async fn resolve_step_collab_access(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Option<(Uuid, String, Vec<String>)>>;
     async fn studio_save_step(
         &self,
         author: &UserProfileDto,

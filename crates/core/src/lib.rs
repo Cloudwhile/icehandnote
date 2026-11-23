@@ -6,6 +6,8 @@ pub mod reading_time;
 pub mod settings;
 pub mod webauthn;
 
+pub use crypto::generate_uuid_v7;
+
 use ammonia::Builder as HtmlSanitizer;
 use chrono::{DateTime, Utc};
 use pulldown_cmark::{html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -230,6 +232,8 @@ pub struct TocItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StepFrontmatter {
+    #[serde(default)]
+    pub step_id: Option<Uuid>,
     pub title: String,
     pub summary: String,
     #[serde(default = "default_step_num")]
@@ -926,9 +930,68 @@ pub fn is_safe_image_src(src: &str) -> bool {
         || (trimmed.starts_with('/') && !trimmed.starts_with("//"))
 }
 
+fn allowed_ink_classes() -> HashMap<&'static str, HashSet<&'static str>> {
+    let mut map = HashMap::new();
+    map.insert(
+        "span",
+        HashSet::from([
+            "ink-fg-violet",
+            "ink-fg-ice",
+            "ink-fg-emerald",
+            "ink-fg-amber",
+            "ink-fg-rose",
+            "ink-fg-muted",
+            "ink-bg-violet",
+            "ink-bg-ice",
+            "ink-bg-emerald",
+            "ink-bg-amber",
+            "ink-bg-rose",
+            "ink-bg-kraft",
+            "ink-size-sm",
+            "ink-size-base",
+            "ink-size-lg",
+            "ink-size-xl",
+            "ink-size-2xl",
+            "ink-kbd-combo",
+            "ink-kbd-sep",
+        ]),
+    );
+    map.insert(
+        "mark",
+        HashSet::from([
+            "ink-hl-amber",
+            "ink-hl-violet",
+            "ink-hl-ice",
+            "ink-hl-emerald",
+            "ink-hl-rose",
+        ]),
+    );
+    map.insert("code", HashSet::from(["ink-inline-code"]));
+    map.insert("kbd", HashSet::from(["ink-kbd"]));
+    map.insert("a", HashSet::from(["ink-inline-link", "ink-chrome-link"]));
+    map.insert(
+        "p",
+        HashSet::from([
+            "ink-align-left",
+            "ink-align-center",
+            "ink-align-right",
+            "ink-size-sm",
+            "ink-size-base",
+            "ink-size-lg",
+            "ink-size-xl",
+            "ink-size-2xl",
+        ]),
+    );
+    map
+}
+
+fn safe_url_schemes() -> HashSet<&'static str> {
+    HashSet::from(["https", "http", "mailto"])
+}
+
 /// Sanitize customizable inline text fields (site name, hero title/tagline, footer, badges,
 /// track/chapter/article titles & summaries) so safe inline HTML tags render cleanly while
-/// stripping scripts, event handlers, and unsafe URLs.
+/// stripping scripts, event handlers, arbitrary styling classes, and unsafe URLs.
 pub fn sanitize_custom_html(raw: &str, max_chars: usize) -> String {
     let clipped: String = raw.trim().chars().take(max_chars).collect();
     if clipped.is_empty() {
@@ -945,14 +1008,16 @@ pub fn sanitize_custom_html(raw: &str, max_chars: usize) -> String {
         tags.insert(t);
     }
     let mut generic_attrs = HashSet::new();
-    generic_attrs.insert("class");
     generic_attrs.insert("title");
 
     let mut builder = HtmlSanitizer::new();
     builder
         .tags(tags)
         .generic_attributes(generic_attrs)
+        .allowed_classes(allowed_ink_classes())
         .add_tag_attributes("a", &["href", "target"])
+        .url_schemes(safe_url_schemes())
+        .link_rel(Some("noopener noreferrer"))
         .url_relative(ammonia::UrlRelative::PassThrough);
     builder.clean(&clipped).to_string()
 }
@@ -1004,7 +1069,6 @@ pub fn sanitize_rich_fragment(fragment: &str) -> String {
         tags.insert(t);
     }
     let mut generic_attrs = HashSet::new();
-    generic_attrs.insert("class");
     generic_attrs.insert("title");
     generic_attrs.insert("data-term");
 
@@ -1012,8 +1076,11 @@ pub fn sanitize_rich_fragment(fragment: &str) -> String {
     builder
         .tags(tags)
         .generic_attributes(generic_attrs)
+        .allowed_classes(allowed_ink_classes())
         .add_tag_attributes("a", &["href", "target"])
         .add_tag_attributes("img", &["src", "alt", "title", "loading"])
+        .url_schemes(safe_url_schemes())
+        .link_rel(Some("noopener noreferrer"))
         .url_relative(ammonia::UrlRelative::PassThrough);
     builder.clean(fragment).to_string()
 }
@@ -1060,6 +1127,72 @@ pub fn content_stable_block_id(
     }
 }
 
+fn is_valid_explicit_anchor_id(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 64
+        && raw.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Strip an optional trailing `{#custom-id}` attribute from non-code text events in a heading or paragraph.
+/// Preserves inline code spans (`Event::Code`) verbatim so `` `{#id}` `` is never treated as an anchor.
+fn strip_trailing_explicit_anchor(events: &mut Vec<Event<'_>>) -> Option<String> {
+    let mut check_idx = events.len();
+    while check_idx > 0 {
+        check_idx -= 1;
+        match &events[check_idx] {
+            Event::Text(t) if t.trim().is_empty() => continue,
+            Event::Text(t) => {
+                let s = t.as_ref();
+                let trimmed_end = s.trim_end();
+                if let Some(without_close) = trimmed_end.strip_suffix('}') {
+                    if let Some(open_idx) = without_close.rfind("{#") {
+                        let candidate = &without_close[open_idx + 2..];
+                        let valid_boundary = open_idx == 0
+                            || without_close[..open_idx]
+                                .chars()
+                                .last()
+                                .is_some_and(|c| c.is_whitespace());
+                        if valid_boundary && is_valid_explicit_anchor_id(candidate) {
+                            let anchor = candidate.to_string();
+                            let prefix = without_close[..open_idx].trim_end().to_string();
+                            if prefix.is_empty() {
+                                events.remove(check_idx);
+                            } else {
+                                events[check_idx] = Event::Text(prefix.into());
+                            }
+                            return Some(anchor);
+                        }
+                    }
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn register_block_id(
+    explicit_id: Option<&str>,
+    prefix: &str,
+    seed: &str,
+    seen: &mut HashMap<String, usize>,
+) -> String {
+    if let Some(raw) = explicit_id.filter(|s| is_valid_explicit_anchor_id(s)) {
+        let entry = seen.entry(raw.to_string()).or_insert(0);
+        *entry += 1;
+        return if *entry == 1 {
+            raw.to_string()
+        } else {
+            format!("{raw}-{}", *entry)
+        };
+    }
+    content_stable_block_id(prefix, seed, seen)
+}
+
 fn render_inline_markdown(src: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -1075,15 +1208,52 @@ fn render_inline_markdown(src: &str) -> String {
     sanitize_rich_fragment(unwrapped)
 }
 
+fn corrupt_frontmatter_default() -> StepFrontmatter {
+    StepFrontmatter {
+        step_number: default_step_num(),
+        estimated_minutes: 1,
+        synced_revision: default_rev(),
+        status: "draft".to_string(),
+        ..StepFrontmatter::default()
+    }
+}
+
+/// Validate an explicit `+++ ... +++` TOML frontmatter block if present.
+pub fn validate_step_frontmatter(raw: &str) -> Result<(), String> {
+    let normalized = raw.trim_start_matches('\u{feff}');
+    if let Some(rest) = normalized.strip_prefix("+++") {
+        let Some(end_idx) = rest.find("\n+++") else {
+            return Err("Unterminated +++ frontmatter block.".to_string());
+        };
+        let toml_str = &rest[..end_idx];
+        let parsed: StepFrontmatter = toml::from_str(toml_str)
+            .map_err(|e| format!("Invalid step frontmatter TOML: {e}"))?;
+        if !matches!(
+            parsed.status.trim(),
+            "" | "draft" | "published" | "taken_down"
+        ) {
+            return Err(format!("Unsupported step status '{}'.", parsed.status));
+        }
+    }
+    Ok(())
+}
+
 fn strip_frontmatter(raw: &str) -> (StepFrontmatter, &str) {
     let normalized = raw.trim_start_matches('\u{feff}');
     if let Some(rest) = normalized.strip_prefix("+++") {
         if let Some(end_idx) = rest.find("\n+++") {
             let toml_str = &rest[..end_idx];
             let body = &rest[end_idx + 4..];
-            let fm: StepFrontmatter = toml::from_str(toml_str).unwrap_or_default();
+            let fm: StepFrontmatter = match toml::from_str(toml_str) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("warn: invalid step frontmatter TOML, falling back to draft defaults: {err}");
+                    corrupt_frontmatter_default()
+                }
+            };
             return (fm, body.trim_start_matches(['\r', '\n']));
         }
+        return (corrupt_frontmatter_default(), "");
     }
     (StepFrontmatter::default(), normalized)
 }
@@ -1505,6 +1675,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         other => heading_events.push(other),
                     }
                 }
+                let explicit_id = strip_trailing_explicit_anchor(&mut heading_events);
                 let mut raw_text = String::new();
                 html::push_html(&mut raw_text, heading_events.into_iter());
                 let (is_task, default_checked, parsed_head) = parse_heading_task_prefix(&raw_text);
@@ -1512,9 +1683,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                 let plain_heading = reading_time::strip_html_tags(&text);
                 let idx = (lvl as usize).saturating_sub(1).min(3);
                 h_counts[idx] += 1;
-                for deeper in (idx + 1)..4 {
-                    h_counts[deeper] = 0;
-                }
+                h_counts[(idx + 1)..].fill(0);
                 let number = if idx == 0 {
                     format!("{}", h_counts[0])
                 } else if h_counts[0] == 0 {
@@ -1532,8 +1701,12 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         .join(".")
                 };
 
-                let block_id =
-                    content_stable_block_id("sec", &plain_heading, &mut seen_block_ids);
+                let block_id = register_block_id(
+                    explicit_id.as_deref(),
+                    "sec",
+                    &plain_heading,
+                    &mut seen_block_ids,
+                );
                 plain_chunks.push(plain_heading.clone());
                 toc.push(TocItem {
                     id: block_id.clone(),
@@ -1555,14 +1728,9 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
 
             Event::Start(Tag::Paragraph) => {
                 let mut inner_events = Vec::new();
-                let mut plain = String::new();
                 for ev in events_iter.by_ref() {
                     match ev {
                         Event::End(TagEnd::Paragraph) => break,
-                        Event::Text(ref t) | Event::Code(ref t) => {
-                            plain.push_str(t);
-                            inner_events.push(ev);
-                        }
                         other => inner_events.push(other),
                     }
                 }
@@ -1622,11 +1790,23 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                     }
                 }
 
+                let explicit_id = strip_trailing_explicit_anchor(&mut inner_events);
+                let mut plain = String::new();
+                for ev in &inner_events {
+                    if let Event::Text(ref t) | Event::Code(ref t) = ev {
+                        plain.push_str(t);
+                    }
+                }
                 let mut html_buf = String::new();
                 html::push_html(&mut html_buf, inner_events.into_iter());
                 let clean = sanitize_rich_fragment(&html_buf);
                 if !clean.trim().is_empty() {
-                    let block_id = content_stable_block_id("p", &plain, &mut seen_block_ids);
+                    let block_id = register_block_id(
+                        explicit_id.as_deref(),
+                        "p",
+                        &plain,
+                        &mut seen_block_ids,
+                    );
                     plain_chunks.push(plain);
                     blocks.push(NotebookBlock::Paragraph {
                         block_id,
@@ -1718,10 +1898,8 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                                         *size = size_v;
                                     }
                                 }
-                                NotebookBlock::Heading { align, .. } => {
-                                    if align_v.is_some() {
-                                        *align = align_v;
-                                    }
+                                NotebookBlock::Heading { align, .. } if align_v.is_some() => {
+                                    *align = align_v;
                                 }
                                 _ => {}
                             }
@@ -2048,7 +2226,7 @@ pub fn compile_notebook_markdown(raw_source: &str) -> CompiledDocument {
                         Event::End(TagEnd::Item) if depth == 1 => {
                             in_item = false;
                             let marker = current_task_marker.take();
-                            let drained: Vec<_> = current_item_events.drain(..).collect();
+                            let drained: Vec<_> = std::mem::take(&mut current_item_events);
 
                             if marker.is_some() {
                                 // Split inline task item on ` | ` into (title_events, detail_events)
@@ -2914,7 +3092,7 @@ pub fn cache_key(id: u64) -> String {
             step_title: Some("欢迎来到 IceHandnote".to_string()),
         };
 
-        let md = export_notes_as_markdown(&[note.clone()], "IceHandnote");
+        let md = export_notes_as_markdown(std::slice::from_ref(&note), "IceHandnote");
         assert!(md.contains("欢迎来到 IceHandnote"));
         assert!(md.contains("> 核心引用"));
         assert!(md.contains("**灵感**"));
@@ -2925,5 +3103,87 @@ pub fn cache_key(id: u64) -> String {
         assert_eq!(jsonld["total"], 1);
         assert_eq!(jsonld["items"][0]["type"], "Annotation");
         assert_eq!(jsonld["items"][0]["body"]["format"], "text/markdown");
+    }
+
+    #[test]
+    fn generates_rfc9562_uuid_v7_with_version_and_variant() {
+        let id = generate_uuid_v7();
+        assert_eq!(id.get_version_num(), 7);
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+    }
+
+    #[test]
+    fn compiles_explicit_custom_block_anchors_and_preserves_inline_code() {
+        let md = "## Architecture Overview {#arch-overview}\n\nParagraph content stays anchored here. {#p-custom-intro}\n\nKeep inline code literal `{#not-an-anchor}` please.";
+        let doc = compile_notebook_markdown(md);
+
+        match &doc.blocks[0] {
+            NotebookBlock::Heading { block_id, text, .. } => {
+                assert_eq!(block_id, "arch-overview");
+                assert!(!text.contains("{#arch-overview}"));
+                assert!(text.contains("Architecture Overview"));
+            }
+            other => panic!("expected Heading, got {other:?}"),
+        }
+        match &doc.blocks[1] {
+            NotebookBlock::Paragraph { block_id, html, .. } => {
+                assert_eq!(block_id, "p-custom-intro");
+                assert!(!html.contains("{#p-custom-intro}"));
+                assert!(html.contains("Paragraph content stays anchored here."));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+        match &doc.blocks[2] {
+            NotebookBlock::Paragraph { block_id, html, .. } => {
+                assert!(block_id.starts_with("p-"));
+                assert!(html.contains("{#not-an-anchor}"));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+        assert_eq!(doc.toc[0].id, "arch-overview");
+    }
+
+    #[test]
+    fn validates_and_escapes_frontmatter_control_chars() {
+        let md = crate::auth::format_step_markdown_file_with_full_meta(
+            "Title with \"quotes\"\nand control\x07",
+            "Summary\\path\twith tab",
+            1,
+            5,
+            1,
+            1,
+            "published",
+            "cc-by-4.0",
+            "Author\nLine",
+            None,
+            None,
+            &["tag\"a".to_string()],
+            None,
+            "Body text",
+        );
+        assert!(
+            validate_step_frontmatter(&md).is_ok(),
+            "escaped frontmatter must parse cleanly:\n{md}"
+        );
+
+        let unterminated = "+++\ntitle = \"Broken\"\n\nBody";
+        assert!(validate_step_frontmatter(unterminated).is_err());
+
+        let bad_status = "+++\ntitle = \"Bad\"\nstatus = \"archived\"\n+++\n\nBody";
+        assert!(validate_step_frontmatter(bad_status).is_err());
+    }
+
+    #[test]
+    fn enforces_ammonia_class_allowlist_and_link_rel() {
+        let dirty = r#"<mark class="ink-hl-amber evil-injected">Highlight</mark> <span class="ink-fg-violet bad-span">Fg</span> <a href="https://example.com" class="ink-inline-link attacker-cls" target="_blank">SafeLink</a> <a href="javascript:alert(1)">BadLink</a>"#;
+        let clean = sanitize_rich_fragment(dirty);
+        assert!(clean.contains("ink-hl-amber"), "clean={clean}");
+        assert!(clean.contains("ink-fg-violet"), "clean={clean}");
+        assert!(clean.contains("ink-inline-link"), "clean={clean}");
+        assert!(!clean.contains("evil-injected"), "clean={clean}");
+        assert!(!clean.contains("bad-span"), "clean={clean}");
+        assert!(!clean.contains("attacker-cls"), "clean={clean}");
+        assert!(clean.contains(r#"rel="noopener noreferrer""#), "clean={clean}");
+        assert!(!clean.contains("javascript:"), "clean={clean}");
     }
 }

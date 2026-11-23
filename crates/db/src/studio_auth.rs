@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
         compute_step_content_sha256, compute_step_etag, extract_body_without_frontmatter,
-        format_step_markdown_file_with_meta, hash_password, hash_session_token,
+        generate_uuid_v7, hash_password, hash_session_token,
         normalize_collaborator_role, normalize_locale_scope, verify_password, ArticleAuthorDto,
         BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
         CreateTrackInput, SaveStudioStepInput, StepRevisionDto, StudioChapterDto,
@@ -301,6 +301,11 @@ pub fn upsert_local_blog_user(
 ) -> UserProfileDto {
     let now = Utc::now();
     let wp_role = UserRole::from_wordpress_roles(&claims.wp_roles);
+    let clean_avatar = if icehandnote_core::is_safe_image_src(&claims.avatar_url) {
+        claims.avatar_url.trim().to_string()
+    } else {
+        String::new()
+    };
 
     if let Some(existing) = users.iter_mut().find(|u| {
         u.profile.wp_user_id == Some(claims.wp_user_id)
@@ -308,12 +313,15 @@ pub fn upsert_local_blog_user(
                 && !claims.email.is_empty()
                 && u.profile.email.eq_ignore_ascii_case(&claims.email))
     }) {
+        if existing.profile.is_banned {
+            return existing.profile.clone();
+        }
         existing.profile.wp_user_id = Some(claims.wp_user_id);
         existing.profile.display_name = claims.display_name.clone();
-        if !claims.avatar_url.is_empty() {
-            existing.profile.oauth_avatar_url = claims.avatar_url.clone();
+        if !clean_avatar.is_empty() {
+            existing.profile.oauth_avatar_url = clean_avatar.clone();
             if existing.profile.avatar_source == "default" && existing.profile.avatar_url.is_empty() {
-                existing.profile.avatar_url = claims.avatar_url.clone();
+                existing.profile.avatar_url = clean_avatar;
             }
         }
         if wp_role.is_admin() || (wp_role.can_author() && !existing.profile.role.is_admin()) {
@@ -337,7 +345,7 @@ pub fn upsert_local_blog_user(
     } else {
         source_host.to_string()
     };
-    let avatar_source = if claims.avatar_url.trim().is_empty() {
+    let avatar_source = if clean_avatar.is_empty() {
         "default".to_string()
     } else {
         "oauth".to_string()
@@ -348,9 +356,9 @@ pub fn upsert_local_blog_user(
         username: claims.username.clone(),
         display_name: claims.display_name.clone(),
         email: claims.email.clone(),
-        avatar_url: claims.avatar_url.clone(),
+        avatar_url: clean_avatar.clone(),
         avatar_source,
-        oauth_avatar_url: claims.avatar_url.clone(),
+        oauth_avatar_url: clean_avatar,
         uploaded_avatar_url: String::new(),
         oauth_provider: None,
         oauth_bindings: Vec::new(),
@@ -574,7 +582,7 @@ pub fn build_studio_overview_from_bundle(
     users: &[StoredUserRecord],
     gravatar_base_url: &str,
 ) -> Vec<StudioTrackDto> {
-    let is_reader_only = viewer.map_or(false, |v| !v.role.can_author());
+    let is_reader_only = viewer.is_some_and(|v| !v.role.can_author());
     bundle
         .tracks
         .iter()
@@ -607,7 +615,7 @@ pub fn build_studio_overview_from_bundle(
                         .iter()
                         .filter_map(|s| {
                             let can_see_drafts = viewer
-                                .map_or(true, |v| user_can_read_local_draft(v, s.id, step_meta));
+                                .is_none_or(|v| user_can_read_local_draft(v, s.id, step_meta));
                             if is_reader_only && !can_see_drafts {
                                 return None;
                             }
@@ -734,12 +742,6 @@ pub fn read_step_editor_from_bundle(
                 .iter()
                 .find(|c| c.slug == chapter_slug)
                 .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
-                .or_else(|| {
-                    track
-                        .chapters
-                        .iter()
-                        .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
-                })
         };
         if let Some((ch, step)) = matched {
             let meta = step_meta.get(&step.id);
@@ -752,7 +754,7 @@ pub fn read_step_editor_from_bundle(
             let can_manage_collaborators =
                 viewer.role.is_admin() || owner_id == Some(viewer.id);
             let can_leave = owner_id != Some(viewer.id)
-                && meta.map_or(false, |m| m.is_collaborator(viewer.id));
+                && meta.is_some_and(|m| m.is_collaborator(viewer.id));
 
             let pending_invites: Vec<CollaboratorInviteDto> = if can_manage_collaborators {
                 invites
@@ -973,6 +975,19 @@ pub fn apply_save_step_to_bundle_and_disk(
     content_dir: &Path,
     require_if_match: bool,
 ) -> Result<StudioStepEditorDto> {
+    let clean_track_slug = input.track_slug.trim();
+    if !is_valid_slug_segment(clean_track_slug) {
+        return Err(domain_err(
+            ErrorCode::InvalidSlug,
+            "Invalid series URL slug.",
+        ));
+    }
+    if !crate::is_supported_locale_code(&input.locale) {
+        return Err(domain_err(
+            ErrorCode::BadRequest,
+            "Unsupported locale code.",
+        ));
+    }
     let target_slug = input.step_slug.trim();
     if !is_valid_step_slug_segment(target_slug) {
         return Err(domain_err(
@@ -998,11 +1013,11 @@ pub fn apply_save_step_to_bundle_and_disk(
     let Some(track) = bundle
         .tracks
         .iter_mut()
-        .find(|t| t.manifest.slug == input.track_slug)
+        .find(|t| t.manifest.slug == clean_track_slug)
     else {
         return Err(domain_err(
             ErrorCode::TrackNotFound,
-            format!("Track not found: {}", input.track_slug),
+            format!("Track not found: {}", clean_track_slug),
         ));
     };
     let mut resolved_ch_slug = input.chapter_slug.trim().to_string();
@@ -1020,7 +1035,7 @@ pub fn apply_save_step_to_bundle_and_disk(
             for (loc, meta) in &track.manifest.translations {
                 titles.insert(loc.clone(), meta.title.clone());
             }
-            let ch_id = deterministic_uuid(&format!("chapter:{}:chapters", input.track_slug));
+            let ch_id = deterministic_uuid(&format!("chapter:{clean_track_slug}:chapters"));
             track.manifest.chapters.push(ChapterManifest {
                 slug: "chapters".to_string(),
                 number: 1,
@@ -1035,6 +1050,11 @@ pub fn apply_save_step_to_bundle_and_disk(
             });
             resolved_ch_slug = "chapters".to_string();
         }
+    } else if !is_valid_slug_segment(&resolved_ch_slug) {
+        return Err(domain_err(
+            ErrorCode::InvalidSlug,
+            "Invalid chapter URL slug.",
+        ));
     }
     if prev_slug_opt.is_some()
         && track
@@ -1080,6 +1100,15 @@ pub fn apply_save_step_to_bundle_and_disk(
 
     if is_existing_step {
         user_can_edit_local_step_locale(author, step_id, &input.locale, step_meta)?;
+        if prev_slug_opt.is_some() {
+            let (viewer_role, _) = resolve_local_viewer_role(author, step_id, step_meta);
+            if viewer_role == "translator" {
+                return Err(domain_err(
+                    ErrorCode::CollaboratorRoleForbidden,
+                    "Translators cannot rename an article URL slug across locales.",
+                ));
+            }
+        }
     } else if !author.role.can_author() {
         return Err(domain_err(
             ErrorCode::StepEditForbidden,
@@ -1209,7 +1238,7 @@ pub fn apply_save_step_to_bundle_and_disk(
 
     let published_iso = published_at.to_rfc3339();
     let updated_iso = now.to_rfc3339();
-    let raw_md = format_step_markdown_file_with_meta(
+    let raw_md = icehandnote_core::auth::format_step_markdown_file_with_full_meta(
         &clean_title,
         &clean_summary,
         input.step_number,
@@ -1222,18 +1251,22 @@ pub fn apply_save_step_to_bundle_and_disk(
         Some(&published_iso),
         Some(&updated_iso),
         &input.tags,
+        Some(step_id),
         &input.body_markdown,
     );
     let compiled = compile_notebook_markdown(&raw_md);
 
     if input.write_to_content_dir {
-        let ch_dir = content_dir.join(&input.track_slug).join(&resolved_ch_slug);
+        fs::create_dir_all(content_dir)?;
+        let ch_dir = content_dir.join(clean_track_slug).join(&resolved_ch_slug);
+        crate::ensure_within_dir(content_dir, &ch_dir)?;
         fs::create_dir_all(&ch_dir)?;
         if let Some(prev_slug) = prev_slug_opt {
             rename_step_markdown_files(&ch_dir, prev_slug, target_slug);
         }
         let file_path = ch_dir.join(format!("{target_slug}.{}.md", input.locale));
-        fs::write(&file_path, &raw_md)?;
+        crate::ensure_within_dir(&ch_dir, &file_path)?;
+        crate::atomic_write_str(&file_path, &raw_md)?;
     }
 
     if let Some(step) = ch.steps.iter_mut().find(|s| s.slug == lookup_slug) {
@@ -1288,7 +1321,7 @@ pub fn apply_save_step_to_bundle_and_disk(
 
     // Record immutable revision snapshot (keep up to 100 per step+locale in local JSON store)
     step_revisions.push(StepRevisionDto {
-        id: Uuid::new_v4(),
+        id: generate_uuid_v7(),
         step_id,
         locale_code: input.locale.clone(),
         edit_seq: next_edit_seq,
@@ -1317,7 +1350,7 @@ pub fn apply_save_step_to_bundle_and_disk(
     }
 
     audit_logs.push(CollaborationAuditLogDto {
-        id: Uuid::new_v4(),
+        id: generate_uuid_v7(),
         step_id,
         actor_user_id: Some(author.id),
         actor_name: author.display_name.clone(),
@@ -1348,21 +1381,19 @@ pub fn apply_save_step_to_bundle_and_disk(
 }
 
 pub(crate) fn is_valid_slug_segment(slug: &str) -> bool {
-    !slug.is_empty()
-        && !slug.contains('/')
-        && !slug.contains('\\')
-        && !slug.contains("..")
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    crate::is_valid_slug_segment(slug)
 }
 
 pub(crate) fn is_valid_step_slug_segment(slug: &str) -> bool {
-    is_valid_slug_segment(slug) && slug != "-"
+    crate::is_valid_step_slug_segment(slug)
 }
 
 pub(crate) fn rename_step_markdown_files(ch_dir: &Path, prev_slug: &str, new_slug: &str) {
-    if prev_slug == new_slug || prev_slug.is_empty() || new_slug.is_empty() {
+    if prev_slug == new_slug
+        || !is_valid_step_slug_segment(prev_slug)
+        || !is_valid_step_slug_segment(new_slug)
+        || crate::is_symlink_path(ch_dir)
+    {
         return;
     }
     let Ok(entries) = fs::read_dir(ch_dir) else {
@@ -1371,7 +1402,7 @@ pub(crate) fn rename_step_markdown_files(ch_dir: &Path, prev_slug: &str, new_slu
     let prefix = format!("{prev_slug}.");
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if crate::is_symlink_path(&path) || !path.is_file() {
             continue;
         }
         let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1379,9 +1410,9 @@ pub(crate) fn rename_step_markdown_files(ch_dir: &Path, prev_slug: &str, new_slu
         };
         if let Some(rest) = fname.strip_prefix(&prefix) {
             if let Some(loc_part) = rest.strip_suffix(".md") {
-                if !loc_part.is_empty() && !loc_part.contains('.') {
+                if crate::is_supported_locale_code(loc_part) {
                     let target_path = ch_dir.join(format!("{new_slug}.{rest}"));
-                    if target_path != path {
+                    if target_path != path && !crate::is_symlink_path(&target_path) {
                         let _ = fs::rename(&path, &target_path);
                     }
                 }
@@ -1461,10 +1492,14 @@ pub fn create_track_in_bundle_and_disk(
         chapters: vec![ch_manifest],
     };
 
+    fs::create_dir_all(content_dir)?;
     let track_dir = content_dir.join(&clean_slug);
+    crate::ensure_within_dir(content_dir, &track_dir)?;
     fs::create_dir_all(track_dir.join(&first_ch_slug))?;
     let toml_text = toml::to_string_pretty(&manifest)?;
-    fs::write(track_dir.join("track.toml"), toml_text)?;
+    let manifest_path = track_dir.join("track.toml");
+    crate::ensure_within_dir(&track_dir, &manifest_path)?;
+    crate::atomic_write_str(&manifest_path, &toml_text)?;
 
     let track_id = deterministic_uuid(&format!("track:{clean_slug}"));
     let ch_id = deterministic_uuid(&format!("chapter:{clean_slug}:{first_ch_slug}"));
@@ -1514,9 +1549,12 @@ pub fn delete_track_in_bundle_and_disk(
     let before = bundle.tracks.len();
     bundle.tracks.retain(|t| t.manifest.slug != clean);
     let removed = bundle.tracks.len() < before;
-    if removed {
+    if removed && content_dir.exists() {
         let track_dir = content_dir.join(clean);
-        if track_dir.exists() {
+        if track_dir.exists()
+            && !crate::is_symlink_path(&track_dir)
+            && crate::ensure_within_dir(content_dir, &track_dir).is_ok()
+        {
             let _ = fs::remove_dir_all(&track_dir);
         }
     }
@@ -1528,14 +1566,18 @@ pub fn create_chapter_in_bundle_and_disk(
     input: &CreateChapterInput,
     content_dir: &Path,
 ) -> Result<()> {
+    let clean_track = input.track_slug.trim();
+    if !is_valid_slug_segment(clean_track) {
+        return Err(domain_err(ErrorCode::InvalidSlug, "Invalid track slug."));
+    }
     let Some(track) = bundle
         .tracks
         .iter_mut()
-        .find(|t| t.manifest.slug == input.track_slug)
+        .find(|t| t.manifest.slug == clean_track)
     else {
         return Err(domain_err(
             ErrorCode::TrackNotFound,
-            format!("Track not found: {}", input.track_slug),
+            format!("Track not found: {}", clean_track),
         ));
     };
     let clean_slug = input.slug.trim().to_ascii_lowercase();
@@ -1561,14 +1603,17 @@ pub fn create_chapter_in_bundle_and_disk(
         titles: titles.clone(),
     });
 
-    let track_dir = content_dir.join(&input.track_slug);
-    fs::create_dir_all(track_dir.join(&clean_slug))?;
-    fs::write(
-        track_dir.join("track.toml"),
-        toml::to_string_pretty(&track.manifest)?,
-    )?;
+    fs::create_dir_all(content_dir)?;
+    let track_dir = content_dir.join(clean_track);
+    crate::ensure_within_dir(content_dir, &track_dir)?;
+    let ch_dir = track_dir.join(&clean_slug);
+    crate::ensure_within_dir(&track_dir, &ch_dir)?;
+    fs::create_dir_all(&ch_dir)?;
+    let manifest_path = track_dir.join("track.toml");
+    crate::ensure_within_dir(&track_dir, &manifest_path)?;
+    crate::atomic_write_str(&manifest_path, &toml::to_string_pretty(&track.manifest)?)?;
 
-    let ch_id = deterministic_uuid(&format!("chapter:{}:{clean_slug}", input.track_slug));
+    let ch_id = deterministic_uuid(&format!("chapter:{clean_track}:{clean_slug}"));
     track.chapters.push(LoadedChapter {
         id: ch_id,
         slug: clean_slug,
@@ -1607,15 +1652,20 @@ pub fn delete_chapter_in_bundle_and_disk(
     track.manifest.chapters.retain(|c| c.slug != chapter_slug);
     let removed = track.chapters.len() < before;
 
-    if removed {
+    if removed && content_dir.exists() {
         let track_dir = content_dir.join(track_slug);
-        if track_dir.exists() {
-            let _ = fs::write(
-                track_dir.join("track.toml"),
-                toml::to_string_pretty(&track.manifest).unwrap_or_default(),
-            );
+        if track_dir.exists()
+            && !crate::is_symlink_path(&track_dir)
+            && crate::ensure_within_dir(content_dir, &track_dir).is_ok()
+        {
+            if let Ok(toml_str) = toml::to_string_pretty(&track.manifest) {
+                let _ = crate::atomic_write_str(&track_dir.join("track.toml"), &toml_str);
+            }
             let ch_dir = track_dir.join(chapter_slug);
-            if ch_dir.exists() {
+            if ch_dir.exists()
+                && !crate::is_symlink_path(&ch_dir)
+                && crate::ensure_within_dir(&track_dir, &ch_dir).is_ok()
+            {
                 let _ = fs::remove_dir_all(&ch_dir);
             }
         }
@@ -1632,7 +1682,7 @@ pub fn delete_step_in_bundle_and_disk(
 ) -> Result<(bool, Option<Uuid>)> {
     if !is_valid_slug_segment(track_slug)
         || !is_valid_slug_segment(chapter_slug)
-        || !is_valid_slug_segment(step_slug)
+        || !is_valid_step_slug_segment(step_slug)
     {
         return Ok((false, None));
     }
@@ -1647,13 +1697,20 @@ pub fn delete_step_in_bundle_and_disk(
     ch.steps.retain(|s| s.slug != step_slug);
     let removed = ch.steps.len() < before;
 
-    if removed {
+    if removed && content_dir.exists() {
         let ch_dir = content_dir.join(track_slug).join(chapter_slug);
-        if ch_dir.exists() {
+        if ch_dir.exists()
+            && !crate::is_symlink_path(&ch_dir)
+            && crate::ensure_within_dir(content_dir, &ch_dir).is_ok()
+        {
             for entry in fs::read_dir(&ch_dir)?.flatten() {
+                let p = entry.path();
+                if crate::is_symlink_path(&p) || !p.is_file() {
+                    continue;
+                }
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with(&format!("{step_slug}.")) && name.ends_with(".md") {
-                        let _ = fs::remove_file(entry.path());
+                        let _ = fs::remove_file(p);
                     }
                 }
             }

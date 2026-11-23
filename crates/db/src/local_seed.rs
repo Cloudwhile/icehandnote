@@ -20,7 +20,7 @@ use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
         constant_time_str_eq, evaluate_login_anomaly, generate_action_token,
-        generate_email_verification_code, hash_action_token, hash_email_verification_code,
+        generate_email_verification_code, generate_uuid_v7, hash_action_token, hash_email_verification_code,
         hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
         normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
         parse_user_agent_device, verify_password, BlogSsoClaims, CollaborationAuditLogDto,
@@ -101,10 +101,28 @@ impl LocalSeedRepository {
     ) -> Result<Self> {
         let bundle = load_content_directory(content_dir)?;
         let mut state: PersistedUserState = if store_path.exists() {
-            fs::read_to_string(&store_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
+            let raw = fs::read_to_string(&store_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Refusing to start because local store {} could not be read: {e}",
+                    store_path.display()
+                )
+            })?;
+            match serde_json::from_str(&raw) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    let backup_path = PathBuf::from(format!(
+                        "{}.corrupt-{}",
+                        store_path.display(),
+                        Utc::now().timestamp()
+                    ));
+                    let _ = fs::copy(&store_path, &backup_path);
+                    anyhow::bail!(
+                        "Refusing to start with corrupted local store {} (backup saved to {}): {err}",
+                        store_path.display(),
+                        backup_path.display()
+                    );
+                }
+            }
         } else {
             PersistedUserState::default()
         };
@@ -158,8 +176,21 @@ impl LocalSeedRepository {
         if let Some(parent) = self.store_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(state) {
-            let _ = fs::write(&self.store_path, json);
+        match serde_json::to_string_pretty(state) {
+            Ok(json) => {
+                if let Err(err) = crate::atomic_write_bytes(&self.store_path, json.as_bytes()) {
+                    eprintln!(
+                        "error: failed to persist local store {}: {err}",
+                        self.store_path.display()
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "error: failed to serialize local store {}: {err}",
+                    self.store_path.display()
+                );
+            }
         }
     }
 
@@ -179,12 +210,14 @@ impl LocalSeedRepository {
     }
 
     fn resolve_user_dto_in_state(rec: &StoredUserRecord, state: &PersistedUserState) -> UserProfileDto {
-        let mut dto = Self::resolve_user_dto(rec, Self::gravatar_base(state));
-        dto.has_collaborations = Self::user_has_collaborations(dto.id, &state.step_meta);
-        dto
+        Self::resolve_user_dto(rec, Self::gravatar_base(state), &state.step_meta)
     }
 
-    fn resolve_user_dto(rec: &StoredUserRecord, gravatar_base: &str) -> UserProfileDto {
+    fn resolve_user_dto(
+        rec: &StoredUserRecord,
+        gravatar_base: &str,
+        step_meta: &HashMap<Uuid, StoredStepMetaRecord>,
+    ) -> UserProfileDto {
         let mut p = rec.profile.clone();
         p.oauth_bindings = rec
             .oauth_bindings
@@ -201,6 +234,7 @@ impl LocalSeedRepository {
             .as_deref()
             .map(|h| !h.trim().is_empty())
             .unwrap_or(false);
+        p.has_collaborations = Self::user_has_collaborations(p.id, step_meta);
         p.with_resolved_avatar(gravatar_base)
     }
 
@@ -363,12 +397,6 @@ impl TutorialRepository for LocalSeedRepository {
                 .iter()
                 .find(|c| c.slug == chapter_slug)
                 .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
-                .or_else(|| {
-                    track
-                        .chapters
-                        .iter()
-                        .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug).map(|s| (c, s)))
-                })
         };
         let Some((ch, step)) = found else {
             return Ok(None);
@@ -687,8 +715,8 @@ impl TutorialRepository for LocalSeedRepository {
             .notes
             .iter()
             .filter(|n| n.learner_id == learner_id && n.deleted_at.is_none())
-            .filter(|n| filter.step_id.map_or(true, |sid| n.step_id == sid))
-            .filter(|n| locale_opt.map_or(true, |loc| n.locale_code == loc))
+            .filter(|n| filter.step_id.is_none_or(|sid| n.step_id == sid))
+            .filter(|n| locale_opt.is_none_or(|loc| n.locale_code == loc))
             .map(|n| {
                 let mut cloned = n.clone();
                 cloned.hydrate_legacy_fields();
@@ -706,9 +734,9 @@ impl TutorialRepository for LocalSeedRepository {
                 }
                 cloned
             })
-            .filter(|n| tag_opt.map_or(true, |tg| n.tag == tg))
+            .filter(|n| tag_opt.is_none_or(|tg| n.tag == tg))
             .filter(|n| {
-                q_lower.as_ref().map_or(true, |q| {
+                q_lower.as_ref().is_none_or(|q| {
                     n.raw_content.to_lowercase().contains(q)
                         || n.step_title
                             .as_deref()
@@ -769,7 +797,7 @@ impl TutorialRepository for LocalSeedRepository {
         let now = Utc::now();
 
         let dto = UserMarginNoteDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             learner_id: input.learner_id,
             step_id: input.step_id,
             locale_code: input.locale_code,
@@ -865,7 +893,7 @@ impl TutorialRepository for LocalSeedRepository {
         let cutoff = now - Duration::minutes(NOTE_UNDO_GRACE_MINUTES);
         state
             .notes
-            .retain(|n| n.deleted_at.map_or(true, |dt| dt >= cutoff));
+            .retain(|n| n.deleted_at.is_none_or(|dt| dt >= cutoff));
 
         let Some(note) = state
             .notes
@@ -897,7 +925,7 @@ impl TutorialRepository for LocalSeedRepository {
         let Some(note) = state.notes.iter_mut().find(|n| {
             n.id == note_id
                 && n.learner_id == learner_id
-                && n.deleted_at.map_or(false, |dt| dt >= cutoff)
+                && n.deleted_at.is_some_and(|dt| dt >= cutoff)
         }) else {
             return Err(domain_err(
                 ErrorCode::NoteNotFound,
@@ -942,8 +970,10 @@ impl TutorialRepository for LocalSeedRepository {
             return Err(err.into());
         }
         let grav = Self::gravatar_base(&state).to_string();
+        let mut resolved = profile.with_resolved_avatar(&grav);
+        resolved.has_collaborations = Self::user_has_collaborations(resolved.id, &state.step_meta);
         self.persist_state(&state);
-        Ok(profile.with_resolved_avatar(&grav))
+        Ok(resolved)
     }
 
     async fn find_oauth_user(
@@ -957,27 +987,37 @@ impl TutorialRepository for LocalSeedRepository {
         if clean_provider.is_empty() || clean_sub.is_empty() {
             return Ok(None);
         }
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
-        if let Some(existing) = state.users.iter_mut().find(|u| {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
+        if let Some(existing) = users.iter_mut().find(|u| {
             u.oauth_bindings.iter().any(|b| {
                 b.provider.eq_ignore_ascii_case(&clean_provider) && b.subject == clean_sub
             }) || (u.oauth_provider.as_deref().map(|p| p.eq_ignore_ascii_case(&clean_provider))
                 == Some(true)
                 && u.oauth_sub.as_deref() == Some(clean_sub))
         }) {
-            if !oauth_avatar_url.trim().is_empty() {
-                existing.profile.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+            if !clean_oauth_avatar.is_empty() {
+                existing.profile.oauth_avatar_url = clean_oauth_avatar.clone();
                 if let Some(b) = existing
                     .oauth_bindings
                     .iter_mut()
                     .find(|b| b.provider.eq_ignore_ascii_case(&clean_provider))
                 {
-                    b.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+                    b.oauth_avatar_url = clean_oauth_avatar;
                 }
             }
             existing.profile.last_login_at = Utc::now();
-            let dto = Self::resolve_user_dto(existing, &grav);
+            let dto = Self::resolve_user_dto(existing, &grav, step_meta);
             self.persist_state(&state);
             return Ok(Some(dto));
         }
@@ -1047,6 +1087,21 @@ impl TutorialRepository for LocalSeedRepository {
         } else {
             display_name.trim().to_string()
         };
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
+        let clean_uploaded_avatar = if uploaded_avatar_url.trim().is_empty() {
+            String::new()
+        } else if icehandnote_core::is_safe_image_src(uploaded_avatar_url) {
+            uploaded_avatar_url.trim().chars().take(512).collect()
+        } else {
+            return Err(domain_err(
+                ErrorCode::InvalidUrl,
+                "Avatar URL must be a valid https://, http://, or / path.",
+            ));
+        };
         let now = Utc::now();
 
         let prof = UserProfileDto {
@@ -1057,8 +1112,8 @@ impl TutorialRepository for LocalSeedRepository {
             email: clean_email.to_string(),
             avatar_url: String::new(),
             avatar_source: norm_source,
-            oauth_avatar_url: oauth_avatar_url.trim().to_string(),
-            uploaded_avatar_url: uploaded_avatar_url.trim().to_string(),
+            oauth_avatar_url: clean_oauth_avatar.clone(),
+            uploaded_avatar_url: clean_uploaded_avatar,
             oauth_provider: Some(clean_provider.clone()),
             oauth_bindings: vec![clean_provider.clone()],
             has_password: false,
@@ -1080,7 +1135,7 @@ impl TutorialRepository for LocalSeedRepository {
             oauth_bindings: vec![StoredOAuthBinding {
                 provider: clean_provider,
                 subject: clean_sub.to_string(),
-                oauth_avatar_url: oauth_avatar_url.trim().to_string(),
+                oauth_avatar_url: clean_oauth_avatar,
                 bound_at: now,
             }],
         });
@@ -1117,7 +1172,17 @@ impl TutorialRepository for LocalSeedRepository {
         }
 
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
+        let Some(rec) = users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "Target user not found."));
         };
 
@@ -1127,14 +1192,14 @@ impl TutorialRepository for LocalSeedRepository {
             .find(|b| b.provider.eq_ignore_ascii_case(&clean_provider))
         {
             existing_b.subject = clean_sub.to_string();
-            if !oauth_avatar_url.trim().is_empty() {
-                existing_b.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+            if !clean_oauth_avatar.is_empty() {
+                existing_b.oauth_avatar_url = clean_oauth_avatar.clone();
             }
         } else {
             rec.oauth_bindings.push(StoredOAuthBinding {
                 provider: clean_provider.clone(),
                 subject: clean_sub.to_string(),
-                oauth_avatar_url: oauth_avatar_url.trim().to_string(),
+                oauth_avatar_url: clean_oauth_avatar.clone(),
                 bound_at: Utc::now(),
             });
         }
@@ -1143,13 +1208,13 @@ impl TutorialRepository for LocalSeedRepository {
             rec.oauth_provider = Some(clean_provider.clone());
             rec.oauth_sub = Some(clean_sub.to_string());
         }
-        if !oauth_avatar_url.trim().is_empty() {
-            rec.profile.oauth_avatar_url = oauth_avatar_url.trim().to_string();
+        if !clean_oauth_avatar.is_empty() {
+            rec.profile.oauth_avatar_url = clean_oauth_avatar;
             if rec.profile.avatar_source == "default" && rec.profile.avatar_url.is_empty() {
                 rec.profile.avatar_source = "oauth".to_string();
             }
         }
-        let dto = Self::resolve_user_dto(rec, &grav);
+        let dto = Self::resolve_user_dto(rec, &grav, step_meta);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -1163,7 +1228,12 @@ impl TutorialRepository for LocalSeedRepository {
         let mut state = self.state.write().await;
         let passkey_count = state.passkeys.iter().filter(|pk| pk.user_id == user_id).count();
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
+        let Some(rec) = users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
         };
         let has_pw = rec
@@ -1192,7 +1262,7 @@ impl TutorialRepository for LocalSeedRepository {
             rec.oauth_provider = None;
             rec.oauth_sub = None;
         }
-        let dto = Self::resolve_user_dto(rec, &grav);
+        let dto = Self::resolve_user_dto(rec, &grav, step_meta);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -1205,7 +1275,7 @@ impl TutorialRepository for LocalSeedRepository {
             .filter(|pk| pk.user_id == user_id)
             .map(StoredPasskeyCredential::to_dto)
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(items)
     }
 
@@ -1245,7 +1315,7 @@ impl TutorialRepository for LocalSeedRepository {
         let Some(user_rec) = state.users.iter().find(|u| u.profile.id == pk.user_id) else {
             return Ok(None);
         };
-        let dto = Self::resolve_user_dto(user_rec, grav);
+        let dto = Self::resolve_user_dto(user_rec, grav, &state.step_meta);
         Ok(Some((pk, dto)))
     }
 
@@ -1445,12 +1515,21 @@ impl TutorialRepository for LocalSeedRepository {
         }
         let now = Utc::now();
         let grav = Self::gravatar_base(&state).to_string();
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
         let mut resolved = matched;
-        if let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == resolved.id) {
+        if let Some(rec) = users.iter_mut().find(|u| u.profile.id == resolved.id) {
+            if let Some(ref existing_hash) = rec.password_hash {
+                if icehandnote_core::crypto::is_legacy_password_hash(existing_hash) {
+                    rec.password_hash = Some(hash_password(&rec.profile.username, password));
+                }
+            }
             rec.profile.last_login_at = now;
-            resolved = Self::resolve_user_dto(rec, &grav);
+            resolved = Self::resolve_user_dto(rec, &grav, step_meta);
         }
-        resolved.has_collaborations = Self::user_has_collaborations(resolved.id, &state.step_meta);
         self.persist_state(&state);
         Ok(Some(resolved))
     }
@@ -1460,9 +1539,25 @@ impl TutorialRepository for LocalSeedRepository {
         user_id: Uuid,
         input: UpdateUserProfileInput,
     ) -> Result<UserProfileDto> {
+        let raw_avatar = input.uploaded_avatar_url.trim();
+        let clean_uploaded_avatar: String = if raw_avatar.is_empty() {
+            String::new()
+        } else if icehandnote_core::is_safe_image_src(raw_avatar) {
+            raw_avatar.chars().take(512).collect()
+        } else {
+            return Err(domain_err(
+                ErrorCode::InvalidUrl,
+                "Avatar URL must be a valid https://, http://, or / path.",
+            ));
+        };
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
+        let Some(rec) = users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
         };
         let clean_display: String = input.display_name.trim().chars().take(64).collect();
@@ -1471,11 +1566,10 @@ impl TutorialRepository for LocalSeedRepository {
         }
         rec.profile.bio = input.bio.trim().chars().take(300).collect();
         rec.profile.avatar_source = normalize_avatar_source(&input.avatar_source);
-        if !input.uploaded_avatar_url.trim().is_empty() {
-            rec.profile.uploaded_avatar_url =
-                input.uploaded_avatar_url.trim().chars().take(512).collect();
+        if !clean_uploaded_avatar.is_empty() {
+            rec.profile.uploaded_avatar_url = clean_uploaded_avatar;
         }
-        rec.profile = Self::resolve_user_dto(rec, &grav);
+        rec.profile = Self::resolve_user_dto(rec, &grav, step_meta);
         let out = rec.profile.clone();
         self.persist_state(&state);
         Ok(out)
@@ -1510,11 +1604,16 @@ impl TutorialRepository for LocalSeedRepository {
             ));
         }
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
+        let Some(rec) = users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "User not found."));
         };
         rec.profile.email = clean.to_string();
-        rec.profile = Self::resolve_user_dto(rec, &grav);
+        rec.profile = Self::resolve_user_dto(rec, &grav, step_meta);
         let out = rec.profile.clone();
         self.persist_state(&state);
         Ok(out)
@@ -1539,7 +1638,7 @@ impl TutorialRepository for LocalSeedRepository {
         else {
             return Ok(None);
         };
-        let user_dto = Self::resolve_user_dto(user_rec, &grav);
+        let user_dto = Self::resolve_user_dto(user_rec, &grav, &state.step_meta);
         let (raw_token, token_hash) = generate_action_token("ihn_rst", "pw_reset_v1");
         let (raw_otp, code_hash) = generate_email_verification_code(&user_dto.email);
         state.password_resets.push(StoredPasswordResetRecord {
@@ -1640,11 +1739,14 @@ impl TutorialRepository for LocalSeedRepository {
         state.password_resets.retain(|r| r.user_id != reset_rec.user_id);
 
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(user_rec) = state
-            .users
-            .iter_mut()
-            .find(|u| u.profile.id == reset_rec.user_id)
-        else {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ref mut sessions,
+            ref mut trusted_devices,
+            ..
+        } = *state;
+        let Some(user_rec) = users.iter_mut().find(|u| u.profile.id == reset_rec.user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "Account not found."));
         };
         if user_rec.profile.is_banned {
@@ -1655,9 +1757,9 @@ impl TutorialRepository for LocalSeedRepository {
         }
         user_rec.password_hash = Some(hash_password(&user_rec.profile.username, new_password));
         let uid = user_rec.profile.id;
-        let dto = Self::resolve_user_dto(user_rec, &grav);
-        state.sessions.retain(|s| s.user_id != uid);
-        state.trusted_devices.retain(|d| d.user_id != uid);
+        let dto = Self::resolve_user_dto(user_rec, &grav, step_meta);
+        sessions.retain(|s| s.user_id != uid);
+        trusted_devices.retain(|d| d.user_id != uid);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -1722,13 +1824,20 @@ impl TutorialRepository for LocalSeedRepository {
 
         state.password_resets.retain(|r| r.user_id != user_id);
         let grav = Self::gravatar_base(&state).to_string();
-        let Some(user_rec) = state.users.iter_mut().find(|u| u.profile.id == user_id) else {
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ref mut sessions,
+            ref mut trusted_devices,
+            ..
+        } = *state;
+        let Some(user_rec) = users.iter_mut().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "Account not found."));
         };
         user_rec.password_hash = Some(hash_password(&user_rec.profile.username, new_password));
-        let dto = Self::resolve_user_dto(user_rec, &grav);
-        state.sessions.retain(|s| s.user_id != user_id);
-        state.trusted_devices.retain(|d| d.user_id != user_id);
+        let dto = Self::resolve_user_dto(user_rec, &grav, step_meta);
+        sessions.retain(|s| s.user_id != user_id);
+        trusted_devices.retain(|d| d.user_id != user_id);
         self.persist_state(&state);
         Ok(dto)
     }
@@ -2256,7 +2365,7 @@ impl TutorialRepository for LocalSeedRepository {
         let Some(user_rec) = state.users.iter().find(|u| u.profile.id == user_id) else {
             return Err(domain_err(ErrorCode::UserNotFound, "Account not found."));
         };
-        let user = Self::resolve_user_dto(user_rec, &grav);
+        let user = Self::resolve_user_dto(user_rec, &grav, &state.step_meta);
         self.persist_state(&state);
         Ok((user, raw_code, ip, device, reason))
     }
@@ -2322,7 +2431,7 @@ impl TutorialRepository for LocalSeedRepository {
                 "This account has been suspended.",
             ));
         }
-        let user = Self::resolve_user_dto(user_rec, &grav);
+        let user = Self::resolve_user_dto(user_rec, &grav, &state.step_meta);
         self.persist_state(&state);
         Ok((
             user,
@@ -2409,15 +2518,50 @@ impl TutorialRepository for LocalSeedRepository {
         read_step_editor_from_bundle(
             viewer,
             &bundle,
-            track_slug,
-            chapter_slug,
-            step_slug,
-            locale,
+            track_slug.trim(),
+            chapter_slug.trim(),
+            step_slug.trim(),
+            locale.trim(),
             &state.step_meta,
             &state.collab_invites,
             &state.users,
             grav,
         )
+    }
+
+    async fn resolve_step_collab_access(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Option<(Uuid, String, Vec<String>)>> {
+        let clean_track = track_slug.trim();
+        let clean_ch = chapter_slug.trim();
+        let clean_step = step_slug.trim();
+        let bundle = self.bundle.read().await;
+        let Some(track) = bundle.tracks.iter().find(|t| t.manifest.slug == clean_track) else {
+            return Ok(None);
+        };
+        let step_opt = if clean_ch.is_empty() || clean_ch == "-" {
+            track
+                .chapters
+                .iter()
+                .find_map(|c| c.steps.iter().find(|s| s.slug == clean_step))
+        } else {
+            track
+                .chapters
+                .iter()
+                .find(|c| c.slug == clean_ch)
+                .and_then(|c| c.steps.iter().find(|s| s.slug == clean_step))
+        };
+        let Some(step) = step_opt else {
+            return Ok(None);
+        };
+        let state = self.state.read().await;
+        let (role, scope) =
+            crate::studio_auth::resolve_local_viewer_role(viewer, step.id, &state.step_meta);
+        Ok(Some((step.id, role, scope)))
     }
 
     async fn studio_save_step(
@@ -2473,7 +2617,15 @@ impl TutorialRepository for LocalSeedRepository {
                 state.step_meta.remove(sid);
                 state.likes_delta.remove(sid);
             }
+            for set in state.progress.values_mut() {
+                set.retain(|id| !step_ids.contains(id));
+            }
+            for map in state.task_checks.values_mut() {
+                map.retain(|id, _| !step_ids.contains(id));
+            }
             state.collab_invites.retain(|i| !step_ids.contains(&i.step_id));
+            state.step_revisions.retain(|r| !step_ids.contains(&r.step_id));
+            state.collab_audit_logs.retain(|l| !step_ids.contains(&l.step_id));
             state.notes.retain(|n| !step_ids.contains(&n.step_id));
             self.persist_state(&state);
         }
@@ -2504,7 +2656,15 @@ impl TutorialRepository for LocalSeedRepository {
                 state.step_meta.remove(sid);
                 state.likes_delta.remove(sid);
             }
+            for set in state.progress.values_mut() {
+                set.retain(|id| !step_ids.contains(id));
+            }
+            for map in state.task_checks.values_mut() {
+                map.retain(|id, _| !step_ids.contains(id));
+            }
             state.collab_invites.retain(|i| !step_ids.contains(&i.step_id));
+            state.step_revisions.retain(|r| !step_ids.contains(&r.step_id));
+            state.collab_audit_logs.retain(|l| !step_ids.contains(&l.step_id));
             state.notes.retain(|n| !step_ids.contains(&n.step_id));
             self.persist_state(&state);
         }
@@ -2546,6 +2706,12 @@ impl TutorialRepository for LocalSeedRepository {
         if let Some(sid) = sid_opt {
             state.step_meta.remove(&sid);
             state.likes_delta.remove(&sid);
+            for set in state.progress.values_mut() {
+                set.remove(&sid);
+            }
+            for map in state.task_checks.values_mut() {
+                map.remove(&sid);
+            }
             state.collab_invites.retain(|i| i.step_id != sid);
             state.step_revisions.retain(|r| r.step_id != sid);
             state.collab_audit_logs.retain(|l| l.step_id != sid);
@@ -2622,7 +2788,7 @@ impl TutorialRepository for LocalSeedRepository {
                 || state
                     .step_meta
                     .get(&step_id)
-                    .map_or(false, |m| m.is_collaborator(uid))
+                    .is_some_and(|m| m.is_collaborator(uid))
             {
                 return Err(domain_err(
                     ErrorCode::InviteAlreadyMember,
@@ -2672,7 +2838,7 @@ impl TutorialRepository for LocalSeedRepository {
         };
         state.collab_invites.push(inv);
         state.collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(actor.id),
             actor_name: actor.display_name.clone(),
@@ -2785,7 +2951,7 @@ impl TutorialRepository for LocalSeedRepository {
         let now = Utc::now();
         state.collab_invites[pos].revoked_at = Some(now);
         state.collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(actor.id),
             actor_name: actor.display_name.clone(),
@@ -2877,7 +3043,7 @@ impl TutorialRepository for LocalSeedRepository {
         meta.set_collaborator(user.id, &inv_role, &inv_scope);
 
         state.collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(user.id),
             actor_name: user.display_name.clone(),
@@ -2927,10 +3093,10 @@ impl TutorialRepository for LocalSeedRepository {
         let changed = state
             .step_meta
             .get_mut(&step_id)
-            .map_or(false, |meta| meta.remove_collaborator(target_user_id));
+            .is_some_and(|meta| meta.remove_collaborator(target_user_id));
         if changed {
             state.collab_audit_logs.push(CollaborationAuditLogDto {
-                id: Uuid::new_v4(),
+                id: generate_uuid_v7(),
                 step_id,
                 actor_user_id: Some(actor.id),
                 actor_name: actor.display_name.clone(),
@@ -2977,7 +3143,7 @@ impl TutorialRepository for LocalSeedRepository {
         let is_member = state
             .step_meta
             .get(&step_id)
-            .map_or(false, |m| m.is_collaborator(target_user_id));
+            .is_some_and(|m| m.is_collaborator(target_user_id));
         if !is_member {
             return Ok(false);
         }
@@ -2997,7 +3163,7 @@ impl TutorialRepository for LocalSeedRepository {
             meta.set_collaborator(target_user_id, &norm_role, &norm_scope);
         }
         state.collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(actor.id),
             actor_name: actor.display_name.clone(),
@@ -3040,10 +3206,10 @@ impl TutorialRepository for LocalSeedRepository {
         let changed = state
             .step_meta
             .get_mut(&step_id)
-            .map_or(false, |meta| meta.remove_collaborator(user.id));
+            .is_some_and(|meta| meta.remove_collaborator(user.id));
         if changed {
             state.collab_audit_logs.push(CollaborationAuditLogDto {
-                id: Uuid::new_v4(),
+                id: generate_uuid_v7(),
                 step_id,
                 actor_user_id: Some(user.id),
                 actor_name: user.display_name.clone(),
@@ -3107,7 +3273,7 @@ impl TutorialRepository for LocalSeedRepository {
         meta.author_name_fallback = target_name.clone();
 
         state.collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(actor.id),
             actor_name: actor.display_name.clone(),
@@ -3143,11 +3309,6 @@ impl TutorialRepository for LocalSeedRepository {
                         .iter()
                         .find(|c| c.slug == chapter_slug)
                         .and_then(|c| c.steps.iter().find(|s| s.slug == step_slug))
-                        .or_else(|| {
-                            t.chapters
-                                .iter()
-                                .find_map(|c| c.steps.iter().find(|s| s.slug == step_slug))
-                        })
                 }
             })
         else {
@@ -3158,7 +3319,7 @@ impl TutorialRepository for LocalSeedRepository {
             let has_pub = step
                 .translations
                 .get(locale)
-                .map_or(false, |tr| tr.compiled.frontmatter.status != "draft");
+                .is_some_and(|tr| tr.compiled.frontmatter.status != "draft");
             if !has_pub {
                 return Err(domain_err(
                     ErrorCode::DraftAccessForbidden,
@@ -3287,7 +3448,7 @@ impl TutorialRepository for LocalSeedRepository {
             true,
         )?;
         collab_audit_logs.push(CollaborationAuditLogDto {
-            id: Uuid::new_v4(),
+            id: generate_uuid_v7(),
             step_id,
             actor_user_id: Some(actor.id),
             actor_name: actor.display_name.clone(),
@@ -3339,7 +3500,7 @@ impl TutorialRepository for LocalSeedRepository {
             .filter(|l| l.step_id == step_id)
             .cloned()
             .collect();
-        logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        logs.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         logs.truncate(50);
         Ok(logs)
     }
@@ -3398,7 +3559,7 @@ impl TutorialRepository for LocalSeedRepository {
             .users
             .iter()
             .filter(|u| notify_ids.contains(&u.profile.id))
-            .map(|u| Self::resolve_user_dto(u, &grav))
+            .map(|u| Self::resolve_user_dto(u, &grav, &state.step_meta))
             .collect();
 
         self.persist_state(&state);
@@ -3465,8 +3626,13 @@ impl TutorialRepository for LocalSeedRepository {
 
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
-        let user_profile = if let Some(existing) = state
-            .users
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ref mut sessions,
+            ..
+        } = *state;
+        let user_profile = if let Some(existing) = users
             .iter_mut()
             .find(|u| u.profile.username.eq_ignore_ascii_case(clean_username))
         {
@@ -3477,8 +3643,8 @@ impl TutorialRepository for LocalSeedRepository {
             existing.profile.ban_reason.clear();
             existing.password_hash = Some(pw_hash);
             let uid = existing.profile.id;
-            let prof = Self::resolve_user_dto(existing, &grav);
-            state.sessions.retain(|s| s.user_id != uid);
+            let prof = Self::resolve_user_dto(existing, &grav, step_meta);
+            sessions.retain(|s| s.user_id != uid);
             prof
         } else {
             let prof = UserProfileDto {
@@ -3601,7 +3767,7 @@ impl TutorialRepository for LocalSeedRepository {
         Ok(state
             .users
             .iter()
-            .map(|u| Self::resolve_user_dto(u, grav))
+            .map(|u| Self::resolve_user_dto(u, grav, &state.step_meta))
             .collect())
     }
 
@@ -3612,14 +3778,15 @@ impl TutorialRepository for LocalSeedRepository {
     ) -> Result<Option<UserProfileDto>> {
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ..
+        } = *state;
         let mut updated = None;
-        if let Some(rec) = state
-            .users
-            .iter_mut()
-            .find(|u| u.profile.id == target_user_id)
-        {
+        if let Some(rec) = users.iter_mut().find(|u| u.profile.id == target_user_id) {
             rec.profile.role = new_role;
-            updated = Some(Self::resolve_user_dto(rec, &grav));
+            updated = Some(Self::resolve_user_dto(rec, &grav, step_meta));
         }
         if updated.is_some() {
             self.persist_state(&state);
@@ -3635,22 +3802,24 @@ impl TutorialRepository for LocalSeedRepository {
     ) -> Result<Option<UserProfileDto>> {
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ref mut sessions,
+            ..
+        } = *state;
         let mut updated = None;
-        if let Some(rec) = state
-            .users
-            .iter_mut()
-            .find(|u| u.profile.id == target_user_id)
-        {
+        if let Some(rec) = users.iter_mut().find(|u| u.profile.id == target_user_id) {
             rec.profile.is_banned = banned;
             rec.profile.ban_reason = if banned {
                 reason.trim().chars().take(240).collect()
             } else {
                 String::new()
             };
-            updated = Some(Self::resolve_user_dto(rec, &grav));
+            updated = Some(Self::resolve_user_dto(rec, &grav, step_meta));
         }
         if banned {
-            state.sessions.retain(|s| s.user_id != target_user_id);
+            sessions.retain(|s| s.user_id != target_user_id);
         }
         if updated.is_some() {
             self.persist_state(&state);
@@ -3666,12 +3835,14 @@ impl TutorialRepository for LocalSeedRepository {
         if removed {
             state.sessions.retain(|s| s.user_id != target_user_id);
             state.password_resets.retain(|r| r.user_id != target_user_id);
+            state.trusted_devices.retain(|d| d.user_id != target_user_id);
+            state.login_otp_challenges.retain(|c| c.user_id != target_user_id);
             state.passkeys.retain(|pk| pk.user_id != target_user_id);
             for meta in state.step_meta.values_mut() {
                 if meta.owner_user_id == Some(target_user_id) {
                     meta.owner_user_id = None;
                 }
-                meta.collaborator_ids.retain(|id| *id != target_user_id);
+                meta.remove_collaborator(target_user_id);
             }
             self.persist_state(&state);
         }
@@ -3685,17 +3856,19 @@ impl TutorialRepository for LocalSeedRepository {
     ) -> Result<Option<UserProfileDto>> {
         let mut state = self.state.write().await;
         let grav = Self::gravatar_base(&state).to_string();
+        let PersistedUserState {
+            ref mut users,
+            ref step_meta,
+            ref mut sessions,
+            ..
+        } = *state;
         let mut updated = None;
-        if let Some(rec) = state
-            .users
-            .iter_mut()
-            .find(|u| u.profile.id == target_user_id)
-        {
+        if let Some(rec) = users.iter_mut().find(|u| u.profile.id == target_user_id) {
             rec.password_hash = Some(hash_password(&rec.profile.username, new_password));
-            updated = Some(Self::resolve_user_dto(rec, &grav));
+            updated = Some(Self::resolve_user_dto(rec, &grav, step_meta));
         }
         if updated.is_some() {
-            state.sessions.retain(|s| s.user_id != target_user_id);
+            sessions.retain(|s| s.user_id != target_user_id);
             self.persist_state(&state);
         }
         Ok(updated)
@@ -3789,6 +3962,31 @@ zh-CN = "Ch 1"
             .unwrap();
         assert!(ja_fallback.is_fallback);
         assert!(!ja_fallback.has_revision_drift);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ensure_within_dir_blocks_sibling_prefix_and_parent_traversal() {
+        let root = std::env::temp_dir().join(format!("ihn_path_guard_{}", Uuid::new_v4()));
+        let base_dir = root.join("content");
+        let sibling_dir = root.join("content-secret");
+        fs::create_dir_all(&base_dir).unwrap();
+        fs::create_dir_all(&sibling_dir).unwrap();
+
+        assert!(
+            crate::ensure_within_dir(&base_dir, &base_dir.join("../../content-secret/leak.md"))
+                .is_err(),
+            "parent traversal must be rejected"
+        );
+        assert!(
+            crate::ensure_within_dir(&base_dir, &sibling_dir.join("leak.md")).is_err(),
+            "sibling prefix directory must be rejected"
+        );
+        assert!(
+            crate::ensure_within_dir(&base_dir, &base_dir.join("new-track/track.toml")).is_ok(),
+            "valid nonexistent descendant path inside base dir must succeed"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

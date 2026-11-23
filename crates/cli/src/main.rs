@@ -85,6 +85,20 @@ async fn main() -> Result<()> {
                 );
                 for c in &t.chapters {
                     for s in &c.steps {
+                        for (loc, tr) in &s.translations {
+                            if let Err(err) =
+                                icehandnote_core::validate_step_frontmatter(&tr.raw_markdown)
+                            {
+                                bail!(
+                                    "Frontmatter validation failed in {}/{}/{} ({}): {}",
+                                    t.manifest.slug,
+                                    c.slug,
+                                    s.slug,
+                                    loc,
+                                    err
+                                );
+                            }
+                        }
                         total_steps += 1;
                         total_docs += s.translations.len();
                         let locales: Vec<_> = s.translations.keys().cloned().collect();
@@ -202,8 +216,9 @@ async fn main() -> Result<()> {
                 .filter(|p| !p.trim().is_empty())
             {
                 Some(p) => {
-                    if p.chars().count() < 6 {
-                        bail!("密码至少需 6 个字符");
+                    let char_len = p.chars().count();
+                    if !(8..=256).contains(&char_len) {
+                        bail!("密码长度必须在 8 到 256 个字符之间");
                     }
                     (p, false)
                 }

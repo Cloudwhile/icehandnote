@@ -95,6 +95,10 @@ pub enum ErrorCode {
     StorageConnectionFailed,
     SmtpNotConfigured,
     SmtpSendFailed,
+    MailDomainInvalid,
+    MailRecipientSuppressed,
+    MailCircuitOpen,
+    MailSendInProgress,
     TakedownReasonRequired,
     UpstreamError,
 }
@@ -185,6 +189,10 @@ impl ErrorCode {
             Self::StorageConnectionFailed => "STORAGE_CONNECTION_FAILED",
             Self::SmtpNotConfigured => "SMTP_NOT_CONFIGURED",
             Self::SmtpSendFailed => "SMTP_SEND_FAILED",
+            Self::MailDomainInvalid => "MAIL_DOMAIN_INVALID",
+            Self::MailRecipientSuppressed => "MAIL_RECIPIENT_SUPPRESSED",
+            Self::MailCircuitOpen => "MAIL_CIRCUIT_OPEN",
+            Self::MailSendInProgress => "MAIL_SEND_IN_PROGRESS",
             Self::TakedownReasonRequired => "TAKEDOWN_REASON_REQUIRED",
             Self::UpstreamError => "UPSTREAM_ERROR",
         }
@@ -275,14 +283,17 @@ impl ErrorCode {
             Self::PreconditionFailed | Self::RevisionConflict => 412,
             Self::PayloadTooLarge | Self::UploadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
-            Self::NoteTooLong | Self::NoteQuotaExceeded => 422,
+            Self::NoteTooLong
+            | Self::NoteQuotaExceeded
+            | Self::MailDomainInvalid
+            | Self::MailRecipientSuppressed => 422,
             Self::PreconditionRequired => 428,
-            Self::VerificationCodeRateLimited | Self::RateLimited => 429,
+            Self::VerificationCodeRateLimited | Self::RateLimited | Self::MailSendInProgress => 429,
             Self::BadGateway
             | Self::StorageConnectionFailed
             | Self::SmtpSendFailed
             | Self::UpstreamError => 502,
-            Self::ServiceUnavailable | Self::SmtpNotConfigured => 503,
+            Self::ServiceUnavailable | Self::SmtpNotConfigured | Self::MailCircuitOpen => 503,
             Self::InternalError => 500,
         }
     }

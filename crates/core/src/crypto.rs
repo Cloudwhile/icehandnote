@@ -22,6 +22,8 @@ pub struct BlogSsoClaims {
     pub wp_roles: Vec<String>,
     #[serde(default)]
     pub blog_origin: String,
+    #[serde(default)]
+    pub jti: String,
     pub iat: i64,
     pub exp: i64,
 }
@@ -54,8 +56,14 @@ pub fn verify_blog_sso_token(token: &str, secret: &str) -> Result<BlogSsoClaims>
     let claims: BlogSsoClaims = serde_json::from_slice(&payload_bytes)?;
 
     let now = Utc::now().timestamp();
+    if claims.iat > now + 60 {
+        bail!("SSO ticket issued in the future");
+    }
     if claims.exp < now {
         bail!("SSO ticket has expired");
+    }
+    if claims.exp < claims.iat || claims.exp - claims.iat > 3600 {
+        bail!("SSO ticket validity window is out of range");
     }
     Ok(claims)
 }
@@ -166,6 +174,9 @@ pub(crate) fn legacy_sha256_password(username: &str, password: &str) -> String {
 }
 
 pub fn verify_password(username: &str, password: &str, expected_hash: &str) -> bool {
+    if password.len() > 512 {
+        return false;
+    }
     if expected_hash.starts_with("$argon2") {
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         return PasswordHash::new(expected_hash)
@@ -286,10 +297,10 @@ pub fn md5_lower_hex(data: &[u8]) -> String {
     let mut c0: u32 = 0x98badcfe;
     let mut d0: u32 = 0x10325476;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            m[i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            m[i] = u32::from_le_bytes(*word);
         }
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
         for i in 0..64 {
@@ -376,4 +387,24 @@ pub fn resolve_avatar_url(
             }
         }
     }
+}
+
+/// Generate an RFC 9562 UUIDv7 using 48-bit Unix epoch millisecond timestamp
+/// and CSPRNG entropy (`OsRng`).
+pub fn generate_uuid_v7() -> uuid::Uuid {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    let millis = Utc::now().timestamp_millis().max(0) as u64;
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes[0] = ((millis >> 40) & 0xff) as u8;
+    bytes[1] = ((millis >> 32) & 0xff) as u8;
+    bytes[2] = ((millis >> 24) & 0xff) as u8;
+    bytes[3] = ((millis >> 16) & 0xff) as u8;
+    bytes[4] = ((millis >> 8) & 0xff) as u8;
+    bytes[5] = (millis & 0xff) as u8;
+    // RFC 9562 version 7 (`0111`)
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    // RFC 9562 variant (`10`)
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }

@@ -2,7 +2,7 @@ use crate::{
     content_loader::{deterministic_uuid, ContentBundle},
     domain_err, if_match_satisfies, note_quota_for_owner, precondition_failed_err,
     revision_conflict_err,
-    studio_auth::{default_seeded_blog_users, generate_raw_session_token},
+    studio_auth::generate_raw_session_token,
     TutorialRepository, NOTE_UNDO_GRACE_MINUTES,
 };
 use anyhow::Result;
@@ -12,8 +12,9 @@ use icehandnote_core::{
     auth::{
         compute_step_content_sha256, compute_step_etag, constant_time_str_eq,
         evaluate_login_anomaly, extract_body_without_frontmatter,
-        format_step_markdown_file_with_meta, generate_action_token,
-        generate_email_verification_code, hash_action_token, hash_email_verification_code,
+        generate_action_token,
+        generate_email_verification_code, generate_uuid_v7, hash_action_token,
+        hash_email_verification_code,
         hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
         normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
         parse_user_agent_device, verify_password, ArticleAuthorDto, BlogSsoClaims,
@@ -56,27 +57,47 @@ impl PostgresRepository {
             .connect(database_url)
             .await?;
 
-        for sql in [
-            include_str!("../migrations/0001_init_schema.sql"),
-            include_str!("../migrations/0002_users_and_studio.sql"),
-            include_str!("../migrations/0003_site_settings.sql"),
-            include_str!("../migrations/0004_task_step_checks.sql"),
-            include_str!("../migrations/0005_drop_glossary.sql"),
-            include_str!("../migrations/0006_step_license.sql"),
-            include_str!("../migrations/0007_oauth_identity.sql"),
-            include_str!("../migrations/0008_collaboration_and_moderation.sql"),
-            include_str!("../migrations/0009_email_verification_codes.sql"),
-            include_str!("../migrations/0010_sessions_and_login_otp.sql"),
-            include_str!("../migrations/0011_multi_oauth_and_passkeys.sql"),
-            include_str!("../migrations/0012_step_published_at.sql"),
-            include_str!("../migrations/0013_annotations_and_notes.sql"),
-            include_str!("../migrations/0014_collaboration_rfc.sql"),
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS _icehandnote_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+        )
+        .execute(&pool)
+        .await?;
+
+        for (name, sql) in [
+            ("0001_init_schema.sql", include_str!("../migrations/0001_init_schema.sql")),
+            ("0002_users_and_studio.sql", include_str!("../migrations/0002_users_and_studio.sql")),
+            ("0003_site_settings.sql", include_str!("../migrations/0003_site_settings.sql")),
+            ("0004_task_step_checks.sql", include_str!("../migrations/0004_task_step_checks.sql")),
+            ("0005_drop_glossary.sql", include_str!("../migrations/0005_drop_glossary.sql")),
+            ("0006_step_license.sql", include_str!("../migrations/0006_step_license.sql")),
+            ("0007_oauth_identity.sql", include_str!("../migrations/0007_oauth_identity.sql")),
+            ("0008_collaboration_and_moderation.sql", include_str!("../migrations/0008_collaboration_and_moderation.sql")),
+            ("0009_email_verification_codes.sql", include_str!("../migrations/0009_email_verification_codes.sql")),
+            ("0010_sessions_and_login_otp.sql", include_str!("../migrations/0010_sessions_and_login_otp.sql")),
+            ("0011_multi_oauth_and_passkeys.sql", include_str!("../migrations/0011_multi_oauth_and_passkeys.sql")),
+            ("0012_step_published_at.sql", include_str!("../migrations/0012_step_published_at.sql")),
+            ("0013_annotations_and_notes.sql", include_str!("../migrations/0013_annotations_and_notes.sql")),
+            ("0014_collaboration_rfc.sql", include_str!("../migrations/0014_collaboration_rfc.sql")),
+            ("0015_hardening_and_indexes.sql", include_str!("../migrations/0015_hardening_and_indexes.sql")),
         ] {
-            sqlx::raw_sql(sql).execute(&pool).await?;
+            let applied: Option<i32> =
+                sqlx::query_scalar("SELECT 1 FROM _icehandnote_migrations WHERE name = $1")
+                    .bind(name)
+                    .fetch_optional(&pool)
+                    .await?;
+            if applied.is_none() {
+                sqlx::raw_sql(sql).execute(&pool).await?;
+                sqlx::query(
+                    "INSERT INTO _icehandnote_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING",
+                )
+                .bind(name)
+                .execute(&pool)
+                .await?;
+            }
         }
 
         if seed_demo_users {
-            for rec in default_seeded_blog_users() {
+            for rec in crate::studio_auth::default_seeded_blog_users() {
                 sqlx::query(
                     r#"
                     INSERT INTO users (id, wp_user_id, username, display_name, email, avatar_url, bio, role, auth_source, password_hash)
@@ -100,6 +121,17 @@ impl PostgresRepository {
         }
 
         Ok(Self { pool })
+    }
+
+    pub async fn ping_readonly(database_url: &str) -> Result<()> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(database_url)
+            .await?;
+        let _: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&pool).await?;
+        pool.close().await;
+        Ok(())
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -321,7 +353,7 @@ impl PostgresRepository {
         let _ = sqlx::query(
             "INSERT INTO collaboration_audit_logs (id, step_id, actor_user_id, actor_name, action, detail, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
         )
-        .bind(Uuid::new_v4())
+        .bind(generate_uuid_v7())
         .bind(step_id)
         .bind(actor.id)
         .bind(&actor.display_name)
@@ -529,8 +561,10 @@ impl TutorialRepository for PostgresRepository {
             LEFT JOIN track_translations tt_def ON tt_def.track_id = t.id AND tt_def.locale_code = 'zh-CN'
             LEFT JOIN chapter_translations ct_req ON ct_req.chapter_id = c.id AND ct_req.locale_code = $1
             LEFT JOIN chapter_translations ct_def ON ct_def.chapter_id = c.id AND ct_def.locale_code = 'zh-CN'
-            WHERE t.slug = $4 AND s.takedown_reason IS NULL
-            ORDER BY CASE WHEN c.slug = $2 THEN 0 ELSE 1 END, c.chapter_number ASC, s.step_number ASC
+            WHERE t.slug = $4
+              AND s.takedown_reason IS NULL
+              AND ($2 = '' OR $2 = '-' OR c.slug = $2)
+            ORDER BY c.chapter_number ASC, s.step_number ASC
             LIMIT 1
             "#,
         )
@@ -734,7 +768,7 @@ impl TutorialRepository for PostgresRepository {
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        let pattern = format!("%{q}%");
+        let pattern = format!("%{}%", crate::escape_like_pattern(q));
         let rows = sqlx::query(
             r#"
             SELECT
@@ -754,7 +788,11 @@ impl TutorialRepository for PostgresRepository {
             WHERE (st.locale_code = $1 OR st.locale_code = s.default_locale)
               AND st.status = 'published'
               AND s.takedown_reason IS NULL
-              AND (st.title ILIKE $2 OR st.plain_text ILIKE $2)
+              AND (
+                  st.title ILIKE $2 ESCAPE '\'
+                  OR st.plain_text ILIKE $2 ESCAPE '\'
+                  OR EXISTS (SELECT 1 FROM unnest(st.tags) tg WHERE tg ILIKE $2 ESCAPE '\')
+              )
             ORDER BY CASE WHEN st.locale_code = $1 THEN 0 ELSE 1 END, s.step_number ASC
             LIMIT 12
             "#,
@@ -947,7 +985,7 @@ impl TutorialRepository for PostgresRepository {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| format!("%{s}%"));
+            .map(|s| format!("%{}%", crate::escape_like_pattern(s)));
 
         let total: i64 = sqlx::query_scalar(
             r#"
@@ -958,7 +996,7 @@ impl TutorialRepository for PostgresRepository {
               AND ($2::uuid IS NULL OR n.step_id = $2)
               AND ($3::text IS NULL OR n.locale_code = $3)
               AND ($4::text IS NULL OR n.tag = $4)
-              AND ($5::text IS NULL OR n.raw_content ILIKE $5)
+              AND ($5::text IS NULL OR n.raw_content ILIKE $5 ESCAPE '\')
             "#,
         )
         .bind(learner_id)
@@ -986,14 +1024,14 @@ impl TutorialRepository for PostgresRepository {
             JOIN steps s ON s.id = n.step_id
             JOIN chapters c ON c.id = s.chapter_id
             JOIN tracks t ON t.id = c.track_id
-            LEFT JOIN step_translations st_loc ON st_loc.step_id = s.id AND st_loc.locale_code = n.locale_code
-            LEFT JOIN step_translations st_def ON st_def.step_id = s.id AND st_def.locale_code = s.default_locale
+            LEFT JOIN step_translations st_loc ON st_loc.step_id = s.id AND st_loc.locale_code = n.locale_code AND st_loc.status = 'published'
+            LEFT JOIN step_translations st_def ON st_def.step_id = s.id AND st_def.locale_code = s.default_locale AND st_def.status = 'published'
             WHERE n.learner_id = $1
               AND n.deleted_at IS NULL
               AND ($2::uuid IS NULL OR n.step_id = $2)
               AND ($3::text IS NULL OR n.locale_code = $3)
               AND ($4::text IS NULL OR n.tag = $4)
-              AND ($5::text IS NULL OR n.raw_content ILIKE $5)
+              AND ($5::text IS NULL OR n.raw_content ILIKE $5 ESCAPE '\')
             {order_sql}
             LIMIT $6 OFFSET $7
             "#
@@ -1079,7 +1117,7 @@ impl TutorialRepository for PostgresRepository {
             .target
             .as_ref()
             .and_then(|t| serde_json::to_value(t).ok());
-        let id = Uuid::new_v4();
+        let id = generate_uuid_v7();
         let now = Utc::now();
         let body_format = "text/markdown".to_string();
 
@@ -1344,16 +1382,29 @@ impl TutorialRepository for PostgresRepository {
 
         let now = Utc::now();
         let res = sqlx::query(
-            "UPDATE user_margin_notes SET deleted_at = $3, updated_at = $3 WHERE id = $1 AND learner_id = $2 AND deleted_at IS NULL",
+            "UPDATE user_margin_notes SET deleted_at = $3, updated_at = $3 WHERE id = $1 AND learner_id = $2 AND deleted_at IS NULL AND version = $4",
         )
         .bind(note_id)
         .bind(learner_id)
         .bind(now)
+        .bind(cur_ver)
         .execute(&self.pool)
         .await?;
 
         if res.rows_affected() > 0 {
             Ok(Some(now + Duration::minutes(NOTE_UNDO_GRACE_MINUTES)))
+        } else if expected_etag.is_some() {
+            Err(DomainError::new(
+                ErrorCode::PreconditionFailed,
+                "This note was modified elsewhere. Refresh before deleting.",
+            )
+            .with_meta(serde_json::json!({
+                "expected_etag": expected_etag,
+                "current_etag": cur_etag,
+                "current_version": cur_ver,
+                "updated_at": cur_upd.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }))
+            .into())
         } else {
             Ok(None)
         }
@@ -1428,7 +1479,7 @@ impl TutorialRepository for PostgresRepository {
         let mut upserted_translations = 0usize;
 
         for track in &bundle.tracks {
-            sqlx::query(
+            let db_track_id: Uuid = sqlx::query_scalar(
                 r#"
                 INSERT INTO tracks (id, slug, difficulty, icon_kind, tags, sort_order, is_published)
                 VALUES ($1, $2, $3, $4, $5, $6, TRUE)
@@ -1437,6 +1488,7 @@ impl TutorialRepository for PostgresRepository {
                     icon_kind = EXCLUDED.icon_kind,
                     tags = EXCLUDED.tags,
                     sort_order = EXCLUDED.sort_order
+                RETURNING id
                 "#,
             )
             .bind(track.id)
@@ -1445,7 +1497,7 @@ impl TutorialRepository for PostgresRepository {
             .bind(&track.manifest.icon_kind)
             .bind(&track.manifest.tags)
             .bind(track.manifest.sort_order)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
 
             for (loc, meta) in &track.manifest.translations {
@@ -1457,7 +1509,7 @@ impl TutorialRepository for PostgresRepository {
                     SET title = EXCLUDED.title, subtitle = EXCLUDED.subtitle, description = EXCLUDED.description
                     "#,
                 )
-                .bind(track.id)
+                .bind(db_track_id)
                 .bind(loc)
                 .bind(&meta.title)
                 .bind(&meta.subtitle)
@@ -1467,19 +1519,20 @@ impl TutorialRepository for PostgresRepository {
             }
 
             for ch in &track.chapters {
-                sqlx::query(
+                let db_ch_id: Uuid = sqlx::query_scalar(
                     r#"
                     INSERT INTO chapters (id, track_id, slug, chapter_number)
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (track_id, slug) DO UPDATE
                     SET chapter_number = EXCLUDED.chapter_number
+                    RETURNING id
                     "#,
                 )
                 .bind(ch.id)
-                .bind(track.id)
+                .bind(db_track_id)
                 .bind(&ch.slug)
                 .bind(ch.number)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?;
 
                 for (loc, title) in &ch.titles {
@@ -1490,7 +1543,7 @@ impl TutorialRepository for PostgresRepository {
                         ON CONFLICT (chapter_id, locale_code) DO UPDATE SET title = EXCLUDED.title
                         "#,
                     )
-                    .bind(ch.id)
+                    .bind(db_ch_id)
                     .bind(loc)
                     .bind(title)
                     .execute(&mut *tx)
@@ -1498,7 +1551,7 @@ impl TutorialRepository for PostgresRepository {
                 }
 
                 for step in &ch.steps {
-                    sqlx::query(
+                    let db_step_id: Uuid = sqlx::query_scalar(
                         r#"
                         INSERT INTO steps (id, chapter_id, slug, step_number, default_locale, canonical_revision, estimated_minutes, likes_count)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1507,17 +1560,18 @@ impl TutorialRepository for PostgresRepository {
                             default_locale = EXCLUDED.default_locale,
                             canonical_revision = EXCLUDED.canonical_revision,
                             estimated_minutes = EXCLUDED.estimated_minutes
+                        RETURNING id
                         "#,
                     )
                     .bind(step.id)
-                    .bind(ch.id)
+                    .bind(db_ch_id)
                     .bind(&step.slug)
                     .bind(step.step_number)
                     .bind(&step.default_locale)
                     .bind(step.canonical_revision)
                     .bind(step.estimated_minutes)
                     .bind(step.initial_likes)
-                    .execute(&mut *tx)
+                    .fetch_one(&mut *tx)
                     .await?;
 
                     for tr in step.translations.values() {
@@ -1531,13 +1585,22 @@ impl TutorialRepository for PostgresRepository {
                         let clean_license = icehandnote_core::normalize_license_code(
                             &tr.compiled.frontmatter.license,
                         );
+                        let body = extract_body_without_frontmatter(&tr.raw_markdown);
+                        let sha256 = compute_step_content_sha256(
+                            &tr.compiled.frontmatter.title,
+                            &tr.compiled.frontmatter.summary,
+                            status_val,
+                            &clean_license,
+                            &tr.compiled.frontmatter.tags,
+                            &body,
+                        );
                         sqlx::query(
                             r#"
                             INSERT INTO step_translations (
                                 step_id, locale_code, title, summary, license, author_name, tags, raw_markdown,
-                                compiled_blocks, toc_tree, plain_text, synced_revision, status, published_at, updated_at
+                                compiled_blocks, toc_tree, plain_text, synced_revision, content_sha256, status, published_at, updated_at
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                             ON CONFLICT (step_id, locale_code) DO UPDATE
                             SET title = EXCLUDED.title,
                                 summary = EXCLUDED.summary,
@@ -1549,12 +1612,13 @@ impl TutorialRepository for PostgresRepository {
                                 toc_tree = EXCLUDED.toc_tree,
                                 plain_text = EXCLUDED.plain_text,
                                 synced_revision = EXCLUDED.synced_revision,
+                                content_sha256 = EXCLUDED.content_sha256,
                                 status = EXCLUDED.status,
                                 published_at = EXCLUDED.published_at,
                                 updated_at = EXCLUDED.updated_at
                             "#,
                         )
-                        .bind(step.id)
+                        .bind(db_step_id)
                         .bind(&tr.locale)
                         .bind(&tr.compiled.frontmatter.title)
                         .bind(&tr.compiled.frontmatter.summary)
@@ -1566,6 +1630,7 @@ impl TutorialRepository for PostgresRepository {
                         .bind(toc_json)
                         .bind(&tr.compiled.plain_text)
                         .bind(tr.compiled.frontmatter.synced_revision)
+                        .bind(&sha256)
                         .bind(status_val)
                         .bind(tr.published_at)
                         .bind(tr.updated_at)
@@ -1584,15 +1649,22 @@ impl TutorialRepository for PostgresRepository {
 
     async fn upsert_blog_user(&self, claims: &BlogSsoClaims) -> Result<UserProfileDto> {
         let wp_role = UserRole::from_wordpress_roles(&claims.wp_roles);
+        let clean_avatar = if icehandnote_core::is_safe_image_src(&claims.avatar_url) {
+            claims.avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
         let mut tx = self.pool.begin().await?;
 
-        let linked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE wp_user_id = $1")
+        let linked = sqlx::query("SELECT id, is_banned, ban_reason FROM users WHERE wp_user_id = $1 FOR UPDATE")
             .bind(claims.wp_user_id)
             .fetch_optional(&mut *tx)
             .await?;
-        let by_email: Option<Uuid> = if linked.is_none() && !claims.email.trim().is_empty() {
-            sqlx::query_scalar(
-                "SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND wp_user_id IS NULL",
+        let existing_match = if let Some(row) = linked {
+            Some(row)
+        } else if !claims.email.trim().is_empty() {
+            sqlx::query(
+                "SELECT id, is_banned, ban_reason FROM users WHERE LOWER(email) = LOWER($1) AND wp_user_id IS NULL FOR UPDATE",
             )
             .bind(&claims.email)
             .fetch_optional(&mut *tx)
@@ -1601,7 +1673,22 @@ impl TutorialRepository for PostgresRepository {
             None
         };
 
-        let row = if let Some(id) = linked.or(by_email) {
+        let row = if let Some(existing_row) = existing_match {
+            let id: Uuid = existing_row.try_get("id")?;
+            let is_banned: bool = existing_row.try_get("is_banned").unwrap_or(false);
+            let ban_reason: String = existing_row.try_get("ban_reason").unwrap_or_default();
+            if is_banned {
+                let err = DomainError::new(
+                    ErrorCode::AccountBanned,
+                    "This account has been suspended.",
+                );
+                let err = if ban_reason.trim().is_empty() {
+                    err
+                } else {
+                    err.with_meta(serde_json::json!({ "reason": ban_reason.trim() }))
+                };
+                return Err(err.into());
+            }
             let q = format!(
                 r#"
                 UPDATE users
@@ -1622,7 +1709,7 @@ impl TutorialRepository for PostgresRepository {
                 .bind(id)
                 .bind(claims.wp_user_id)
                 .bind(&claims.display_name)
-                .bind(&claims.avatar_url)
+                .bind(&clean_avatar)
                 .bind(wp_role.as_str())
                 .fetch_one(&mut *tx)
                 .await?
@@ -1657,7 +1744,7 @@ impl TutorialRepository for PostgresRepository {
             } else {
                 source_host.chars().take(32).collect()
             };
-            let avatar_source = if claims.avatar_url.trim().is_empty() {
+            let avatar_source = if clean_avatar.is_empty() {
                 "default"
             } else {
                 "oauth"
@@ -1674,7 +1761,7 @@ impl TutorialRepository for PostgresRepository {
                 .bind(&username)
                 .bind(&claims.display_name)
                 .bind(&email)
-                .bind(&claims.avatar_url)
+                .bind(&clean_avatar)
                 .bind(avatar_source)
                 .bind(wp_role.as_str())
                 .bind(&auth_source)
@@ -1684,20 +1771,7 @@ impl TutorialRepository for PostgresRepository {
 
         tx.commit().await?;
         let grav = self.fetch_gravatar_base().await;
-        let user = Self::row_to_user(&row, &grav)?;
-        if user.is_banned {
-            let err = DomainError::new(
-                ErrorCode::AccountBanned,
-                "This account has been suspended.",
-            );
-            let err = if user.ban_reason.trim().is_empty() {
-                err
-            } else {
-                err.with_meta(serde_json::json!({ "reason": user.ban_reason.trim() }))
-            };
-            return Err(err.into());
-        }
-        Ok(user)
+        Self::row_to_user(&row, &grav)
     }
 
     async fn find_oauth_user(
@@ -1730,13 +1804,18 @@ impl TutorialRepository for PostgresRepository {
             return Ok(None);
         };
 
-        if !oauth_avatar_url.trim().is_empty() {
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
+        if !clean_oauth_avatar.is_empty() {
             let _ = sqlx::query(
                 "UPDATE user_oauth_bindings SET oauth_avatar_url = $3 WHERE user_id = $1 AND LOWER(provider) = $2",
             )
             .bind(uid)
             .bind(&clean_provider)
-            .bind(oauth_avatar_url.trim())
+            .bind(&clean_oauth_avatar)
             .execute(&self.pool)
             .await;
         }
@@ -1752,7 +1831,7 @@ impl TutorialRepository for PostgresRepository {
         );
         let row_opt = sqlx::query(&q)
             .bind(uid)
-            .bind(oauth_avatar_url.trim())
+            .bind(&clean_oauth_avatar)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -1836,6 +1915,21 @@ impl TutorialRepository for PostgresRepository {
         } else {
             display_name.trim()
         };
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
+        let clean_uploaded_avatar = if uploaded_avatar_url.trim().is_empty() {
+            String::new()
+        } else if icehandnote_core::is_safe_image_src(uploaded_avatar_url) {
+            uploaded_avatar_url.trim().chars().take(512).collect()
+        } else {
+            return Err(domain_err(
+                ErrorCode::InvalidUrl,
+                "Avatar URL must be a valid https://, http://, or / path.",
+            ));
+        };
 
         let mut tx = self.pool.begin().await?;
         let inserted_id: Uuid = sqlx::query_scalar(
@@ -1852,8 +1946,8 @@ impl TutorialRepository for PostgresRepository {
         .bind(clean_display)
         .bind(clean_email)
         .bind(&norm_source)
-        .bind(oauth_avatar_url.trim())
-        .bind(uploaded_avatar_url.trim())
+        .bind(&clean_oauth_avatar)
+        .bind(&clean_uploaded_avatar)
         .bind(safe_role.as_str())
         .bind(&clean_provider)
         .bind(clean_sub)
@@ -1918,6 +2012,11 @@ impl TutorialRepository for PostgresRepository {
             ));
         }
 
+        let clean_oauth_avatar = if icehandnote_core::is_safe_image_src(oauth_avatar_url) {
+            oauth_avatar_url.trim().to_string()
+        } else {
+            String::new()
+        };
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
@@ -1932,7 +2031,7 @@ impl TutorialRepository for PostgresRepository {
         .bind(user_id)
         .bind(&clean_provider)
         .bind(clean_sub)
-        .bind(oauth_avatar_url.trim())
+        .bind(&clean_oauth_avatar)
         .execute(&mut *tx)
         .await?;
 
@@ -1951,7 +2050,7 @@ impl TutorialRepository for PostgresRepository {
             .bind(user_id)
             .bind(&clean_provider)
             .bind(clean_sub)
-            .bind(oauth_avatar_url.trim())
+            .bind(&clean_oauth_avatar)
             .fetch_optional(&mut *tx)
             .await?;
         let Some(row) = row_opt else {
@@ -2342,10 +2441,19 @@ impl TutorialRepository for PostgresRepository {
             return Err(err.into());
         }
 
-        let _ = sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
-            .bind(user.id)
-            .execute(&self.pool)
-            .await;
+        if icehandnote_core::crypto::is_legacy_password_hash(&expected) {
+            let upgraded = hash_password(&username, password);
+            let _ = sqlx::query("UPDATE users SET password_hash = $2, last_login_at = NOW() WHERE id = $1")
+                .bind(user.id)
+                .bind(&upgraded)
+                .execute(&self.pool)
+                .await;
+        } else {
+            let _ = sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
+                .bind(user.id)
+                .execute(&self.pool)
+                .await;
+        }
 
         Ok(Some(user))
     }
@@ -2358,7 +2466,17 @@ impl TutorialRepository for PostgresRepository {
         let clean_display: String = input.display_name.trim().chars().take(64).collect();
         let clean_bio: String = input.bio.trim().chars().take(300).collect();
         let norm_source = normalize_avatar_source(&input.avatar_source);
-        let clean_uploaded: String = input.uploaded_avatar_url.trim().chars().take(512).collect();
+        let raw_uploaded = input.uploaded_avatar_url.trim();
+        let clean_uploaded: String = if raw_uploaded.is_empty() {
+            String::new()
+        } else if icehandnote_core::is_safe_image_src(raw_uploaded) {
+            raw_uploaded.chars().take(512).collect()
+        } else {
+            return Err(domain_err(
+                ErrorCode::InvalidUrl,
+                "Avatar URL must be a valid https://, http://, or / path.",
+            ));
+        };
 
         let q = format!(
             r#"
@@ -2489,15 +2607,16 @@ impl TutorialRepository for PostgresRepository {
     async fn verify_password_reset_otp(&self, email: &str, otp_code: &str) -> Result<String> {
         let clean_email = email.trim();
         let clean_code = otp_code.trim();
+        let mut tx = self.pool.begin().await?;
         let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE expires_at <= NOW()")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await;
 
         let urow_opt = sqlx::query(
             "SELECT id, email FROM users WHERE LOWER(email) = LOWER($1) AND NOT is_banned LIMIT 1",
         )
         .bind(clean_email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         let Some(urow) = urow_opt else {
             return Err(domain_err(
@@ -2509,10 +2628,10 @@ impl TutorialRepository for PostgresRepository {
         let user_email: String = urow.try_get("email")?;
 
         let row_opt = sqlx::query(
-            "SELECT token_hash, code_hash, attempts, expires_at FROM password_reset_tokens WHERE user_id = $1 AND code_hash <> '' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+            "SELECT token_hash, code_hash, attempts, expires_at FROM password_reset_tokens WHERE user_id = $1 AND code_hash <> '' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
         )
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row_opt else {
             return Err(domain_err(
@@ -2526,10 +2645,11 @@ impl TutorialRepository for PostgresRepository {
         let existing_exp: DateTime<Utc> = row.try_get("expires_at")?;
 
         if attempts >= 5 {
-            let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+            sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
                 .bind(user_id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Too many invalid attempts. Please request a new reset code.",
@@ -2539,18 +2659,19 @@ impl TutorialRepository for PostgresRepository {
         let candidate = hash_email_verification_code(&user_email, clean_code);
         if !constant_time_str_eq(&expected_hash, &candidate) {
             if attempts + 1 >= 5 {
-                let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+                sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
                     .bind(user_id)
-                    .execute(&self.pool)
-                    .await;
+                    .execute(&mut *tx)
+                    .await?;
             } else {
-                let _ = sqlx::query(
+                sqlx::query(
                     "UPDATE password_reset_tokens SET attempts = attempts + 1 WHERE token_hash = $1",
                 )
                 .bind(&old_token_hash)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
             }
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Password reset verification code is invalid.",
@@ -2566,8 +2687,9 @@ impl TutorialRepository for PostgresRepository {
         .bind(&old_token_hash)
         .bind(&verified_hash)
         .bind(next_exp)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
 
         Ok(raw_verified_token)
     }
@@ -2643,8 +2765,9 @@ impl TutorialRepository for PostgresRepository {
     ) -> Result<UserProfileDto> {
         let clean_email = email.trim();
         let clean_code = otp_code.trim();
+        let mut tx = self.pool.begin().await?;
         let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE expires_at <= NOW()")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await;
 
         let q_user = format!(
@@ -2652,7 +2775,7 @@ impl TutorialRepository for PostgresRepository {
         );
         let Some(urow) = sqlx::query(&q_user)
             .bind(clean_email)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?
         else {
             return Err(domain_err(
@@ -2665,10 +2788,10 @@ impl TutorialRepository for PostgresRepository {
         let user_email: String = urow.try_get("email")?;
 
         let row_opt = sqlx::query(
-            "SELECT token_hash, code_hash, attempts FROM password_reset_tokens WHERE user_id = $1 AND code_hash <> '' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+            "SELECT token_hash, code_hash, attempts FROM password_reset_tokens WHERE user_id = $1 AND code_hash <> '' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
         )
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row_opt else {
             return Err(domain_err(
@@ -2680,10 +2803,11 @@ impl TutorialRepository for PostgresRepository {
         let expected_hash: String = row.try_get("code_hash")?;
         let attempts: i32 = row.try_get("attempts").unwrap_or(0);
         if attempts >= 5 {
-            let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+            sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
                 .bind(user_id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Too many invalid attempts. Please request a new reset code.",
@@ -2693,25 +2817,25 @@ impl TutorialRepository for PostgresRepository {
         let candidate = hash_email_verification_code(&user_email, clean_code);
         if !constant_time_str_eq(&expected_hash, &candidate) {
             if attempts + 1 >= 5 {
-                let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+                sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
                     .bind(user_id)
-                    .execute(&self.pool)
-                    .await;
+                    .execute(&mut *tx)
+                    .await?;
             } else {
-                let _ = sqlx::query(
+                sqlx::query(
                     "UPDATE password_reset_tokens SET attempts = attempts + 1 WHERE token_hash = $1",
                 )
                 .bind(&token_hash)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
             }
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Password reset verification code is invalid.",
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -2810,12 +2934,13 @@ impl TutorialRepository for PostgresRepository {
         let clean_email = email.trim().to_ascii_lowercase();
         let clean_code = code.trim();
         let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
 
         let row_opt = sqlx::query(
-            "SELECT id, code_hash, attempts, expires_at FROM email_verification_codes WHERE LOWER(email) = LOWER($1) AND used_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            "SELECT id, code_hash, attempts, expires_at FROM email_verification_codes WHERE LOWER(email) = LOWER($1) AND used_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
         )
         .bind(&clean_email)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let Some(row) = row_opt else {
@@ -2831,10 +2956,11 @@ impl TutorialRepository for PostgresRepository {
         let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
 
         if expires_at <= now {
-            let _ = sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
+            sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
                 .bind(id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeExpired,
                 "Verification code has expired. Please request a new code.",
@@ -2842,10 +2968,11 @@ impl TutorialRepository for PostgresRepository {
         }
 
         if attempts >= 5 {
-            let _ = sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
+            sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
                 .bind(id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Too many invalid verification attempts. Please request a new code.",
@@ -2855,23 +2982,25 @@ impl TutorialRepository for PostgresRepository {
         let candidate_hash = hash_email_verification_code(&clean_email, clean_code);
         if !constant_time_str_eq(&expected_hash, &candidate_hash) {
             if attempts + 1 >= 5 {
-                let _ = sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
+                sqlx::query("DELETE FROM email_verification_codes WHERE id = $1")
                     .bind(id)
-                    .execute(&self.pool)
-                    .await;
+                    .execute(&mut *tx)
+                    .await?;
             } else {
-                let _ = sqlx::query(
+                sqlx::query(
                     "UPDATE email_verification_codes SET attempts = attempts + 1 WHERE id = $1",
                 )
                 .bind(id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
             }
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Verification code is invalid. Please check your email and try again.",
             ));
         }
+        tx.commit().await?;
 
         Ok(id)
     }
@@ -2980,6 +3109,7 @@ impl TutorialRepository for PostgresRepository {
                    u.avatar_source, u.oauth_avatar_url, u.uploaded_avatar_url, u.oauth_provider,
                    u.bio, u.role, u.auth_source, u.is_banned, u.ban_reason, u.last_login_at,
                    (u.password_hash IS NOT NULL AND u.password_hash <> '') AS has_password,
+                   (EXISTS (SELECT 1 FROM step_collaborators sc WHERE sc.user_id = u.id) OR EXISTS (SELECT 1 FROM steps stp WHERE stp.owner_user_id = u.id)) AS has_collaborations,
                    ARRAY(SELECT provider FROM user_oauth_bindings uob WHERE uob.user_id = u.id ORDER BY uob.bound_at ASC) AS oauth_bindings
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id
@@ -3412,11 +3542,12 @@ impl TutorialRepository for PostgresRepository {
     ) -> Result<(UserProfileDto, String, String, String, String)> {
         let now = Utc::now();
         let clean_code = code.trim();
+        let mut tx = self.pool.begin().await?;
         let row_opt = sqlx::query(
-            "SELECT user_id, email, ip_address, user_agent, device_label, device_fingerprint, code_hash, attempts, expires_at FROM login_otp_challenges WHERE id = $1",
+            "SELECT user_id, email, ip_address, user_agent, device_label, device_fingerprint, code_hash, attempts, expires_at FROM login_otp_challenges WHERE id = $1 FOR UPDATE",
         )
         .bind(challenge_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         let Some(row) = row_opt else {
             return Err(domain_err(
@@ -3426,10 +3557,11 @@ impl TutorialRepository for PostgresRepository {
         };
         let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
         if expires_at <= now {
-            let _ = sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
+            sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
                 .bind(challenge_id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::OtpChallengeExpired,
                 "Verification code has expired. Please request a new code.",
@@ -3437,10 +3569,11 @@ impl TutorialRepository for PostgresRepository {
         }
         let attempts: i32 = row.try_get("attempts").unwrap_or(0);
         if attempts >= 5 {
-            let _ = sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
+            sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
                 .bind(challenge_id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Too many invalid attempts. Please sign in again.",
@@ -3451,18 +3584,19 @@ impl TutorialRepository for PostgresRepository {
         let candidate = hash_email_verification_code(&email, clean_code);
         if !constant_time_str_eq(&expected_hash, &candidate) {
             if attempts + 1 >= 5 {
-                let _ = sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
+                sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
                     .bind(challenge_id)
-                    .execute(&self.pool)
-                    .await;
+                    .execute(&mut *tx)
+                    .await?;
             } else {
-                let _ = sqlx::query(
+                sqlx::query(
                     "UPDATE login_otp_challenges SET attempts = attempts + 1 WHERE id = $1",
                 )
                 .bind(challenge_id)
-                .execute(&self.pool)
-                .await;
+                .execute(&mut *tx)
+                .await?;
             }
+            tx.commit().await?;
             return Err(domain_err(
                 ErrorCode::VerificationCodeInvalid,
                 "Invalid verification code. Please check your email and try again.",
@@ -3474,19 +3608,21 @@ impl TutorialRepository for PostgresRepository {
         let device_label: String = row.try_get("device_label")?;
         let device_fingerprint: String = row.try_get("device_fingerprint")?;
 
-        let _ = sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
+        sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
             .bind(challenge_id)
-            .execute(&self.pool)
-            .await;
+            .execute(&mut *tx)
+            .await?;
 
         let q_user = format!("SELECT {USER_SELECT_COLS} FROM users WHERE id = $1");
         let Some(urow) = sqlx::query(&q_user)
             .bind(user_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?
         else {
+            tx.commit().await?;
             return Err(domain_err(ErrorCode::UserNotFound, "Account not found."));
         };
+        tx.commit().await?;
         let banned: bool = urow.try_get("is_banned").unwrap_or(false);
         if banned {
             return Err(domain_err(
@@ -3710,6 +3846,10 @@ impl TutorialRepository for PostgresRepository {
         step_slug: &str,
         locale: &str,
     ) -> Result<StudioStepEditorDto> {
+        let track_slug = track_slug.trim();
+        let chapter_slug = chapter_slug.trim();
+        let step_slug = step_slug.trim();
+        let locale = locale.trim();
         let step_row = sqlx::query(
             r#"
             SELECT s.id, c.slug AS chapter_slug, s.step_number, s.estimated_minutes, s.canonical_revision, s.default_locale,
@@ -3718,7 +3858,8 @@ impl TutorialRepository for PostgresRepository {
             JOIN chapters c ON c.id = s.chapter_id
             JOIN tracks t ON t.id = c.track_id AND t.slug = $1
             WHERE s.slug = $3
-            ORDER BY CASE WHEN c.slug = $2 THEN 0 ELSE 1 END, c.chapter_number ASC, s.step_number ASC
+              AND ($2 = '' OR $2 = '-' OR c.slug = $2)
+            ORDER BY c.chapter_number ASC, s.step_number ASC
             LIMIT 1
             "#,
         )
@@ -3991,6 +4132,44 @@ impl TutorialRepository for PostgresRepository {
         })
     }
 
+    async fn resolve_step_collab_access(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> Result<Option<(Uuid, String, Vec<String>)>> {
+        let clean_track = track_slug.trim();
+        let clean_ch = chapter_slug.trim();
+        let clean_step = step_slug.trim();
+        let row_opt = sqlx::query(
+            r#"
+            SELECT s.id, s.owner_user_id
+            FROM steps s
+            JOIN chapters c ON c.id = s.chapter_id
+            JOIN tracks t ON t.id = c.track_id AND t.slug = $1
+            WHERE s.slug = $3
+              AND ($2 = '' OR $2 = '-' OR c.slug = $2)
+            ORDER BY c.chapter_number ASC, s.step_number ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(clean_track)
+        .bind(clean_ch)
+        .bind(clean_step)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row_opt else {
+            return Ok(None);
+        };
+        let step_id: Uuid = row.try_get("id")?;
+        let owner_opt: Option<Uuid> = row.try_get("owner_user_id").ok().flatten();
+        let (role, scope) = self
+            .resolve_viewer_step_role(viewer, step_id, owner_opt)
+            .await?;
+        Ok(Some((step_id, role, scope)))
+    }
+
     async fn studio_save_step(
         &self,
         author: &UserProfileDto,
@@ -3998,6 +4177,19 @@ impl TutorialRepository for PostgresRepository {
         content_dir: &Path,
         require_if_match: bool,
     ) -> Result<StudioStepEditorDto> {
+        let clean_track_slug = input.track_slug.trim();
+        if !crate::is_valid_slug_segment(clean_track_slug) {
+            return Err(domain_err(
+                ErrorCode::InvalidSlug,
+                "Invalid series URL slug.",
+            ));
+        }
+        if !crate::is_supported_locale_code(&input.locale) {
+            return Err(domain_err(
+                ErrorCode::BadRequest,
+                "Unsupported locale code.",
+            ));
+        }
         let target_slug = input.step_slug.trim();
         if !crate::studio_auth::is_valid_step_slug_segment(target_slug) {
             return Err(domain_err(
@@ -4025,7 +4217,7 @@ impl TutorialRepository for PostgresRepository {
             let owner_ch: Option<String> = sqlx::query_scalar(
                 "SELECT c.slug FROM chapters c JOIN tracks t ON t.id = c.track_id JOIN steps s ON s.chapter_id = c.id WHERE t.slug = $1 AND s.slug = $2 LIMIT 1",
             )
-            .bind(&input.track_slug)
+            .bind(clean_track_slug)
             .bind(lookup_slug)
             .fetch_optional(&self.pool)
             .await?;
@@ -4035,7 +4227,7 @@ impl TutorialRepository for PostgresRepository {
                 let first_ch: Option<String> = sqlx::query_scalar(
                     "SELECT c.slug FROM chapters c JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 ORDER BY c.chapter_number ASC LIMIT 1",
                 )
-                .bind(&input.track_slug)
+                .bind(clean_track_slug)
                 .fetch_optional(&self.pool)
                 .await?;
                 if let Some(cs) = first_ch {
@@ -4043,10 +4235,10 @@ impl TutorialRepository for PostgresRepository {
                 } else {
                     self.studio_create_chapter(
                         CreateChapterInput {
-                            track_slug: input.track_slug.clone(),
+                            track_slug: clean_track_slug.to_string(),
                             slug: "chapters".to_string(),
                             number: 1,
-                            title_zh_tw: input.track_slug.clone(),
+                            title_zh_tw: clean_track_slug.to_string(),
                         },
                         content_dir,
                     )
@@ -4054,15 +4246,30 @@ impl TutorialRepository for PostgresRepository {
                     resolved_ch_slug = "chapters".to_string();
                 }
             }
+        } else if !crate::is_valid_slug_segment(&resolved_ch_slug) {
+            return Err(domain_err(
+                ErrorCode::InvalidSlug,
+                "Invalid chapter URL slug.",
+            ));
         }
+
+        let clean_status = if input.status == "draft" {
+            "draft"
+        } else {
+            "published"
+        };
+        let predicted_minutes = estimate_reading_minutes(&input.body_markdown);
+        let now_utc = Utc::now();
+
+        let mut tx = self.pool.begin().await?;
 
         if prev_slug_opt.is_some() {
             let conflict_id: Option<Uuid> = sqlx::query_scalar(
                 "SELECT s.id FROM steps s JOIN chapters c ON c.id = s.chapter_id JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 AND s.slug = $2 LIMIT 1",
             )
-            .bind(&input.track_slug)
+            .bind(clean_track_slug)
             .bind(target_slug)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
             if conflict_id.is_some() {
                 return Err(domain_err(
@@ -4077,18 +4284,18 @@ impl TutorialRepository for PostgresRepository {
         let ch_row = sqlx::query(
             "SELECT c.id FROM chapters c JOIN tracks t ON t.id = c.track_id WHERE t.slug = $1 AND c.slug = $2",
         )
-        .bind(&input.track_slug)
+        .bind(clean_track_slug)
         .bind(&resolved_ch_slug)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
         let ch_id: Uuid = ch_row.try_get("id")?;
 
         let existing_step = sqlx::query(
-            "SELECT id, canonical_revision, owner_user_id, takedown_reason FROM steps WHERE chapter_id = $1 AND slug = $2",
+            "SELECT id, canonical_revision, owner_user_id, author_name, takedown_reason FROM steps WHERE chapter_id = $1 AND slug = $2 FOR UPDATE",
         )
         .bind(ch_id)
         .bind(lookup_slug)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         if prev_slug_opt.is_some() && existing_step.is_none() {
@@ -4098,184 +4305,192 @@ impl TutorialRepository for PostgresRepository {
             ));
         }
 
-        let clean_status = if input.status == "draft" {
-            "draft"
-        } else {
-            "published"
-        };
-        let predicted_minutes = estimate_reading_minutes(&input.body_markdown);
-        let now_utc = Utc::now();
-
-        let (step_id, next_version, next_edit_seq, resolved_published_at) = if let Some(sr) = existing_step {
-            let sid: Uuid = sr.try_get("id")?;
-            let owner_opt: Option<Uuid> = sr.try_get("owner_user_id").ok().flatten();
-            let (viewer_role, viewer_scope) = self
-                .resolve_viewer_step_role(author, sid, owner_opt)
-                .await?;
-            Self::check_role_can_edit_locale(&viewer_role, &viewer_scope, &input.locale)?;
-
-            let td_reason: Option<String> = sr.try_get("takedown_reason").ok().flatten();
-            if td_reason.is_some() && clean_status == "published" && !author.role.is_admin() {
-                return Err(domain_err(
-                    ErrorCode::StepTakenDown,
-                    "This article has been taken down by an administrator. Save as draft and contact an administrator to restore it.",
-                ));
-            }
-            let prev_row = sqlx::query(
-                "SELECT title, summary, license, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, author_name, last_editor_name, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2",
-            )
-            .bind(sid)
-            .bind(&input.locale)
-            .fetch_optional(&self.pool)
-            .await?;
-
-            let crev: i32 = sr.try_get::<i32, _>("canonical_revision")?.max(1);
-            let (next_v, next_seq, pub_at) = if let Some(pr) = prev_row {
-                let pv: i32 = pr.try_get("synced_revision").unwrap_or(1);
-                let prev_status: String = pr.try_get("status").unwrap_or_default();
-                let prev_pub: DateTime<Utc> = pr.try_get("published_at").unwrap_or(now_utc);
-                let cur_seq: i64 = pr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
-                let prev_title: String = pr.try_get("title").unwrap_or_default();
-                let prev_summary: String = pr.try_get("summary").unwrap_or_default();
-                let prev_lic: String = icehandnote_core::normalize_license_code(
-                    &pr.try_get::<String, _>("license").unwrap_or_default(),
-                );
-                let prev_tags: Vec<String> = pr.try_get("tags").unwrap_or_default();
-                let prev_raw: String = pr.try_get("raw_markdown").unwrap_or_default();
-                let prev_body = extract_body_without_frontmatter(&prev_raw);
-                let stored_sha: String = pr.try_get("content_sha256").unwrap_or_default();
-                let cur_sha = if stored_sha.is_empty() {
-                    compute_step_content_sha256(
-                        &prev_title,
-                        &prev_summary,
-                        &prev_status,
-                        &prev_lic,
-                        &prev_tags,
-                        &prev_body,
-                    )
-                } else {
-                    stored_sha
-                };
-                let cur_etag = compute_step_etag(cur_seq, &cur_sha);
-
-                match input
-                    .expected_etag
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    Some(expected) => {
-                        if !if_match_satisfies(expected, &cur_etag) {
-                            let last_ed: String = pr.try_get("last_editor_name").unwrap_or_default();
-                            let auth_name: String = pr.try_get("author_name").unwrap_or_default();
-                            let updated_by = if !last_ed.is_empty() { last_ed } else { auth_name };
-                            let prev_upd: DateTime<Utc> =
-                                pr.try_get("updated_at").unwrap_or(now_utc);
-                            return Err(revision_conflict_err(
-                                expected,
-                                &cur_etag,
-                                cur_seq,
-                                &updated_by,
-                                prev_upd,
-                                &prev_title,
-                                &prev_summary,
-                                &prev_body,
-                            ));
-                        }
-                    }
-                    None if require_if_match => {
-                        return Err(domain_err(
-                            ErrorCode::PreconditionRequired,
-                            "An If-Match header with the current article ETag is required before saving.",
-                        ));
-                    }
-                    None => {}
+        let (step_id, next_version, next_canonical, next_edit_seq, resolved_published_at, step_author_name) =
+            if let Some(sr) = existing_step {
+                let sid: Uuid = sr.try_get("id")?;
+                let owner_opt: Option<Uuid> = sr.try_get("owner_user_id").ok().flatten();
+                let (viewer_role, viewer_scope) = self
+                    .resolve_viewer_step_role(author, sid, owner_opt)
+                    .await?;
+                Self::check_role_can_edit_locale(&viewer_role, &viewer_scope, &input.locale)?;
+                if prev_slug_opt.is_some() && viewer_role == "translator" {
+                    return Err(domain_err(
+                        ErrorCode::CollaboratorRoleForbidden,
+                        "Translators cannot rename an article URL slug across locales.",
+                    ));
                 }
 
-                let nv = if clean_status == "published" {
-                    pv.max(1) + 1
+                let td_reason: Option<String> = sr.try_get("takedown_reason").ok().flatten();
+                if td_reason.is_some() && clean_status == "published" && !author.role.is_admin() {
+                    return Err(domain_err(
+                        ErrorCode::StepTakenDown,
+                        "This article has been taken down by an administrator. Save as draft and contact an administrator to restore it.",
+                    ));
+                }
+                let prev_row = sqlx::query(
+                    "SELECT title, summary, license, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, author_name, last_editor_name, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2 FOR UPDATE",
+                )
+                .bind(sid)
+                .bind(&input.locale)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                let existing_step_author: String = sr
+                    .try_get::<String, _>("author_name")
+                    .unwrap_or_default();
+                let preserved_author = if existing_step_author.trim().is_empty() {
+                    author.display_name.clone()
                 } else {
-                    pv.max(1)
+                    existing_step_author
                 };
-                let p_at = if prev_status == "draft" && clean_status == "published" {
-                    now_utc
+
+                let crev: i32 = sr.try_get::<i32, _>("canonical_revision")?.max(1);
+                let (next_v, next_seq, pub_at) = if let Some(pr) = prev_row {
+                    let pv: i32 = pr.try_get("synced_revision").unwrap_or(1);
+                    let prev_status: String = pr.try_get("status").unwrap_or_default();
+                    let prev_pub: DateTime<Utc> = pr.try_get("published_at").unwrap_or(now_utc);
+                    let cur_seq: i64 = pr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
+                    let prev_title: String = pr.try_get("title").unwrap_or_default();
+                    let prev_summary: String = pr.try_get("summary").unwrap_or_default();
+                    let prev_lic: String = icehandnote_core::normalize_license_code(
+                        &pr.try_get::<String, _>("license").unwrap_or_default(),
+                    );
+                    let prev_tags: Vec<String> = pr.try_get("tags").unwrap_or_default();
+                    let prev_raw: String = pr.try_get("raw_markdown").unwrap_or_default();
+                    let prev_body = extract_body_without_frontmatter(&prev_raw);
+                    let stored_sha: String = pr.try_get("content_sha256").unwrap_or_default();
+                    let cur_sha = if stored_sha.is_empty() {
+                        compute_step_content_sha256(
+                            &prev_title,
+                            &prev_summary,
+                            &prev_status,
+                            &prev_lic,
+                            &prev_tags,
+                            &prev_body,
+                        )
+                    } else {
+                        stored_sha
+                    };
+                    let cur_etag = compute_step_etag(cur_seq, &cur_sha);
+
+                    match input
+                        .expected_etag
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        Some(expected) => {
+                            if !if_match_satisfies(expected, &cur_etag) {
+                                let last_ed: String = pr.try_get("last_editor_name").unwrap_or_default();
+                                let auth_name: String = pr.try_get("author_name").unwrap_or_default();
+                                let updated_by = if !last_ed.is_empty() { last_ed } else { auth_name };
+                                let prev_upd: DateTime<Utc> =
+                                    pr.try_get("updated_at").unwrap_or(now_utc);
+                                return Err(revision_conflict_err(
+                                    expected,
+                                    &cur_etag,
+                                    cur_seq,
+                                    &updated_by,
+                                    prev_upd,
+                                    &prev_title,
+                                    &prev_summary,
+                                    &prev_body,
+                                ));
+                            }
+                        }
+                        None if require_if_match => {
+                            return Err(domain_err(
+                                ErrorCode::PreconditionRequired,
+                                "An If-Match header with the current article ETag is required before saving.",
+                            ));
+                        }
+                        None => {}
+                    }
+
+                    let nv = if clean_status == "published" {
+                        pv.max(1) + 1
+                    } else {
+                        pv.max(1)
+                    };
+                    let p_at = if prev_status == "draft" && clean_status == "published" {
+                        now_utc
+                    } else {
+                        prev_pub
+                    };
+                    (nv, cur_seq + 1, p_at)
                 } else {
-                    prev_pub
+                    (1, 1, now_utc)
                 };
-                (nv, cur_seq + 1, p_at)
+                let next_c = crev.max(next_v);
+                sqlx::query(
+                    r#"
+                    UPDATE steps
+                    SET slug = $2,
+                        step_number = $3,
+                        estimated_minutes = $4,
+                        canonical_revision = $5,
+                        owner_user_id = CASE WHEN owner_user_id IS NULL AND $8 THEN $6 ELSE owner_user_id END,
+                        author_name = CASE WHEN author_name = '' THEN $7 ELSE author_name END
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(sid)
+                .bind(target_slug)
+                .bind(input.step_number)
+                .bind(predicted_minutes)
+                .bind(next_c)
+                .bind(author.id)
+                .bind(&author.display_name)
+                .bind(author.role.is_admin())
+                .execute(&mut *tx)
+                .await?;
+                (sid, next_v, next_c, next_seq, pub_at, preserved_author)
             } else {
-                (1, 1, now_utc)
-            };
-            let next_c = crev.max(next_v);
-            sqlx::query(
-                r#"
-                UPDATE steps
-                SET slug = $2,
-                    step_number = $3,
-                    estimated_minutes = $4,
-                    canonical_revision = $5,
-                    owner_user_id = CASE WHEN owner_user_id IS NULL AND $8 THEN $6 ELSE owner_user_id END,
-                    author_name = CASE WHEN author_name = '' THEN $7 ELSE author_name END
-                WHERE id = $1
-                "#,
-            )
-            .bind(sid)
-            .bind(target_slug)
-            .bind(input.step_number)
-            .bind(predicted_minutes)
-            .bind(next_c)
-            .bind(author.id)
-            .bind(&author.display_name)
-            .bind(author.role.is_admin())
-            .execute(&self.pool)
-            .await?;
-            (sid, next_v, next_seq, pub_at)
-        } else {
-            if !author.role.can_author() {
-                return Err(domain_err(
-                    ErrorCode::StepEditForbidden,
-                    "Only authors or administrators can create new articles.",
+                if !author.role.can_author() {
+                    return Err(domain_err(
+                        ErrorCode::StepEditForbidden,
+                        "Only authors or administrators can create new articles.",
+                    ));
+                }
+                let sid = deterministic_uuid(&format!(
+                    "step:{clean_track_slug}:{resolved_ch_slug}:{target_slug}",
                 ));
-            }
-            let sid = deterministic_uuid(&format!(
-                "step:{}:{resolved_ch_slug}:{target_slug}",
-                input.track_slug
-            ));
-            sqlx::query(
-                r#"
-                INSERT INTO steps (id, chapter_id, slug, step_number, default_locale, canonical_revision, estimated_minutes, owner_user_id, author_name)
-                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8)
-                "#,
-            )
-            .bind(sid)
-            .bind(ch_id)
-            .bind(target_slug)
-            .bind(input.step_number)
-            .bind(&input.locale)
-            .bind(predicted_minutes)
-            .bind(author.id)
-            .bind(&author.display_name)
-            .execute(&self.pool)
-            .await?;
-            (sid, 1, 1, now_utc)
-        };
+                sqlx::query(
+                    r#"
+                    INSERT INTO steps (id, chapter_id, slug, step_number, default_locale, canonical_revision, estimated_minutes, owner_user_id, author_name)
+                    VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8)
+                    "#,
+                )
+                .bind(sid)
+                .bind(ch_id)
+                .bind(target_slug)
+                .bind(input.step_number)
+                .bind(&input.locale)
+                .bind(predicted_minutes)
+                .bind(author.id)
+                .bind(&author.display_name)
+                .execute(&mut *tx)
+                .await?;
+                (sid, 1, 1, 1, now_utc, author.display_name.clone())
+            };
 
         let clean_license = icehandnote_core::normalize_license_code(&input.license);
         let pub_iso = resolved_published_at.to_rfc3339();
         let upd_iso = now_utc.to_rfc3339();
-        let raw_md = format_step_markdown_file_with_meta(
+        let raw_md = icehandnote_core::auth::format_step_markdown_file_with_full_meta(
             &input.title,
             &input.summary,
             input.step_number,
             predicted_minutes,
             next_version,
-            next_version,
+            next_canonical,
             clean_status,
             &clean_license,
-            &author.display_name,
+            &step_author_name,
             Some(&pub_iso),
             Some(&upd_iso),
             &input.tags,
+            Some(step_id),
             &input.body_markdown,
         );
         let compiled = compile_notebook_markdown(&raw_md);
@@ -4334,10 +4549,10 @@ impl TutorialRepository for PostgresRepository {
         .bind(&author.display_name)
         .bind(clean_status)
         .bind(author.id)
-        .bind(&author.display_name)
+        .bind(&step_author_name)
         .bind(resolved_published_at)
         .bind(now_utc)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let change_note: String = input
@@ -4358,7 +4573,7 @@ impl TutorialRepository for PostgresRepository {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
         )
-        .bind(Uuid::new_v4())
+        .bind(generate_uuid_v7())
         .bind(step_id)
         .bind(&input.locale)
         .bind(next_edit_seq)
@@ -4372,7 +4587,7 @@ impl TutorialRepository for PostgresRepository {
         .bind(&author.display_name)
         .bind(&change_note)
         .bind(now_utc)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let audit_detail = if change_note.is_empty() {
@@ -4383,24 +4598,36 @@ impl TutorialRepository for PostgresRepository {
                 input.locale, next_edit_seq
             )
         };
-        self.record_audit_log(step_id, author, "revision_saved", &audit_detail)
-            .await;
+        let _ = sqlx::query(
+            "INSERT INTO collaboration_audit_logs (id, step_id, actor_user_id, actor_name, action, detail, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+        )
+        .bind(generate_uuid_v7())
+        .bind(step_id)
+        .bind(author.id)
+        .bind(&author.display_name)
+        .bind("revision_saved")
+        .bind(&audit_detail)
+        .execute(&mut *tx)
+        .await;
+
+        tx.commit().await?;
 
         if input.write_to_content_dir {
-            let ch_dir = content_dir.join(&input.track_slug).join(&resolved_ch_slug);
-            let _ = fs::create_dir_all(&ch_dir);
+            fs::create_dir_all(content_dir)?;
+            let ch_dir = content_dir.join(clean_track_slug).join(&resolved_ch_slug);
+            crate::ensure_within_dir(content_dir, &ch_dir)?;
+            fs::create_dir_all(&ch_dir)?;
             if let Some(prev_slug) = prev_slug_opt {
                 crate::studio_auth::rename_step_markdown_files(&ch_dir, prev_slug, target_slug);
             }
-            let _ = fs::write(
-                ch_dir.join(format!("{target_slug}.{}.md", input.locale)),
-                &raw_md,
-            );
+            let file_path = ch_dir.join(format!("{target_slug}.{}.md", input.locale));
+            crate::ensure_within_dir(&ch_dir, &file_path)?;
+            crate::atomic_write_str(&file_path, &raw_md)?;
         }
 
         self.studio_get_step_editor(
             author,
-            &input.track_slug,
+            clean_track_slug,
             &resolved_ch_slug,
             target_slug,
             &input.locale,
@@ -4413,12 +4640,25 @@ impl TutorialRepository for PostgresRepository {
         input: CreateTrackInput,
         content_dir: &Path,
     ) -> Result<StudioTrackDto> {
-        let track_id = deterministic_uuid(&format!("track:{}", input.slug));
+        let clean_slug = input.slug.trim().to_ascii_lowercase();
+        if !crate::is_valid_slug_segment(&clean_slug) {
+            return Err(domain_err(ErrorCode::InvalidSlug, "Invalid track slug."));
+        }
+        let ch_slug = if input.first_chapter_slug.trim().is_empty() {
+            "chapters".to_string()
+        } else {
+            input.first_chapter_slug.trim().to_ascii_lowercase()
+        };
+        if !crate::is_valid_slug_segment(&ch_slug) {
+            return Err(domain_err(ErrorCode::InvalidSlug, "Invalid chapter slug."));
+        }
+
+        let track_id = deterministic_uuid(&format!("track:{clean_slug}"));
         sqlx::query(
             "INSERT INTO tracks (id, slug, difficulty, icon_kind, tags, is_published) VALUES ($1, $2, $3, $4, $5, TRUE)",
         )
         .bind(track_id)
-        .bind(&input.slug)
+        .bind(&clean_slug)
         .bind(&input.difficulty)
         .bind(&input.icon_kind)
         .bind(&input.tags)
@@ -4442,11 +4682,6 @@ impl TutorialRepository for PostgresRepository {
             .await?;
         }
 
-        let ch_slug = if input.first_chapter_slug.trim().is_empty() {
-            "chapters".to_string()
-        } else {
-            input.first_chapter_slug.trim().to_ascii_lowercase()
-        };
         let ch_title = if input.first_chapter_title.trim().is_empty() {
             clean_title.clone()
         } else {
@@ -4454,7 +4689,7 @@ impl TutorialRepository for PostgresRepository {
         };
         self.studio_create_chapter(
             CreateChapterInput {
-                track_slug: input.slug.clone(),
+                track_slug: clean_slug.clone(),
                 slug: ch_slug,
                 number: 1,
                 title_zh_tw: ch_title,
@@ -4463,28 +4698,54 @@ impl TutorialRepository for PostgresRepository {
         )
         .await?;
 
-        let sys_admin = default_seeded_blog_users().into_iter().next().unwrap().profile;
+        let sys_admin = UserProfileDto {
+            id: Uuid::nil(),
+            wp_user_id: None,
+            username: "system".to_string(),
+            display_name: "System".to_string(),
+            email: String::new(),
+            avatar_url: String::new(),
+            avatar_source: "default".to_string(),
+            oauth_avatar_url: String::new(),
+            uploaded_avatar_url: String::new(),
+            oauth_provider: None,
+            oauth_bindings: Vec::new(),
+            has_password: false,
+            bio: String::new(),
+            role: UserRole::Admin,
+            has_collaborations: false,
+            auth_source: "system".to_string(),
+            is_banned: false,
+            ban_reason: String::new(),
+            last_login_at: Utc::now(),
+        };
         let all = self.studio_list_tracks(&sys_admin, "zh-CN").await?;
         Ok(all
             .into_iter()
-            .find(|t| t.slug == input.slug)
+            .find(|t| t.slug == clean_slug)
             .expect("newly created track must exist"))
     }
 
     async fn studio_delete_track(&self, track_slug: &str, content_dir: &Path) -> Result<bool> {
         let clean = track_slug.trim();
-        if clean.is_empty() || clean.contains("..") || clean.contains('/') || clean.contains('\\') {
+        if !crate::is_valid_slug_segment(clean) {
             return Err(domain_err(ErrorCode::InvalidSlug, "Invalid track slug."));
         }
         let res = sqlx::query("DELETE FROM tracks WHERE slug = $1")
             .bind(clean)
             .execute(&self.pool)
             .await?;
-        let track_dir = content_dir.join(clean);
-        if track_dir.exists() {
-            let _ = fs::remove_dir_all(&track_dir);
+        let removed = res.rows_affected() > 0;
+        if removed && content_dir.exists() {
+            let track_dir = content_dir.join(clean);
+            if track_dir.exists()
+                && !crate::is_symlink_path(&track_dir)
+                && crate::ensure_within_dir(content_dir, &track_dir).is_ok()
+            {
+                let _ = fs::remove_dir_all(&track_dir);
+            }
         }
-        Ok(res.rows_affected() > 0)
+        Ok(removed)
     }
 
     async fn studio_create_chapter(
@@ -4492,12 +4753,17 @@ impl TutorialRepository for PostgresRepository {
         input: CreateChapterInput,
         content_dir: &Path,
     ) -> Result<()> {
+        let clean_track = input.track_slug.trim();
+        let clean_ch = input.slug.trim().to_ascii_lowercase();
+        if !crate::is_valid_slug_segment(clean_track) || !crate::is_valid_slug_segment(&clean_ch) {
+            return Err(domain_err(ErrorCode::InvalidSlug, "Invalid path slug."));
+        }
         let trow = sqlx::query("SELECT id FROM tracks WHERE slug = $1")
-            .bind(&input.track_slug)
+            .bind(clean_track)
             .fetch_one(&self.pool)
             .await?;
         let track_id: Uuid = trow.try_get("id")?;
-        let ch_id = deterministic_uuid(&format!("chapter:{}:{}", input.track_slug, input.slug));
+        let ch_id = deterministic_uuid(&format!("chapter:{clean_track}:{clean_ch}"));
         let clean_title = icehandnote_core::sanitize_custom_html(&input.title_zh_tw, 240);
 
         sqlx::query(
@@ -4505,7 +4771,7 @@ impl TutorialRepository for PostgresRepository {
         )
         .bind(ch_id)
         .bind(track_id)
-        .bind(&input.slug)
+        .bind(&clean_ch)
         .bind(input.number)
         .execute(&self.pool)
         .await?;
@@ -4520,7 +4786,10 @@ impl TutorialRepository for PostgresRepository {
             .execute(&self.pool)
             .await?;
         }
-        let _ = fs::create_dir_all(content_dir.join(&input.track_slug).join(&input.slug));
+        fs::create_dir_all(content_dir)?;
+        let ch_dir = content_dir.join(clean_track).join(&clean_ch);
+        crate::ensure_within_dir(content_dir, &ch_dir)?;
+        let _ = fs::create_dir_all(&ch_dir);
         Ok(())
     }
 
@@ -4532,7 +4801,7 @@ impl TutorialRepository for PostgresRepository {
     ) -> Result<bool> {
         let clean_t = track_slug.trim();
         let clean_c = chapter_slug.trim();
-        if clean_t.contains("..") || clean_c.contains("..") {
+        if !crate::is_valid_slug_segment(clean_t) || !crate::is_valid_slug_segment(clean_c) {
             return Err(domain_err(ErrorCode::InvalidSlug, "Invalid path slug."));
         }
         let res = sqlx::query(
@@ -4542,11 +4811,17 @@ impl TutorialRepository for PostgresRepository {
         .bind(clean_c)
         .execute(&self.pool)
         .await?;
-        let ch_dir = content_dir.join(clean_t).join(clean_c);
-        if ch_dir.exists() {
-            let _ = fs::remove_dir_all(&ch_dir);
+        let removed = res.rows_affected() > 0;
+        if removed && content_dir.exists() {
+            let ch_dir = content_dir.join(clean_t).join(clean_c);
+            if ch_dir.exists()
+                && !crate::is_symlink_path(&ch_dir)
+                && crate::ensure_within_dir(content_dir, &ch_dir).is_ok()
+            {
+                let _ = fs::remove_dir_all(&ch_dir);
+            }
         }
-        Ok(res.rows_affected() > 0)
+        Ok(removed)
     }
 
     async fn studio_delete_step(
@@ -4557,6 +4832,15 @@ impl TutorialRepository for PostgresRepository {
         step_slug: &str,
         content_dir: &Path,
     ) -> Result<bool> {
+        let clean_t = track_slug.trim();
+        let clean_c = chapter_slug.trim();
+        let clean_s = step_slug.trim();
+        if !crate::is_valid_slug_segment(clean_t)
+            || !crate::is_valid_slug_segment(clean_c)
+            || !crate::is_valid_step_slug_segment(clean_s)
+        {
+            return Err(domain_err(ErrorCode::InvalidSlug, "Invalid path slug."));
+        }
         if !actor.role.is_admin() {
             let owner_opt: Option<Option<Uuid>> = sqlx::query_scalar(
                 r#"
@@ -4567,9 +4851,9 @@ impl TutorialRepository for PostgresRepository {
                 WHERE t.slug = $1 AND c.slug = $2 AND s.slug = $3
                 "#,
             )
-            .bind(track_slug)
-            .bind(chapter_slug)
-            .bind(step_slug)
+            .bind(clean_t)
+            .bind(clean_c)
+            .bind(clean_s)
             .fetch_optional(&self.pool)
             .await?;
             if let Some(owner_val) = owner_opt {
@@ -4590,25 +4874,35 @@ impl TutorialRepository for PostgresRepository {
               AND t.slug = $1 AND c.slug = $2 AND s.slug = $3
             "#,
         )
-        .bind(track_slug)
-        .bind(chapter_slug)
-        .bind(step_slug)
+        .bind(clean_t)
+        .bind(clean_c)
+        .bind(clean_s)
         .execute(&self.pool)
         .await?;
 
-        let ch_dir = content_dir.join(track_slug).join(chapter_slug);
-        if ch_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&ch_dir) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with(&format!("{step_slug}.")) && name.ends_with(".md") {
-                            let _ = fs::remove_file(entry.path());
+        let removed = res.rows_affected() > 0;
+        if removed && content_dir.exists() {
+            let ch_dir = content_dir.join(clean_t).join(clean_c);
+            if ch_dir.exists()
+                && !crate::is_symlink_path(&ch_dir)
+                && crate::ensure_within_dir(content_dir, &ch_dir).is_ok()
+            {
+                if let Ok(entries) = fs::read_dir(&ch_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if crate::is_symlink_path(&p) || !p.is_file() {
+                            continue;
+                        }
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.starts_with(&format!("{clean_s}.")) && name.ends_with(".md") {
+                                let _ = fs::remove_file(p);
+                            }
                         }
                     }
                 }
             }
         }
-        Ok(res.rows_affected() > 0)
+        Ok(removed)
     }
 
     async fn create_collaborator_invite(
@@ -4969,7 +5263,7 @@ impl TutorialRepository for PostgresRepository {
         sqlx::query(
             "INSERT INTO collaboration_audit_logs (id, step_id, actor_user_id, actor_name, action, detail, created_at) VALUES ($1, $2, $3, $4, 'invite_accepted', $5, NOW())",
         )
-        .bind(Uuid::new_v4())
+        .bind(generate_uuid_v7())
         .bind(step_id)
         .bind(user.id)
         .bind(&user.display_name)

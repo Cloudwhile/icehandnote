@@ -143,6 +143,8 @@ struct CollectedClientData {
     kind: String,
     challenge: String,
     origin: String,
+    #[serde(default, rename = "crossOrigin")]
+    cross_origin: Option<bool>,
 }
 
 pub fn encode_passkey_user_id(user_id: Uuid) -> String {
@@ -527,6 +529,13 @@ pub fn verify_passkey_registration(
         )
         .into());
     }
+    if client_data.cross_origin == Some(true) {
+        return Err(DomainError::new(
+            ErrorCode::PasskeyInvalid,
+            "Cross-origin WebAuthn ceremonies are not permitted.",
+        )
+        .into());
+    }
     if !constant_time_str_eq(client_data.challenge.trim_end_matches('='), expected_challenge) {
         return Err(DomainError::new(
             ErrorCode::PasskeyInvalid,
@@ -681,6 +690,13 @@ pub fn verify_passkey_assertion(
         )
         .into());
     }
+    if client_data.cross_origin == Some(true) {
+        return Err(DomainError::new(
+            ErrorCode::PasskeyInvalid,
+            "Cross-origin WebAuthn ceremonies are not permitted.",
+        )
+        .into());
+    }
     if !constant_time_str_eq(client_data.challenge.trim_end_matches('='), expected_challenge) {
         return Err(DomainError::new(
             ErrorCode::PasskeyInvalid,
@@ -728,7 +744,7 @@ pub fn verify_passkey_assertion(
 
     let new_sign_count =
         u32::from_be_bytes([auth_data[33], auth_data[34], auth_data[35], auth_data[36]]);
-    if stored.counter > 0 && new_sign_count > 0 && new_sign_count <= stored.counter {
+    if stored.counter > 0 && new_sign_count <= stored.counter {
         return Err(DomainError::new(
             ErrorCode::PasskeyInvalid,
             "Passkey signature counter regression detected.",
@@ -927,5 +943,113 @@ mod tests {
             &assertion,
         )
         .is_err());
+    }
+
+    #[test]
+    fn rejects_cross_origin_and_counter_regression_assertions() {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let rp_id = "notes.example.com";
+        let origin = "https://notes.example.com".to_string();
+        let user_id = Uuid::new_v4();
+
+        let stored = StoredPasskeyCredential {
+            credential_id: URL_SAFE_NO_PAD.encode(b"cred-security-check"),
+            user_id,
+            public_key_b64: URL_SAFE_NO_PAD.encode(kp.public_key().as_ref()),
+            alg: ALG_ES256,
+            counter: 5,
+            aaguid: "00000000-0000-0000-0000-000000000000".to_string(),
+            name: "Security Test Key".to_string(),
+            transports: vec!["internal".to_string()],
+            device_type: "multiDevice".to_string(),
+            backed_up: true,
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+
+        let make_assertion = |challenge: &str, cross_origin: Option<bool>, sign_count: u32| {
+            let mut client_json = serde_json::json!({
+                "type": "webauthn.get",
+                "challenge": challenge,
+                "origin": origin,
+            });
+            if let Some(co) = cross_origin {
+                client_json["crossOrigin"] = serde_json::json!(co);
+            }
+            let client_data_str = client_json.to_string();
+            let mut auth_data = Vec::new();
+            auth_data.extend_from_slice(Sha256::digest(rp_id.as_bytes()).as_slice());
+            auth_data.push(0x01); // UP bit
+            auth_data.extend_from_slice(&sign_count.to_be_bytes());
+
+            let mut signed = auth_data.clone();
+            signed.extend_from_slice(Sha256::digest(client_data_str.as_bytes()).as_slice());
+            let sig = kp.sign(&rng, &signed).unwrap();
+
+            AssertionCredentialJson {
+                id: stored.credential_id.clone(),
+                cred_type: "public-key".to_string(),
+                response: AssertionResponseJson {
+                    client_data_json: None,
+                    client_data_json_upper: Some(URL_SAFE_NO_PAD.encode(client_data_str.as_bytes())),
+                    authenticator_data: URL_SAFE_NO_PAD.encode(&auth_data),
+                    signature: URL_SAFE_NO_PAD.encode(sig.as_ref()),
+                    user_handle: Some(encode_passkey_user_id(user_id)),
+                },
+            }
+        };
+
+        let ch_ok = generate_webauthn_challenge();
+        let next = verify_passkey_assertion(
+            &stored,
+            &ch_ok,
+            rp_id,
+            std::slice::from_ref(&origin),
+            &make_assertion(&ch_ok, None, 6),
+        )
+        .expect("advancing counter without crossOrigin succeeds");
+        assert_eq!(next, 6);
+
+        let ch_cross = generate_webauthn_challenge();
+        assert!(
+            verify_passkey_assertion(
+                &stored,
+                &ch_cross,
+                rp_id,
+                std::slice::from_ref(&origin),
+                &make_assertion(&ch_cross, Some(true), 7),
+            )
+            .is_err(),
+            "crossOrigin: true must be rejected"
+        );
+
+        let ch_same = generate_webauthn_challenge();
+        assert!(
+            verify_passkey_assertion(
+                &stored,
+                &ch_same,
+                rp_id,
+                std::slice::from_ref(&origin),
+                &make_assertion(&ch_same, None, 5),
+            )
+            .is_err(),
+            "non-advancing signCount when stored.counter > 0 must be rejected"
+        );
+
+        let ch_reg = generate_webauthn_challenge();
+        assert!(
+            verify_passkey_assertion(
+                &stored,
+                &ch_reg,
+                rp_id,
+                std::slice::from_ref(&origin),
+                &make_assertion(&ch_reg, None, 2),
+            )
+            .is_err(),
+            "signCount regression when stored.counter > 0 must be rejected"
+        );
     }
 }

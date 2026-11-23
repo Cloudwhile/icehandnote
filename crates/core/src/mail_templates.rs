@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct SmtpSettingsDto {
     #[serde(default)]
     pub enabled: bool,
+    /// Mutually exclusive outbound mail provider: `"smtp"` | `"cloudflare_api"`.
+    /// Strictly ONE transport can be active when `enabled == true`.
+    #[serde(default = "default_mail_provider")]
+    pub provider: String,
     #[serde(default)]
     pub host: String,
     #[serde(default = "default_smtp_port")]
@@ -14,6 +18,12 @@ pub struct SmtpSettingsDto {
     pub encryption: String,
     #[serde(default)]
     pub username: String,
+    /// Cloudflare Account ID used exclusively when `provider == "cloudflare_api"`.
+    #[serde(default)]
+    pub cloudflare_account_id: String,
+    /// Verify recipient domain existence & DNS MX / RFC 7505 Null-MX before dispatching mail.
+    #[serde(default = "default_true")]
+    pub verify_recipient_mx: bool,
     #[serde(default)]
     pub from_name: String,
     #[serde(default)]
@@ -48,6 +58,14 @@ pub struct SmtpSettingsDto {
     pub ban_html: String,
 }
 
+fn default_mail_provider() -> String {
+    "smtp".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 fn default_smtp_port() -> u16 {
     465
 }
@@ -56,14 +74,32 @@ fn default_smtp_encryption() -> String {
     "tls".to_string()
 }
 
+pub fn normalize_mail_provider(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cloudflare_api" | "cloudflare" | "cf_api" | "cloudflare-api" => "cloudflare_api",
+        _ => "smtp",
+    }
+}
+
+pub fn is_valid_cloudflare_account_id(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    (16..=64).contains(&trimmed.len())
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 impl Default for SmtpSettingsDto {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: default_mail_provider(),
             host: String::new(),
             port: default_smtp_port(),
             encryption: default_smtp_encryption(),
             username: String::new(),
+            cloudflare_account_id: String::new(),
+            verify_recipient_mx: true,
             from_name: "IceHandnote".to_string(),
             from_email: String::new(),
             email_footer_text: String::new(),
@@ -85,6 +121,7 @@ impl Default for SmtpSettingsDto {
 
 impl SmtpSettingsDto {
     pub fn sanitize(mut self) -> Self {
+        self.provider = normalize_mail_provider(&self.provider).to_string();
         self.host = self.host.trim().chars().take(255).collect();
         if self.port == 0 {
             self.port = 465;
@@ -95,6 +132,13 @@ impl SmtpSettingsDto {
             _ => "tls".to_string(),
         };
         self.username = self.username.trim().chars().take(255).collect();
+        self.cloudflare_account_id = self
+            .cloudflare_account_id
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(64)
+            .collect();
         self.from_name = self.from_name.trim().chars().take(80).collect();
         self.from_email = validate_and_normalize_email(&self.from_email)
             .unwrap_or_else(|| self.from_email.trim().chars().take(180).collect());
@@ -120,6 +164,7 @@ fn escape_html_value(raw: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Resolve absolute logo URL for emails (`/uploads/...` joins against site origin).
@@ -856,13 +901,46 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
     }
 }
 
-pub fn render_mail_subject(template: &str, vars: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (k, v) in vars {
-        let cleaned: String = v.chars().filter(|c| *c != '\r' && *c != '\n').collect();
-        out = out.replace(&format!("{{{{{k}}}}}"), &cleaned);
+fn substitute_placeholders_single_pass<F>(template: &str, mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut out = String::with_capacity(template.len());
+    let mut cursor = 0usize;
+    while let Some(rel_start) = template[cursor..].find("{{") {
+        let start = cursor + rel_start;
+        out.push_str(&template[cursor..start]);
+        let after_open = start + 2;
+        if let Some(rel_end) = template[after_open..].find("}}") {
+            let end = after_open + rel_end;
+            let key = &template[after_open..end];
+            if !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                if let Some(replacement) = lookup(key) {
+                    out.push_str(&replacement);
+                    cursor = end + 2;
+                    continue;
+                }
+            }
+        }
+        out.push_str("{{");
+        cursor = after_open;
     }
+    out.push_str(&template[cursor..]);
     out
+}
+
+pub fn render_mail_subject(template: &str, vars: &[(&str, &str)]) -> String {
+    substitute_placeholders_single_pass(template, |key| {
+        vars.iter().find(|(k, _)| *k == key).map(|(_, v)| {
+            v.chars()
+                .filter(|c| *c != '\r' && *c != '\n')
+                .collect::<String>()
+        })
+    })
 }
 
 pub fn render_mail_html(
@@ -871,14 +949,14 @@ pub fn render_mail_html(
     logo_html: &str,
     footer_template: &str,
 ) -> String {
-    let mut out = template
+    let with_chrome = template
         .replace("{{logo_html}}", logo_html)
         .replace("{{footer_text}}", footer_template);
-    for (k, v) in vars {
-        let escaped = escape_html_value(v);
-        out = out.replace(&format!("{{{{{k}}}}}"), &escaped);
-    }
-    out
+    substitute_placeholders_single_pass(&with_chrome, |key| {
+        vars.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| escape_html_value(v))
+    })
 }
 
 /// Render a realistic preview of any email template using sample variables in the requested locale,
@@ -1058,6 +1136,109 @@ pub fn render_mail_preview(
     }
 }
 
+/// Convert rendered HTML email content into a clean plain-text fallback body
+/// (improves deliverability and satisfies multipart text+html best practices for Cloudflare Email API).
+pub fn html_to_plain_text(html: &str) -> String {
+    let mut cleaned = String::with_capacity(html.len());
+    let mut rest = html;
+    // Strip <style>...</style> and <script>...</script> blocks case-insensitively
+    while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        let next_style = lower.find("<style");
+        let next_script = lower.find("<script");
+        let found = match (next_style, next_script) {
+            (Some(a), Some(b)) => {
+                if a < b {
+                    Some((a, "</style>"))
+                } else {
+                    Some((b, "</script>"))
+                }
+            }
+            (Some(a), None) => Some((a, "</style>")),
+            (None, Some(b)) => Some((b, "</script>")),
+            (None, None) => None,
+        };
+        match found {
+            Some((start, end_tag)) => {
+                cleaned.push_str(&rest[..start]);
+                let after = &rest[start..];
+                let after_lower = after.to_ascii_lowercase();
+                if let Some(end_pos) = after_lower.find(end_tag) {
+                    rest = &after[end_pos + end_tag.len()..];
+                } else {
+                    break;
+                }
+            }
+            None => {
+                cleaned.push_str(rest);
+                break;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(cleaned.len());
+    let mut chars = cleaned.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            let mut tag = String::new();
+            for tc in chars.by_ref() {
+                if tc == '>' {
+                    break;
+                }
+                tag.push(tc);
+            }
+            let norm = tag.trim().to_ascii_lowercase();
+            let tag_name = norm
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            if matches!(
+                tag_name,
+                "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "hr"
+            ) {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else if matches!(tag_name, "td" | "th") && !out.ends_with([' ', '\n']) {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&middot;", "·")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#10052;&#xFE0E;", "❄");
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut prev_blank = true;
+    for raw_line in decoded.lines() {
+        let collapsed: String = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            if !prev_blank {
+                lines.push(String::new());
+                prev_blank = true;
+            }
+        } else {
+            lines.push(collapsed);
+            prev_blank = false;
+        }
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1135,6 +1316,23 @@ mod tests {
         assert_eq!(
             escaped,
             "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p><footer>Custom <b>IceHandnote</b></footer>"
+        );
+    }
+
+    #[test]
+    fn prevents_cross_variable_template_injection_in_single_pass() {
+        let out = render_mail_html(
+            "<p>{{reason}}</p><p>{{code}}</p>",
+            &[
+                ("reason", "{{code}} <img src=x onerror=alert(1)>"),
+                ("code", "SECRET_999"),
+            ],
+            "",
+            "",
+        );
+        assert_eq!(
+            out,
+            "<p>{{code}} &lt;img src=x onerror=alert(1)&gt;</p><p>SECRET_999</p>"
         );
     }
 }
