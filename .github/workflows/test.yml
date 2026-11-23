@@ -11,6 +11,9 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   rust-test:
     name: Rust Workspace & DB Sync Tests
@@ -40,9 +43,14 @@ jobs:
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Rust unit & router tests
         run: cargo test --workspace --locked

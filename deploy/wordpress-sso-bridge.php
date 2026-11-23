@@ -42,8 +42,8 @@ add_action('template_redirect', function () {
         ? ICEHANDNOTE_SSO_SECRET
         : (defined('ICETOWNE_SSO_SECRET') ? ICETOWNE_SSO_SECRET : '');
 
-    if (empty($secret)) {
-        wp_die('IceHandNote SSO Bridge: ICEHANDNOTE_SSO_SECRET is not configured in wp-config.php.');
+    if (empty($secret) || strlen($secret) < 32) {
+        wp_die('IceHandNote SSO Bridge: ICEHANDNOTE_SSO_SECRET must be configured in wp-config.php with at least 32 characters.');
     }
 
     if (!is_user_logged_in()) {
@@ -63,6 +63,7 @@ add_action('template_redirect', function () {
         'avatar_url'   => (string) get_avatar_url($user->ID, ['size' => 128]),
         'wp_roles'     => array_values((array) $user->roles),
         'blog_origin'  => home_url(),
+        'jti'          => bin2hex(random_bytes(16)),
         'iat'          => $now,
         'exp'          => $now + 300, // 5-minute replay-safe expiry
     ];
@@ -74,7 +75,12 @@ add_action('template_redirect', function () {
     $default_locale = defined('ICEHANDNOTE_DEFAULT_LOCALE') ? ICEHANDNOTE_DEFAULT_LOCALE : 'zh-CN';
     $default_path = '/' . ltrim($default_locale, '/');
     $return_path = isset($_GET['return_to']) ? sanitize_text_field(wp_unslash($_GET['return_to'])) : $default_path;
-    if (!str_starts_with($return_path, '/')) {
+    if (
+        !str_starts_with($return_path, '/')
+        || str_starts_with($return_path, '//')
+        || str_contains($return_path, '\\')
+        || preg_match('/[\x00-\x1F\x7F]/', $return_path)
+    ) {
         $return_path = $default_path;
     }
 
