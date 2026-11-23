@@ -1,4 +1,4 @@
-import { parseApiErrorResponse } from './apiError';
+import { ApiError, parseApiErrorResponse } from './apiError';
 import type {
   AcceptInviteResponseDto,
   ArticleTaskChecksDto,
@@ -16,6 +16,8 @@ import type {
   OAuthOnboardingInfoDto,
   PasskeyListResponseDto,
   PostgresConnectionFieldsDto,
+  PresenceMemberDto,
+  RevisionDiffDto,
   SearchHitDto,
   SiteSettingsDto,
   SmtpSettingsDto,
@@ -46,6 +48,7 @@ const USER_LEARNER_KEY = 'icehandnote_user_learner_key';
 const LEGACY_USER_LEARNER_KEY = 'stepnote_user_learner_key';
 const USER_PROFILE_CACHE_KEY = 'icehandnote_user_profile_cache';
 const DEVICE_ID_KEY = 'icehandnote_device_id';
+const CLIENT_TAB_KEY = 'icehandnote_tab_id';
 
 function generateRandomHex16(): string {
   if (typeof crypto !== 'undefined') {
@@ -62,6 +65,27 @@ function generateRandomHex16(): string {
 }
 
 let volatileDeviceId: string | null = null;
+let volatileTabId: string | null = null;
+
+export function getClientTabId(): string {
+  try {
+    let existing = sessionStorage.getItem(CLIENT_TAB_KEY)?.trim() ?? '';
+    if (!existing) {
+      existing = `tab_${generateRandomHex16()}`;
+      sessionStorage.setItem(CLIENT_TAB_KEY, existing);
+    }
+    return existing;
+  } catch {
+    volatileTabId ??= `tab_${generateRandomHex16()}`;
+    return volatileTabId;
+  }
+}
+
+export function isLikelyOfflineNetworkError(err: unknown): boolean {
+  if (err instanceof ApiError) return false;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  return err instanceof TypeError;
+}
 
 export function getClientDeviceId(): string {
   try {
@@ -170,6 +194,27 @@ export function saveRawSessionToken(token: string): void {
   }
 }
 
+export function getActiveStorageScopeKey(): string {
+  if (getSessionToken()) {
+    const cached = getCachedSessionUser();
+    if (cached?.id) {
+      return `user:${cached.id}`;
+    }
+    try {
+      const userLearnerKey =
+        localStorage.getItem(USER_LEARNER_KEY) ??
+        localStorage.getItem(LEGACY_USER_LEARNER_KEY);
+      if (userLearnerKey) {
+        return `user:${userLearnerKey}`;
+      }
+    } catch {
+      // ignore storage restriction
+    }
+    return 'user:active';
+  }
+  return `anon:${getAnonymousLearnerId()}`;
+}
+
 export function clearAuthSession(): void {
   try {
     localStorage.removeItem(SESSION_TOKEN_KEY);
@@ -177,9 +222,19 @@ export function clearAuthSession(): void {
     localStorage.removeItem(USER_PROFILE_CACHE_KEY);
     localStorage.removeItem(LEGACY_SESSION_TOKEN_KEY);
     localStorage.removeItem(LEGACY_USER_LEARNER_KEY);
+    const taskCheckPrefix = 'icehandnote_task_checks::user:';
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(taskCheckPrefix)) {
+        localStorage.removeItem(k);
+      }
+    }
   } catch {
     // ignore
   }
+  void import('./offlineNoteQueue')
+    .then((m) => m.clearUserOfflineNoteOps())
+    .catch(() => {});
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -200,6 +255,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-Device-Id': getClientDeviceId(),
+    'X-Client-Tab-Id': getClientTabId(),
     'X-Site-Locale': activeLocale,
     ...((init?.headers as Record<string, string>) ?? {}),
   };
@@ -635,6 +691,7 @@ export const api = {
     username: string;
     display_name: string;
     email: string;
+    verification_code?: string;
     role?: 'reader' | 'author';
     avatar_source: AvatarSource;
     uploaded_avatar_url?: string;
@@ -692,6 +749,12 @@ export const api = {
     }
     return res;
   },
+
+  createOAuthBindTicket: () =>
+    fetchJson<{ bind_ticket: string }>('/api/v1/auth/oauth/bind-ticket', {
+      method: 'POST',
+      body: '{}',
+    }),
 
   unbindOAuthProvider: (provider: string) =>
     fetchJson<UserProfileDto>(
@@ -996,6 +1059,53 @@ export const api = {
       `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/${encodeURIComponent(locale)}/revisions`,
     ),
 
+  getStepRevisionDiff: (
+    track: string,
+    chapter: string,
+    step: string,
+    locale: string,
+    revisionId: string,
+    againstRevisionId?: string,
+  ) => {
+    const qs = againstRevisionId
+      ? `?against=${encodeURIComponent(againstRevisionId)}`
+      : '';
+    return fetchJson<RevisionDiffDto>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/${encodeURIComponent(locale)}/revisions/${encodeURIComponent(revisionId)}/diff${qs}`,
+    );
+  },
+
+  putStepPresence: (
+    track: string,
+    chapter: string,
+    step: string,
+    body: { locale: string; state: 'viewing' | 'editing'; tab_id?: string },
+  ) =>
+    fetchJson<{ members: PresenceMemberDto[] }>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/presence`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          locale: body.locale,
+          state: body.state,
+          tab_id: body.tab_id ?? getClientTabId(),
+        }),
+      },
+    ),
+
+  deleteStepPresence: (
+    track: string,
+    chapter: string,
+    step: string,
+    tabId?: string,
+  ) => {
+    const cleanTab = encodeURIComponent(tabId ?? getClientTabId());
+    return fetchJson<{ ok: boolean; members: PresenceMemberDto[] }>(
+      `/api/v1/studio/steps/${encodeURIComponent(track)}/${encodeURIComponent(chapter)}/${encodeURIComponent(step)}/presence?tab_id=${cleanTab}`,
+      { method: 'DELETE' },
+    );
+  },
+
   restoreStepRevision: (
     track: string,
     chapter: string,
@@ -1105,6 +1215,8 @@ export const api = {
     settings: SmtpSettingsDto;
     password?: string;
     clear_password?: boolean;
+    cloudflare_api_token?: string;
+    clear_cloudflare_api_token?: boolean;
   }) =>
     fetchJson<SmtpStatusResponseDto>('/api/v1/admin/smtp', {
       method: 'PUT',
@@ -1115,12 +1227,37 @@ export const api = {
     to_email: string;
     settings?: SmtpSettingsDto;
     password?: string;
+    cloudflare_api_token?: string;
     locale?: LocaleCode;
   }) =>
-    fetchJson<{ ok: boolean }>('/api/v1/admin/smtp/test', {
+    fetchJson<{
+      ok: boolean;
+      provider?: import('./types').MailProviderKind;
+      guard_status?: import('./types').MailGuardStatusDto;
+    }>('/api/v1/admin/smtp/test', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  adminResetMailCircuit: () =>
+    fetchJson<import('./types').MailGuardStatusDto>(
+      '/api/v1/admin/smtp/guard/reset-circuit',
+      {
+        method: 'POST',
+      },
+    ),
+
+  adminClearMailSuppression: (payload: {
+    email?: string;
+    clear_all?: boolean;
+  }) =>
+    fetchJson<import('./types').MailGuardStatusDto>(
+      '/api/v1/admin/smtp/guard/clear-suppression',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
 
   adminPreviewSmtpTemplate: (payload: {
     template_kind:

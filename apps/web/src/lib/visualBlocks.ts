@@ -621,15 +621,18 @@ export function parseMarkdownToVisualBlocks(markdown: string): VisualBlock[] {
     }
 
     // 3. Fenced Code Blocks & Rough.js Sketch Diagrams
-    if (trimmed.startsWith('```')) {
-      const info = trimmed.slice(3).trim();
+    const fenceOpenMatch = trimmed.match(/^(`{3,})(.*)$/);
+    if (fenceOpenMatch) {
+      const fenceLen = fenceOpenMatch[1].length;
+      const info = fenceOpenMatch[2].trim();
+      const closeFenceRe = new RegExp(`^\`{${fenceLen},}\\s*$`);
       i += 1;
       const codeLines: string[] = [];
-      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+      while (i < lines.length && !closeFenceRe.test(lines[i].trim())) {
         codeLines.push(lines[i]);
         i += 1;
       }
-      if (i < lines.length && lines[i].trim().startsWith('```')) i += 1;
+      if (i < lines.length && closeFenceRe.test(lines[i].trim())) i += 1;
 
       const rawCode = codeLines.join('\n');
 
@@ -990,7 +993,12 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
           block.style && block.style !== 'washi'
             ? ` style="${block.style}"`
             : '';
-        const fenced = `\`\`\`${lang}${fileAttr}${styleAttr}\n${block.code}\n\`\`\``;
+        let maxRun = 2;
+        for (const m of block.code.matchAll(/`+/g)) {
+          if (m[0].length > maxRun) maxRun = m[0].length;
+        }
+        const fence = '`'.repeat(maxRun + 1);
+        const fenced = `${fence}${lang}${fileAttr}${styleAttr}\n${block.code}\n${fence}`;
         const note = block.marginNote.trim();
         chunks.push(note ? `${fenced}\n:::margin[${note}]` : fenced);
         break;
@@ -1007,7 +1015,7 @@ export function serializeVisualBlocksToMarkdown(blocks: VisualBlock[]): string {
       }
       case 'image': {
         const src = block.src.trim();
-        if (!src) break;
+        if (!src || src.startsWith('blob:')) break;
         const alt = block.alt.trim().replace(/\]/g, '\\]');
         const cap = block.caption.trim().replace(/"/g, "'");
         const mdImg = cap ? `![${alt}](${src} "${cap}")` : `![${alt}](${src})`;

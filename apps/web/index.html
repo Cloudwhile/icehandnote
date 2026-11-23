@@ -57,7 +57,12 @@
 
       var iconEl = document.querySelector('link[rel="icon"]');
       if (iconEl && bootSettings) {
-        var customLogo = typeof bootSettings.logo_url === "string" ? bootSettings.logo_url.trim() : "";
+        var rawLogo = typeof bootSettings.logo_url === "string" ? bootSettings.logo_url.trim() : "";
+        var isSafeLogo = !!rawLogo && !/[\s\u0000-\u001f\u007f]/.test(rawLogo) && (
+          /^https?:\/\//i.test(rawLogo) ||
+          (rawLogo.charAt(0) === "/" && rawLogo.charAt(1) !== "/" && rawLogo.charAt(1) !== "\\")
+        );
+        var customLogo = isSafeLogo ? rawLogo : "";
         var defaultHref = iconEl.getAttribute("data-default-href") || "";
         var targetHref = customLogo || defaultHref;
         if (targetHref && iconEl.getAttribute("href") !== targetHref) {

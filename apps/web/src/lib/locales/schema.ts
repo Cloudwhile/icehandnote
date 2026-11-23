@@ -405,6 +405,7 @@ export interface UiMessages {
   navPrimaryAria: string;
   navMenuAria: string;
   navLanguageAria: string;
+  navFooterAria: string;
   followSystemLocale: string;
   otherSeriesHeading: string;
   taskScopeLabel: string;
@@ -422,6 +423,7 @@ export interface UiMessages {
   searchEmptyTitle: string;
   searchEmptyBody: string;
   closeLabel: string;
+  clearSearchLabel: string;
   themeDarkLabel: string;
   themeLightLabel: string;
   heroPrimaryCta: string;
@@ -532,10 +534,7 @@ export interface ExtendedMessages {
     resendCodeCountdown: (seconds: number) => string;
     codeSentToast: (email: string) => string;
     backToHome: string;
-    authStepAccount: string;
-    authStepEmail: string;
     authStepVerifyOtp: string;
-    authStepNewPassword: string;
     continueToOtpBtn: string;
     verifyOtpContinueBtn: string;
     editDetailsBackBtn: string;
@@ -576,7 +575,6 @@ export interface ExtendedMessages {
     pwStrengthStrong: string;
     pwStrengthAdvisory: string;
     securityFooterNote: string;
-    stepProgressAria: string;
     errorPrefixLabel: string;
     errIdentifierRequired: string;
     errUsernameInvalid: string;
@@ -672,6 +670,15 @@ export interface ExtendedMessages {
     gravatarBaseUrlPlaceholder: string;
     smtpGroup: string;
     smtpEnabledLabel: string;
+    smtpProviderLabel: string;
+    smtpProviderExclusiveHint: string;
+    smtpProviderSmtp: string;
+    smtpProviderSmtpHint: string;
+    smtpProviderCloudflare: string;
+    smtpProviderCloudflareHint: string;
+    smtpActiveBadgeSmtp: string;
+    smtpActiveBadgeCloudflare: string;
+    smtpActiveBadgeDisabled: string;
     smtpHostLabel: string;
     smtpPortLabel: string;
     smtpEncryptionLabel: string;
@@ -682,6 +689,29 @@ export interface ExtendedMessages {
     smtpPasswordLabel: string;
     smtpPasswordSavedBadge: string;
     smtpClearPasswordBtn: string;
+    cfAccountIdLabel: string;
+    cfAccountIdPlaceholder: string;
+    cfApiTokenLabel: string;
+    cfApiTokenSavedBadge: string;
+    cfClearTokenBtn: string;
+    cfSetupHint: string;
+    verifyRecipientMxLabel: string;
+    verifyRecipientMxHint: string;
+    mailGuardTitle: string;
+    mailGuardCircuitHealthy: string;
+    mailGuardCircuitOpen: string;
+    mailGuardCircuitOpenDetail: (secs: number, reason: string) => string;
+    mailGuardResetCircuitBtn: string;
+    mailGuardCircuitResetMsg: string;
+    mailGuardStatSent: string;
+    mailGuardStatBounced: string;
+    mailGuardStatBlocked: string;
+    mailGuardStatDeduped: string;
+    mailGuardSuppressedTitle: (count: number) => string;
+    mailGuardSuppressedEmpty: string;
+    mailGuardRemoveSuppressedBtn: string;
+    mailGuardClearAllSuppressedBtn: string;
+    mailGuardSuppressedClearedMsg: string;
     smtpFromNameLabel: string;
     smtpFromEmailLabel: string;
     smtpEmailFooterLabel: string;
@@ -884,6 +914,9 @@ export interface ExtendedMessages {
       rotateRight: string;
       resetTransform: string;
       dragHint: string;
+      resizeHandleAria: string;
+      duplicateBtn: string;
+      deleteBtn: string;
       sprites: {
         cat: string;
         quill: string;
@@ -1046,6 +1079,12 @@ export interface ExtendedMessages {
     jumpToArticleBtn: string;
     rebindPlaceholder: string;
     rebindSuccessToast: string;
+    highlightSelectionBtn: string;
+    annotateSelectionBtn: string;
+    quoteExcerptLabel: string;
+    pendingSyncBadge: string;
+    offlineQueuedToast: string;
+    offlineSyncedToast: (count: number) => string;
   };
   collab: {
     roles: {
@@ -1081,6 +1120,20 @@ export interface ExtendedMessages {
     remoteVersionHeading: string;
     adoptRemoteBtn: string;
     overwriteWithLocalBtn: string;
+    snapshotViewTab: string;
+    diffViewTab: string;
+    diffLoading: string;
+    diffEmpty: string;
+    diffSummary: (added: number, removed: number) => string;
+    diffBaselineLabel: (seq: number) => string;
+    conflictSplitTab: string;
+    conflictDiffTab: string;
+    mergeMarkersBtn: string;
+    presenceEditingBadge: string;
+    presenceViewingBadge: string;
+    presenceLabel: (count: number) => string;
+    remoteSavedBanner: (author: string, seq: number) => string;
+    reloadLatestBtn: string;
     inviteModalTitle: string;
     inviteArticleLabel: string;
     inviteByLabel: string;

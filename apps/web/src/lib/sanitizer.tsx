@@ -1,8 +1,51 @@
 import { useEffect, useRef } from 'react';
+import DOMPurify from 'dompurify';
 import {
   enhanceRichHtmlElement,
   type RichLinkVariant,
 } from './inlineCodeHighlight';
+import { isSafeHref, toSafeMediaUrl } from './urlSafety';
+
+const SAFE_CLASS_TOKEN_RE = /^(?:ink|hljs|nb)-[a-z0-9-]+$/i;
+
+function enforceSafeRichDom(root: HTMLElement): void {
+  root.querySelectorAll('[class]').forEach((node) => {
+    const kept = Array.from(node.classList).filter((cls) =>
+      SAFE_CLASS_TOKEN_RE.test(cls),
+    );
+    if (kept.length > 0) {
+      node.setAttribute('class', kept.join(' '));
+    } else {
+      node.removeAttribute('class');
+    }
+  });
+
+  root.querySelectorAll('a').forEach((anchor) => {
+    const href = anchor.getAttribute('href') ?? '';
+    if (!href || !isSafeHref(href)) {
+      anchor.removeAttribute('href');
+      anchor.removeAttribute('target');
+      anchor.removeAttribute('rel');
+      return;
+    }
+    const target = anchor.getAttribute('target')?.trim().toLowerCase();
+    if (target === '_blank' || /^https?:\/\//i.test(href.trim())) {
+      anchor.setAttribute('rel', 'noopener noreferrer');
+    } else if (target) {
+      anchor.removeAttribute('target');
+    }
+  });
+
+  root.querySelectorAll('img').forEach((img) => {
+    const src = img.getAttribute('src') ?? '';
+    const safeSrc = toSafeMediaUrl(src);
+    if (!safeSrc) {
+      img.removeAttribute('src');
+    } else if (safeSrc !== src) {
+      img.setAttribute('src', safeSrc);
+    }
+  });
+}
 
 const ALLOWED_ELEMENTS = [
   'p',
@@ -80,28 +123,11 @@ export function stripHtmlTags(raw: string): string {
   return decodeHtmlEntities(noTags).replace(/\s+/g, ' ').trim();
 }
 
-type DomPurifyLike = {
-  sanitize: (s: string, cfg: Record<string, unknown>) => string;
-};
-
-let cachedDomPurify: DomPurifyLike | undefined;
-let domPurifyPromise: Promise<DomPurifyLike> | undefined;
-
-function loadDOMPurify() {
-  domPurifyPromise ??= import('dompurify').then((mod) => {
-    const resolved = (mod.default ?? mod) as unknown as DomPurifyLike;
-    cachedDomPurify = resolved;
-    return resolved;
-  });
-  return domPurifyPromise;
-}
-
-/** Pre-loads DOMPurify in browsers lacking native `Element.prototype.setHTML` so synchronous WYSIWYG updates are sanitized cleanly. */
-export function ensureSanitizerReady(): void {
-  if (typeof Element !== 'undefined' && !('setHTML' in Element.prototype)) {
-    void loadDOMPurify();
-  }
-}
+/**
+ * No-op compatibility export: `DOMPurify` is statically bundled so synchronous and
+ * asynchronous HTML sanitization never suffer async loader races.
+ */
+export function ensureSanitizerReady(): void {}
 
 /** Synchronous sanitization helper for contentEditable DOM hydration (`sanitize-untrusted-html`). */
 export function setSanitizedHtmlSync(el: HTMLElement, html: string): void {
@@ -116,29 +142,26 @@ export function setSanitizedHtmlSync(el: HTMLElement, html: string): void {
     ).setHTML(html, {
       sanitizer: { elements: ALLOWED_ELEMENTS, attributes: ALLOWED_ATTRIBUTES },
     });
+    enforceSafeRichDom(el);
     enhanceRichHtmlElement(el);
     return;
   }
 
-  if (cachedDomPurify) {
-    el.innerHTML = cachedDomPurify.sanitize(html, {
-      ALLOWED_TAGS: [...ALLOWED_ELEMENTS, '#text'],
-      ALLOWED_ATTR: ALLOWED_ATTRIBUTES,
-      ALLOW_ARIA_ATTR: false,
-      ALLOW_DATA_ATTR: false,
-      KEEP_CONTENT: false,
-    });
-    enhanceRichHtmlElement(el);
-    return;
-  }
-
-  void safeSetHtml(el, html);
+  el.innerHTML = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: [...ALLOWED_ELEMENTS, '#text'],
+    ALLOWED_ATTR: ALLOWED_ATTRIBUTES,
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    KEEP_CONTENT: false,
+  });
+  enforceSafeRichDom(el);
+  enhanceRichHtmlElement(el);
 }
 
 /**
  * Safely renders rich HTML fragments using the native Sanitizer API (`Element.prototype.setHTML`)
- * when available, dynamically loading `dompurify` only in browsers lacking native support.
- * Checks `isCancelled` before DOM mutation to prevent async race conditions on rapid updates.
+ * when available, or synchronous `DOMPurify` in browsers lacking native support.
+ * Checks `isCancelled` before DOM mutation.
  */
 export async function safeSetHtml(
   el: HTMLElement,
@@ -159,12 +182,11 @@ export async function safeSetHtml(
     ).setHTML(html, {
       sanitizer: { elements: ALLOWED_ELEMENTS, attributes: ALLOWED_ATTRIBUTES },
     });
+    enforceSafeRichDom(el);
     enhanceRichHtmlElement(el, opts);
     return;
   }
 
-  const DOMPurify = await loadDOMPurify();
-  if (isCancelled?.()) return;
   el.innerHTML = DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [...ALLOWED_ELEMENTS, '#text'],
     ALLOWED_ATTR: ALLOWED_ATTRIBUTES,
@@ -172,6 +194,7 @@ export async function safeSetHtml(
     ALLOW_DATA_ATTR: false,
     KEEP_CONTENT: false,
   });
+  enforceSafeRichDom(el);
   enhanceRichHtmlElement(el, opts);
 }
 
@@ -180,6 +203,7 @@ interface SafeHtmlProps {
   className?: string;
   as?: 'div' | 'span' | 'p';
   linkVariant?: RichLinkVariant;
+  onRendered?: (el: HTMLElement) => void;
 }
 
 export function SafeHtml({
@@ -187,14 +211,21 @@ export function SafeHtml({
   className,
   as = 'div',
   linkVariant = 'prose',
+  onRendered,
 }: SafeHtmlProps) {
   const ref = useRef<HTMLElement | null>(null);
+  const onRenderedRef = useRef(onRendered);
+  onRenderedRef.current = onRendered;
 
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
     let cancelled = false;
-    void safeSetHtml(node, html, () => cancelled, { linkVariant });
+    void safeSetHtml(node, html, () => cancelled, { linkVariant }).then(() => {
+      if (!cancelled && ref.current) {
+        onRenderedRef.current?.(ref.current);
+      }
+    });
     return () => {
       cancelled = true;
     };

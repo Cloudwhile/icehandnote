@@ -21,12 +21,15 @@
   --color-action-fg: var(--action-fg);
   --color-action-subtle: var(--action-subtle);
   --color-link-ink: var(--link-ink);
+  --color-link-hover-ink: var(--link-hover-ink);
 
   --color-accent-ice: var(--accent-ice-ink);
   --color-accent-amber: var(--accent-amber-ink);
   --color-accent-warn: var(--accent-amber-ink);
   --color-accent-success: var(--accent-success-ink);
   --color-accent-danger: var(--accent-danger-ink);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-fg: var(--danger-fg);
 
   /* Neo-grotesque UI + locale-isolated handwritten stationery font stack */
   --font-sans: "Plus Jakarta Sans", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;

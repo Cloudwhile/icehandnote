@@ -9,6 +9,7 @@
  */
 
 import type { TextAlign, TextSizePreset } from './types';
+import { isSafeHref } from './urlSafety';
 
 export type InlineFgColor = 'violet' | 'ice' | 'emerald' | 'amber' | 'rose' | 'muted';
 export type InlineBgColor = 'violet' | 'ice' | 'emerald' | 'amber' | 'rose' | 'kraft';
@@ -62,15 +63,23 @@ function escapeAttr(s: string): string {
   return escapeHtmlText(s).replace(/"/g, '&quot;');
 }
 
-function isSafeHref(href: string): boolean {
-  const t = href.trim().toLowerCase();
-  if (!t || /[\s\u0000-\u001f]/.test(t)) return false;
-  return (
-    t.startsWith('https://') ||
-    t.startsWith('http://') ||
-    (t.startsWith('/') && !t.startsWith('//')) ||
-    t.startsWith('#')
-  );
+function findMatchingLinkEnd(raw: string, urlStart: number): number {
+  let depth = 0;
+  for (let idx = urlStart; idx < raw.length; idx += 1) {
+    const ch = raw[idx];
+    if (ch === '\n' || ch === '\r') return -1;
+    if (ch === '\\' && idx + 1 < raw.length) {
+      idx += 1;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      if (depth === 0) return idx;
+      depth -= 1;
+    }
+  }
+  return -1;
 }
 
 function convertInlineMarkdownText(raw: string, multiline: boolean): string {
@@ -99,8 +108,8 @@ function convertInlineMarkdownText(raw: string, multiline: boolean): string {
     if (raw[i] === '[') {
       const mid = raw.indexOf('](', i + 1);
       if (mid !== -1 && !raw.slice(i + 1, mid).includes('\n')) {
-        const end = raw.indexOf(')', mid + 2);
-        if (end !== -1 && !raw.slice(mid + 2, end).includes('\n')) {
+        const end = findMatchingLinkEnd(raw, mid + 2);
+        if (end !== -1) {
           const href = raw.slice(mid + 2, end).trim();
           if (isSafeHref(href)) {
             const inner = convertInlineMarkdownText(raw.slice(i + 1, mid), multiline);
@@ -355,7 +364,8 @@ function serializeDomNode(node: Node, multiline: boolean): string {
     if (!href || !isSafeHref(href)) return inner;
     if (!inner) return '';
     if (!inner.includes('<') && !inner.includes('[') && !inner.includes(']') && !inner.includes('\n')) {
-      return `[${inner}](${href})`;
+      const safeMdHref = href.replace(/\(/g, '%28').replace(/\)/g, '%29');
+      return `[${inner}](${safeMdHref})`;
     }
     return `<a href="${escapeAttr(href)}">${inner}</a>`;
   }

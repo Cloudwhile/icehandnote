@@ -291,6 +291,50 @@ export interface RevisionConflictMeta {
   remote_body_markdown: string;
 }
 
+export type DiffOpKind = 'equal' | 'delete' | 'insert';
+
+export interface DiffLineDto {
+  op: DiffOpKind;
+  left_line?: number | null;
+  right_line?: number | null;
+  text: string;
+}
+
+export interface RevisionDiffDto {
+  base_revision_id?: string | null;
+  base_edit_seq: number;
+  target_revision_id: string;
+  target_edit_seq: number;
+  locale_code: string;
+  additions: number;
+  deletions: number;
+  unchanged: number;
+  lines: DiffLineDto[];
+}
+
+export interface PresenceMemberDto {
+  user_id: string;
+  display_name: string;
+  username: string;
+  avatar_url?: string;
+  locale: string;
+  state: 'viewing' | 'editing' | string;
+  tab_id: string;
+  updated_at: string;
+}
+
+export interface CollabRevisionSavedEvent {
+  track_slug: string;
+  chapter_slug: string;
+  step_slug: string;
+  locale: string;
+  edit_seq: number;
+  etag: string;
+  author_user_id?: string | null;
+  author_name: string;
+  tab_id: string;
+}
+
 export interface StepDetailDto {
   step_id: string;
   track_slug: string;
@@ -378,6 +422,7 @@ export interface UserMarginNoteDto {
   version?: number;
   created_at: string;
   updated_at?: string;
+  pendingSync?: boolean;
   track_slug?: string;
   chapter_slug?: string;
   step_slug?: string;
@@ -489,6 +534,8 @@ export interface OAuthOnboardingInfoDto {
   suggested_username: string;
   display_name: string;
   email: string;
+  email_verified: boolean;
+  smtp_enabled: boolean;
   oauth_avatar_url: string;
   gravatar_preview_url: string;
   allow_registration: boolean;
@@ -753,12 +800,17 @@ export interface SwitchStorageResponseDto extends StorageStatusDto {
   new_session_token?: string;
 }
 
+export type MailProviderKind = 'smtp' | 'cloudflare_api';
+
 export interface SmtpSettingsDto {
   enabled: boolean;
+  provider: MailProviderKind;
   host: string;
   port: number;
   encryption: 'tls' | 'starttls' | 'none';
   username: string;
+  cloudflare_account_id: string;
+  verify_recipient_mx: boolean;
   from_name: string;
   from_email: string;
   email_footer_text: string;
@@ -781,9 +833,36 @@ export interface SmtpTemplatePreviewDto {
   html: string;
 }
 
+export interface SuppressedRecipientDto {
+  email: string;
+  reason: string;
+  provider: string;
+  suppressed_at: string;
+}
+
+export interface MailGuardStatusDto {
+  circuit_open: boolean;
+  circuit_reason: string | null;
+  circuit_provider: string | null;
+  circuit_retry_after_secs: number;
+  rolling_sent: number;
+  rolling_hard_failures: number;
+  consecutive_hard_failures: number;
+  suppressed_count: number;
+  suppressed_recipients: SuppressedRecipientDto[];
+  total_sent: number;
+  total_bounced: number;
+  total_blocked_domain: number;
+  total_blocked_suppressed: number;
+  total_deduped: number;
+}
+
 export interface SmtpStatusResponseDto {
   settings: SmtpSettingsDto;
   has_password: boolean;
+  has_cloudflare_api_token: boolean;
+  active_provider: MailProviderKind | null;
+  guard_status: MailGuardStatusDto;
 }
 
 export interface UploadMediaResponseDto {

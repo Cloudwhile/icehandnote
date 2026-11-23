@@ -1,5 +1,6 @@
 import { stripHtmlTags } from './sanitizer';
 import { DEFAULT_SITE_SETTINGS, type SiteSettingsDto } from './types';
+import { toSafeHttpUrl, toSafeMediaUrl } from './urlSafety';
 
 export const SITE_SETTINGS_CACHE_KEY = 'icehandnote_site_settings_cache';
 export const ROUTE_TITLE_PREFIX = 'icehandnote_route_title:';
@@ -17,6 +18,8 @@ function coerceSiteSettings(raw: unknown): SiteSettingsDto | null {
   return {
     ...DEFAULT_SITE_SETTINGS,
     ...candidate,
+    logo_url: toSafeMediaUrl(candidate.logo_url),
+    blog_origin_url: toSafeHttpUrl(candidate.blog_origin_url),
     stale_article_days:
       typeof candidate.stale_article_days === 'number' &&
       Number.isFinite(candidate.stale_article_days)
@@ -106,7 +109,7 @@ export function syncFavicon(logoUrl: string, settingsReady: boolean): void {
     link.setAttribute('data-default-href', link.href);
   }
   const defaultHref = link.getAttribute('data-default-href') ?? '';
-  const nextLogo = logoUrl.trim();
+  const nextLogo = toSafeMediaUrl(logoUrl);
 
   if (nextLogo) {
     if (link.getAttribute('href') !== nextLogo) {
