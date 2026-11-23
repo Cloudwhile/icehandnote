@@ -9,6 +9,7 @@ import {
   type FormEvent,
   type SetStateAction,
   useId,
+  useRef,
   useState,
 } from 'react';
 import { api } from '../../lib/api';
@@ -58,6 +59,7 @@ export function StudioUsersPanel({
   const [banTarget, setBanTarget] = useState<UserProfileDto | null>(null);
   const [banReasonInput, setBanReasonInput] = useState('');
   const [submittingBan, setSubmittingBan] = useState(false);
+  const submittingBanRef = useRef(false);
 
   // Reset User Password modal state
   const [resetPwTarget, setResetPwTarget] = useState<UserProfileDto | null>(null);
@@ -133,7 +135,8 @@ export function StudioUsersPanel({
 
   const handleConfirmBanUser = async (e: FormEvent) => {
     e.preventDefault();
-    if (!banTarget || submittingBan) return;
+    if (!banTarget || submittingBanRef.current) return;
+    submittingBanRef.current = true;
     setSubmittingBan(true);
     try {
       const updated = await api.adminSetUserBan(
@@ -150,6 +153,7 @@ export function StudioUsersPanel({
     } catch (err) {
       toast.error(err);
     } finally {
+      submittingBanRef.current = false;
       setSubmittingBan(false);
     }
   };

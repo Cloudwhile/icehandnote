@@ -135,7 +135,7 @@ export function StudioSettingsPanel({
               <button
                 type="button"
                 onClick={() => setOauthAddTrigger((n) => n + 1)}
-                className="min-h-9 px-3.5 py-2 rounded-xl text-xs font-semibold ink-btn-primary inline-flex items-center gap-1.5 cursor-pointer"
+                className="min-h-9 px-3.5 py-2 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <IconPlus className="w-3.5 h-3.5" />
                 <span>{extSettings.oauthAddProviderBtn}</span>

@@ -402,18 +402,26 @@ export function RoughDiagramBlockBody({
         </button>
 
         {selectedNode && (
-          <div className="flex items-center gap-1 ps-1 border-s border-border-subtle">
+          <div className="flex flex-wrap items-center gap-1 ps-1 border-s border-border-subtle">
             {SKETCH_TONES.map((tone) => {
               const active = selectedNode.tone === tone;
+              const stickerToneKey =
+                tone === 'violet' || tone === 'ice' || tone === 'amber'
+                  ? tone
+                  : 'coral';
+              const toneLabel =
+                tone === 'paper'
+                  ? v.types.rough_diagram
+                  : UI_COPY[locale].stickerTones[stickerToneKey];
               return (
                 <button
                   key={tone}
                   type="button"
                   data-testid={`diagram-tone-${tone}`}
-                  aria-label={tone}
+                  aria-label={UI_COPY[locale].stickyColorAria(toneLabel)}
                   aria-pressed={active}
                   onClick={() => updateNode(selectedNode.id, { tone })}
-                  className={`w-5 h-5 rounded-full border-2 cursor-pointer transition-transform ${
+                  className={`w-5 h-5 rounded-full border-2 cursor-pointer motion-safe:transition-transform ink-icon-target ${
                     active ? 'scale-110 border-border-ink' : 'border-surface-sheet'
                   }`}
                   style={{ backgroundColor: TONE_SWATCH_VAR[tone] }}
@@ -422,11 +430,20 @@ export function RoughDiagramBlockBody({
             })}
             <button
               type="button"
+              aria-label={v.diagramNodeLabelPlaceholder}
+              title={v.diagramNodeLabelPlaceholder}
+              onClick={() => setEditingNodeId(selectedNode.id)}
+              className="ms-1 min-h-7 px-2 py-0.5 rounded-lg text-xs bg-surface-sheet border border-border-subtle hover:border-border-ink text-link-ink inline-flex items-center cursor-pointer"
+            >
+              <IconPen className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
               data-testid="diagram-delete-btn"
               aria-label={diagCopy.deleteNodeBtn}
               title={diagCopy.deleteNodeBtn}
               onClick={deleteSelection}
-              className="ms-1 min-h-7 px-2 py-0.5 rounded-lg text-xs text-accent-danger hover:bg-surface-sheet border border-transparent hover:border-border-subtle inline-flex items-center gap-1 cursor-pointer"
+              className="min-h-7 px-2 py-0.5 rounded-lg text-xs text-accent-danger hover:bg-surface-sheet border border-transparent hover:border-border-subtle inline-flex items-center gap-1 cursor-pointer"
             >
               <IconTrash className="w-3.5 h-3.5" />
             </button>
@@ -455,6 +472,8 @@ export function RoughDiagramBlockBody({
             </button>
             <button
               type="button"
+              aria-label={diagCopy.edgeLabelPlaceholder}
+              title={diagCopy.edgeLabelPlaceholder}
               onClick={() => setEditingEdgeIdx(selected.idx)}
               className="min-h-7 px-2 py-0.5 rounded-lg text-xs bg-surface-sheet border border-border-subtle hover:border-border-ink text-link-ink font-semibold inline-flex items-center cursor-pointer"
             >
@@ -519,6 +538,9 @@ export function RoughDiagramBlockBody({
                     y2={y2}
                     stroke="transparent"
                     strokeWidth={16}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={edge.label || diagCopy.edgeLabelPlaceholder}
                     className="cursor-pointer"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -529,6 +551,19 @@ export function RoughDiagramBlockBody({
                       e.stopPropagation();
                       setSelected({ kind: 'edge', idx });
                       setEditingEdgeIdx(idx);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSelected({ kind: 'edge', idx });
+                        setEditingEdgeIdx(idx);
+                      } else if (e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSelected({ kind: 'edge', idx });
+                        setEditingNodeId(null);
+                      }
                     }}
                   />
                   {edge.label && (
@@ -700,6 +735,9 @@ export function RoughDiagramBlockBody({
                     height={h}
                     rx={6}
                     fill="transparent"
+                    tabIndex={0}
+                    role="button"
+                    aria-label={node.label || v.diagramNodeLabelPlaceholder}
                     className="ink-sticker-gizmo-handle"
                     onPointerDown={handleNodePointerDown}
                     onPointerMove={handleNodePointerMove}
@@ -709,6 +747,18 @@ export function RoughDiagramBlockBody({
                       e.stopPropagation();
                       setSelected({ kind: 'node', id: node.id });
                       setEditingNodeId(node.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSelected({ kind: 'node', id: node.id });
+                        setEditingNodeId(node.id);
+                      } else if (e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setSelected({ kind: 'node', id: node.id });
+                      }
                     }}
                   />
 
@@ -829,7 +879,7 @@ export function RoughDiagramBlockBody({
           {/* Inline Node Label / Sublabel HTML Overlay when Double-Clicked */}
           {editingNode && (
             <div
-              className="absolute z-30 p-2 rounded-xl border-2 border-link-ink bg-surface-sheet shadow-md flex flex-col gap-1"
+              className="absolute z-(--z-sticky) p-2 rounded-xl border-2 border-link-ink bg-surface-sheet shadow-(--shadow-floating) flex flex-col gap-1"
               style={{
                 left: `${(editingNode.x / maxX) * 100}%`,
                 top: `${(editingNode.y / maxY) * 100}%`,
@@ -842,6 +892,7 @@ export function RoughDiagramBlockBody({
                 type="text"
                 autoFocus
                 data-testid="diagram-inline-node-label"
+                aria-label={v.diagramNodeLabelPlaceholder}
                 value={editingNode.label}
                 onChange={(e) =>
                   updateNode(editingNode.id, { label: e.target.value })
@@ -860,6 +911,7 @@ export function RoughDiagramBlockBody({
               />
               <input
                 type="text"
+                aria-label={v.diagramNodeSubPlaceholder}
                 value={editingNode.sublabel ?? ''}
                 onChange={(e) =>
                   updateNode(editingNode.id, { sublabel: e.target.value })
@@ -895,7 +947,7 @@ export function RoughDiagramBlockBody({
               const topPct = (((y1 + y2) / 2) / maxY) * 100;
               return (
                 <div
-                  className="absolute z-30 -translate-x-1/2 -translate-y-1/2 p-1 rounded-lg border-2 border-link-ink bg-surface-sheet shadow-md"
+                  className="absolute z-(--z-sticky) -translate-x-1/2 -translate-y-1/2 p-1 rounded-lg border-2 border-link-ink bg-surface-sheet shadow-(--shadow-floating)"
                   style={{ left: `${leftPct}%`, top: `${topPct}%` }}
                   onClick={(e) => e.stopPropagation()}
                 >
@@ -903,6 +955,7 @@ export function RoughDiagramBlockBody({
                     type="text"
                     autoFocus
                     data-testid="diagram-inline-edge-label"
+                    aria-label={diagCopy.edgeLabelPlaceholder}
                     value={editingEdge.label ?? ''}
                     onChange={(e) => {
                       const nextEdges = block.spec.edges.map((ed, i) =>
@@ -944,10 +997,11 @@ export function RoughDiagramBlockBody({
         type="text"
         size={1}
         data-flow-input="primary"
+        aria-label={v.diagramCaptionPlaceholder}
         value={block.caption}
         onChange={(e) => onUpdate({ ...block, caption: e.target.value })}
         placeholder={v.diagramCaptionPlaceholder}
-        className="w-full px-2 bg-transparent border-0 text-xs text-ink-secondary font-hand placeholder:text-ink-muted/65 focus:outline-none"
+        className="w-full px-2 bg-transparent border-0 text-xs text-ink-secondary font-hand placeholder:text-ink-muted focus:outline-none"
       />
     </div>
   );

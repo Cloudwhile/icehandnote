@@ -466,8 +466,8 @@ export function OAuthSettingsTab({
           <p className="text-xs text-ink-secondary">
             {extSettings.oauthSharedCallbackHint}
           </p>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 px-3 py-2 rounded-xl bg-surface-sunken text-ink-secondary border border-border-subtle text-xs font-mono truncate">
+          <div className="flex items-center gap-2 min-w-0">
+            <code className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-surface-sunken text-ink-secondary border border-border-subtle text-xs font-mono truncate">
               {callbackUrl}
             </code>
             <button

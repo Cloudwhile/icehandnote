@@ -525,7 +525,7 @@ export function EditorContextMenu({
                   {target.supportsAlign && (
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-ink-muted font-semibold">
-                        {rf.alignCenter.slice(0, 2)}
+                        {EXT_COPY[locale].studio.pixelSticker.alignLabel}
                       </span>
                       <div className="flex items-center gap-1">
                         {(['left', 'center', 'right'] as TextAlign[]).map((al) => {

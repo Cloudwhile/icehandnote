@@ -226,9 +226,9 @@ export function StudioEditorInspector({
                       void navigator.clipboard
                         .writeText(fullUrl)
                         .then(() => toast.success(extCopy.reader.copiedUrlToast))
-                        .catch(() => toast.success(extCopy.reader.copiedUrlToast));
+                        .catch((err) => toast.error(err));
                     } else {
-                      toast.success(extCopy.reader.copiedUrlToast);
+                      toast.error('BAD_REQUEST');
                     }
                   }}
                   aria-label={extCopy.studio.publishedUrl.copyUrlBtn}

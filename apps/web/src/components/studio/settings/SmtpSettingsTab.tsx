@@ -1,7 +1,9 @@
 /*
- * Decoupled SMTP Delivery & Live Email Template Preview Tab (`StudioSettingsPanel` Tab: `'smtp'`).
- * Reuses `<SettingsSectionCard>`, `<SwitchRow>`, `<PasswordInput>`, `<UnderlineTabs>`, and `<SegmentedControl>`.
- * Holds skeleton until `adminGetSmtp` resolves so refreshing on SMTP tab never flashes `'IceHandnote'` in `from_name`.
+ * Decoupled Mail Delivery (SMTP / Cloudflare Email Sending API) & Live Template Preview Tab.
+ * Hierarchy: Primary = Active channel badge, enable switch, mutually exclusive transport selector + credentials;
+ * Secondary = Sender identity, pre-flight MX guard switch, live Delivery Guard & circuit status panel;
+ * Tertiary = Custom footer, test email strip, collapsible template preview.
+ * Tokens: surface-raised, surface-sheet, border-border-subtle, ink-primary/secondary/muted, StatusBadge tones.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -10,23 +12,29 @@ import { MAX_EMAIL_LENGTH, normalizeEmail } from '../../../lib/email';
 import { EXT_COPY, getEnabledLocaleMetas } from '../../../lib/i18n';
 import type {
   LocaleCode,
+  MailGuardStatusDto,
+  MailProviderKind,
   SiteSettingsDto,
   SmtpSettingsDto,
 } from '../../../lib/types';
-import { SwitchRow } from '../../ui/FormControls';
-import { IconCheck } from '../../ui/Icons';
+import { RadioCardGroup, SwitchRow } from '../../ui/FormControls';
+import { IconAlertCircle, IconCheck, IconShield } from '../../ui/Icons';
 import { InkSelect } from '../../ui/InkSelect';
 import { PasswordInput } from '../../ui/PasswordInput';
+import { StatusBadge } from '../../ui/StatusBadge';
 import { SegmentedControl, UnderlineTabs } from '../../ui/Tabs';
 import { useToast } from '../../ui/ToastProvider';
 import { SettingsSectionCard } from './SettingsSectionCard';
 
 export const DEFAULT_SMTP_STATE: SmtpSettingsDto = {
   enabled: false,
+  provider: 'smtp',
   host: '',
   port: 465,
   encryption: 'tls',
   username: '',
+  cloudflare_account_id: '',
+  verify_recipient_mx: true,
   from_name: '',
   from_email: '',
   email_footer_text: '',
@@ -118,9 +126,20 @@ export function SmtpSettingsTab({
     useState<SmtpSettingsDto>(DEFAULT_SMTP_STATE);
   const [hasPassword, setHasPassword] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
+  const [hasCfToken, setHasCfToken] = useState(false);
+  const [cfTokenInput, setCfTokenInput] = useState('');
+  const [activeProvider, setActiveProvider] = useState<MailProviderKind | null>(
+    null,
+  );
+  const [guardStatus, setGuardStatus] = useState<MailGuardStatusDto | null>(null);
   const [savingSmtp, setSavingSmtp] = useState(false);
   const [testEmailAddr, setTestEmailAddr] = useState('');
   const [testingSmtp, setTestingSmtp] = useState(false);
+  const [guardBusy, setGuardBusy] = useState(false);
+
+  const savingRef = useRef(false);
+  const testingRef = useRef(false);
+  const guardActionRef = useRef(false);
 
   const [templatesOpen, setTemplatesOpen] = useState(true);
   const [activeTemplateKind, setActiveTemplateKind] =
@@ -154,16 +173,32 @@ export function SmtpSettingsTab({
     }
   }, [enabledLocales, previewLocale]);
 
+  const applyStatusResponse = useCallback(
+    (res: {
+      settings: SmtpSettingsDto;
+      has_password: boolean;
+      has_cloudflare_api_token: boolean;
+      active_provider: MailProviderKind | null;
+      guard_status: MailGuardStatusDto;
+    }) => {
+      const merged = { ...DEFAULT_SMTP_STATE, ...res.settings };
+      setSmtpDraft(merged);
+      setSavedBaseline(merged);
+      setHasPassword(res.has_password);
+      setHasCfToken(res.has_cloudflare_api_token);
+      setActiveProvider(res.active_provider);
+      setGuardStatus(res.guard_status);
+    },
+    [],
+  );
+
   useEffect(() => {
     let active = true;
     void api
       .adminGetSmtp()
       .then((res) => {
         if (!active) return;
-        const merged = { ...DEFAULT_SMTP_STATE, ...res.settings };
-        setSmtpDraft(merged);
-        setSavedBaseline(merged);
-        setHasPassword(res.has_password);
+        applyStatusResponse(res);
       })
       .catch(() => {})
       .finally(() => {
@@ -172,19 +207,20 @@ export function SmtpSettingsTab({
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyStatusResponse]);
 
   const isDirty =
     loaded &&
     (JSON.stringify(smtpDraft) !== JSON.stringify(savedBaseline) ||
-      passwordInput.trim().length > 0);
+      passwordInput.trim().length > 0 ||
+      cfTokenInput.trim().length > 0);
 
   useEffect(() => {
     onDirtyAndSavingChangeRef.current(isDirty, savingSmtp);
   }, [isDirty, savingSmtp]);
 
   const handleSaveSmtp = useCallback(async () => {
-    if (savingSmtp || !loaded) return;
+    if (savingRef.current || !loaded) return;
     let nextDraft = smtpDraft;
     if (smtpDraft.enabled || smtpDraft.from_email.trim()) {
       const normalizedFrom = normalizeEmail(smtpDraft.from_email);
@@ -196,24 +232,33 @@ export function SmtpSettingsTab({
         nextDraft = { ...smtpDraft, from_email: normalizedFrom };
       }
     }
+    savingRef.current = true;
     setSavingSmtp(true);
     try {
       const res = await api.adminUpdateSmtp({
         settings: nextDraft,
         password: passwordInput.trim() || undefined,
+        cloudflare_api_token: cfTokenInput.trim() || undefined,
       });
-      const savedMerged = { ...DEFAULT_SMTP_STATE, ...res.settings };
-      setSmtpDraft(savedMerged);
-      setSavedBaseline(savedMerged);
-      setHasPassword(res.has_password);
+      applyStatusResponse(res);
       setPasswordInput('');
+      setCfTokenInput('');
       toast.success(extSettings.smtpSavedMsg);
     } catch (err) {
       toast.error(err);
     } finally {
+      savingRef.current = false;
       setSavingSmtp(false);
     }
-  }, [loaded, passwordInput, extSettings.smtpSavedMsg, savingSmtp, smtpDraft, toast]);
+  }, [
+    applyStatusResponse,
+    cfTokenInput,
+    extSettings.smtpSavedMsg,
+    loaded,
+    passwordInput,
+    smtpDraft,
+    toast,
+  ]);
 
   useEffect(() => {
     if (saveTrigger > 0) {
@@ -223,19 +268,45 @@ export function SmtpSettingsTab({
   }, [saveTrigger]);
 
   const handleClearPassword = async () => {
-    if (savingSmtp) return;
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSavingSmtp(true);
     try {
       const res = await api.adminUpdateSmtp({
         settings: smtpDraft,
         clear_password: true,
       });
-      setHasPassword(res.has_password);
+      applyStatusResponse(res);
       setPasswordInput('');
       toast.success(extSettings.smtpSavedMsg);
     } catch (err) {
       toast.error(err);
     } finally {
+      savingRef.current = false;
+      setSavingSmtp(false);
+    }
+  };
+
+  const handleClearCfToken = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSavingSmtp(true);
+    try {
+      const nextSettings: SmtpSettingsDto =
+        smtpDraft.provider === 'cloudflare_api' && smtpDraft.enabled
+          ? { ...smtpDraft, enabled: false }
+          : smtpDraft;
+      const res = await api.adminUpdateSmtp({
+        settings: nextSettings,
+        clear_cloudflare_api_token: true,
+      });
+      applyStatusResponse(res);
+      setCfTokenInput('');
+      toast.success(extSettings.smtpSavedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      savingRef.current = false;
       setSavingSmtp(false);
     }
   };
@@ -251,20 +322,67 @@ export function SmtpSettingsTab({
       toast.error('INVALID_EMAIL');
       return;
     }
-    if (testingSmtp) return;
+    if (testingRef.current) return;
+    testingRef.current = true;
     setTestingSmtp(true);
     try {
-      await api.adminTestSmtp({
+      const res = await api.adminTestSmtp({
         to_email: normalizedTo,
         settings: { ...smtpDraft, from_email: normalizedFrom },
         password: passwordInput.trim() || undefined,
+        cloudflare_api_token: cfTokenInput.trim() || undefined,
         locale,
       });
+      if (res.guard_status) {
+        setGuardStatus(res.guard_status);
+      }
       toast.success(extSettings.smtpTestSentMsg);
     } catch (err) {
       toast.error(err);
+      void api
+        .adminGetSmtp()
+        .then((fresh) => {
+          setGuardStatus(fresh.guard_status);
+        })
+        .catch(() => {});
     } finally {
+      testingRef.current = false;
       setTestingSmtp(false);
+    }
+  };
+
+  const handleResetCircuit = async () => {
+    if (guardActionRef.current) return;
+    guardActionRef.current = true;
+    setGuardBusy(true);
+    try {
+      const nextGuard = await api.adminResetMailCircuit();
+      setGuardStatus(nextGuard);
+      toast.success(extSettings.mailGuardCircuitResetMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      guardActionRef.current = false;
+      setGuardBusy(false);
+    }
+  };
+
+  const handleClearSuppression = async (payload: {
+    email?: string;
+    clear_all?: boolean;
+  }) => {
+    if (guardActionRef.current) return;
+    guardActionRef.current = true;
+    setGuardBusy(true);
+    try {
+      const nextGuard = await api.adminClearMailSuppression(payload);
+      setGuardStatus(nextGuard);
+      toast.success(extSettings.mailGuardSuppressedClearedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      guardActionRef.current = false;
+      setGuardBusy(false);
     }
   };
 
@@ -297,6 +415,12 @@ export function SmtpSettingsTab({
               : activeTemplateKind === 'account_ban'
                 ? smtpDraft.ban_html
                 : smtpDraft.takedown_html;
+
+  useEffect(() => {
+    if (activeTemplateKind === 'email_change' && templateViewMode !== 'preview') {
+      setTemplateViewMode('preview');
+    }
+  }, [activeTemplateKind, templateViewMode]);
 
   useEffect(() => {
     if (!loaded || !templatesOpen || templateViewMode !== 'preview') {
@@ -398,6 +522,7 @@ export function SmtpSettingsTab({
   }, [previewViewport, templatePreview?.html, measurePreviewIframe]);
 
   const updateCurrentTemplateField = (field: 'subject' | 'html', value: string) => {
+    if (activeTemplateKind === 'email_change') return;
     setSmtpDraft((prev) => {
       if (activeTemplateKind === 'register_code') {
         return field === 'subject'
@@ -430,16 +555,44 @@ export function SmtpSettingsTab({
     });
   };
 
+  const isCloudflareProvider = smtpDraft.provider === 'cloudflare_api';
+
+  const headerTrailing = loaded ? (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {activeProvider === 'cloudflare_api' ? (
+        <StatusBadge tone="success" pill>
+          <IconCheck className="w-3 h-3" />
+          <span>{extSettings.smtpActiveBadgeCloudflare}</span>
+        </StatusBadge>
+      ) : activeProvider === 'smtp' ? (
+        <StatusBadge tone="success" pill>
+          <IconCheck className="w-3 h-3" />
+          <span>{extSettings.smtpActiveBadgeSmtp}</span>
+        </StatusBadge>
+      ) : (
+        <StatusBadge tone="neutral" pill>
+          <span>{extSettings.smtpActiveBadgeDisabled}</span>
+        </StatusBadge>
+      )}
+      {guardStatus?.circuit_open && (
+        <StatusBadge tone="danger" pill>
+          <IconAlertCircle className="w-3 h-3" />
+          <span>{extSettings.mailGuardCircuitOpen}</span>
+        </StatusBadge>
+      )}
+    </div>
+  ) : undefined;
+
   return (
-    <SettingsSectionCard title={extSettings.smtpGroup}>
+    <SettingsSectionCard title={extSettings.smtpGroup} trailing={headerTrailing}>
       {!loaded ? (
         <div className="space-y-4" aria-busy="true">
-          <div className="h-9 rounded-xl bg-surface-raised animate-pulse" />
-          <div className="h-24 rounded-xl bg-surface-raised animate-pulse" />
-          <div className="h-24 rounded-xl bg-surface-raised animate-pulse" />
+          <div className="h-9 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+          <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+          <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-5">
           <SwitchRow
             label={extSettings.smtpEnabledLabel}
             checked={smtpDraft.enabled}
@@ -450,129 +603,247 @@ export function SmtpSettingsTab({
             className="w-full justify-between text-sm text-ink-primary"
           />
 
-          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
-            <div className="sm:col-span-6">
-              <label
-                htmlFor="smtp-host"
-                className="block mb-1 text-xs font-semibold text-ink-secondary"
-              >
-                {extSettings.smtpHostLabel}
-              </label>
-              <input
-                id="smtp-host"
-                type="text"
-                spellCheck={false}
-                value={smtpDraft.host}
-                onChange={(e) =>
-                  setSmtpDraft({ ...smtpDraft, host: e.target.value })
-                }
-                placeholder="smtp.example.com"
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label
-                htmlFor="smtp-port"
-                className="block mb-1 text-xs font-semibold text-ink-secondary"
-              >
-                {extSettings.smtpPortLabel}
-              </label>
-              <input
-                id="smtp-port"
-                type="number"
-                min={1}
-                max={65535}
-                value={smtpDraft.port}
-                onChange={(e) =>
-                  setSmtpDraft({
-                    ...smtpDraft,
-                    port: Number(e.target.value) || 465,
-                  })
-                }
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono tabular-nums"
-              />
-            </div>
-            <div className="sm:col-span-4">
-              <label
-                htmlFor="smtp-enc"
-                className="block mb-1 text-xs font-semibold text-ink-secondary"
-              >
-                {extSettings.smtpEncryptionLabel}
-              </label>
-              <InkSelect
-                id="smtp-enc"
-                value={smtpDraft.encryption}
-                onChange={(nextEnc) =>
-                  setSmtpDraft({
-                    ...smtpDraft,
-                    encryption: nextEnc as 'tls' | 'starttls' | 'none',
-                  })
-                }
-                options={[
-                  { value: 'tls', label: extSettings.smtpEncTls },
-                  { value: 'starttls', label: extSettings.smtpEncStarttls },
-                  { value: 'none', label: extSettings.smtpEncNone },
-                ]}
-                triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-xs"
-              />
-            </div>
+          {/* Mutually Exclusive Delivery Transport Selector */}
+          <div className="space-y-1.5">
+            <RadioCardGroup<MailProviderKind>
+              name="mail-delivery-provider"
+              legend={extSettings.smtpProviderLabel}
+              value={smtpDraft.provider}
+              onChange={(nextProvider) =>
+                setSmtpDraft((prev) => ({ ...prev, provider: nextProvider }))
+              }
+              columnsClass="grid-cols-1 sm:grid-cols-2"
+              options={[
+                {
+                  value: 'smtp',
+                  title: extSettings.smtpProviderSmtp,
+                  hint: extSettings.smtpProviderSmtpHint,
+                },
+                {
+                  value: 'cloudflare_api',
+                  title: extSettings.smtpProviderCloudflare,
+                  hint: extSettings.smtpProviderCloudflareHint,
+                },
+              ]}
+            />
+            <p className="text-xs text-ink-muted m-0 leading-relaxed">
+              {extSettings.smtpProviderExclusiveHint}
+            </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            <div>
-              <label
-                htmlFor="smtp-user"
-                className="block mb-1 text-xs font-semibold text-ink-secondary"
-              >
-                {extSettings.smtpUsernameLabel}
-              </label>
-              <input
-                id="smtp-user"
-                type="text"
-                spellCheck={false}
-                value={smtpDraft.username}
-                onChange={(e) =>
-                  setSmtpDraft({ ...smtpDraft, username: e.target.value })
-                }
-                className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
-              />
-            </div>
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <label
-                  htmlFor="smtp-pw"
-                  className="text-xs font-semibold text-ink-secondary"
-                >
-                  {extSettings.smtpPasswordLabel}
-                </label>
-                {hasPassword && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="font-mono text-accent-success inline-flex items-center gap-1">
-                      <IconCheck className="w-3 h-3" />
-                      <span>{extSettings.smtpPasswordSavedBadge}</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void handleClearPassword()}
-                      className="text-accent-danger hover:underline cursor-pointer"
+          {/* Active Transport Credentials (Strictly One Provider Shown) */}
+          {isCloudflareProvider ? (
+            <div className="p-4 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label
+                    htmlFor="cf-account-id"
+                    className="block mb-1 text-xs font-semibold text-ink-secondary"
+                  >
+                    {extSettings.cfAccountIdLabel}
+                  </label>
+                  <input
+                    id="cf-account-id"
+                    name="cloudflare_account_id"
+                    type="text"
+                    maxLength={64}
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    aria-describedby="cf-setup-hint"
+                    value={smtpDraft.cloudflare_account_id}
+                    onChange={(e) =>
+                      setSmtpDraft({
+                        ...smtpDraft,
+                        cloudflare_account_id: e.target.value,
+                      })
+                    }
+                    placeholder={extSettings.cfAccountIdPlaceholder}
+                    className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label
+                      htmlFor="cf-api-token"
+                      className="text-xs font-semibold text-ink-secondary"
                     >
-                      {extSettings.smtpClearPasswordBtn}
-                    </button>
+                      {extSettings.cfApiTokenLabel}
+                    </label>
+                    {hasCfToken && (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-mono text-accent-success inline-flex items-center gap-1">
+                          <IconCheck className="w-3 h-3" />
+                          <span>{extSettings.cfApiTokenSavedBadge}</span>
+                        </span>
+                        <button
+                          type="button"
+                          disabled={savingSmtp}
+                          onClick={() => void handleClearCfToken()}
+                          className="text-accent-danger hover:underline cursor-pointer disabled:opacity-50"
+                        >
+                          {extSettings.cfClearTokenBtn}
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
+                  <PasswordInput
+                    id="cf-api-token"
+                    name="cloudflare_api_token"
+                    locale={locale}
+                    variant="compact"
+                    autoComplete="new-password"
+                    aria-describedby="cf-setup-hint"
+                    value={cfTokenInput}
+                    onChange={(e) => setCfTokenInput(e.target.value)}
+                    placeholder={hasCfToken ? '••••••••' : ''}
+                  />
+                </div>
               </div>
-              <PasswordInput
-                id="smtp-pw"
-                locale={locale}
-                variant="compact"
-                autoComplete="new-password"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                placeholder={hasPassword ? '••••••••' : ''}
-              />
+              <p
+                id="cf-setup-hint"
+                className="text-xs text-ink-muted m-0 leading-relaxed"
+              >
+                {extSettings.cfSetupHint}
+              </p>
             </div>
-          </div>
+          ) : (
+            <div className="p-4 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
+                <div className="sm:col-span-6">
+                  <label
+                    htmlFor="smtp-host"
+                    className="block mb-1 text-xs font-semibold text-ink-secondary"
+                  >
+                    {extSettings.smtpHostLabel}
+                  </label>
+                  <input
+                    id="smtp-host"
+                    name="smtp_host"
+                    type="text"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    value={smtpDraft.host}
+                    onChange={(e) =>
+                      setSmtpDraft({ ...smtpDraft, host: e.target.value })
+                    }
+                    placeholder="smtp.example.com"
+                    className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label
+                    htmlFor="smtp-port"
+                    className="block mb-1 text-xs font-semibold text-ink-secondary"
+                  >
+                    {extSettings.smtpPortLabel}
+                  </label>
+                  <input
+                    id="smtp-port"
+                    name="smtp_port"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={smtpDraft.port}
+                    onChange={(e) =>
+                      setSmtpDraft({
+                        ...smtpDraft,
+                        port: Number(e.target.value) || 465,
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono tabular-nums"
+                  />
+                </div>
+                <div className="sm:col-span-4">
+                  <label
+                    htmlFor="smtp-enc"
+                    className="block mb-1 text-xs font-semibold text-ink-secondary"
+                  >
+                    {extSettings.smtpEncryptionLabel}
+                  </label>
+                  <InkSelect
+                    id="smtp-enc"
+                    value={smtpDraft.encryption}
+                    onChange={(nextEnc) =>
+                      setSmtpDraft({
+                        ...smtpDraft,
+                        encryption: nextEnc as 'tls' | 'starttls' | 'none',
+                      })
+                    }
+                    options={[
+                      { value: 'tls', label: extSettings.smtpEncTls },
+                      { value: 'starttls', label: extSettings.smtpEncStarttls },
+                      { value: 'none', label: extSettings.smtpEncNone },
+                    ]}
+                    triggerClassName="w-full min-h-9 px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border-border-subtle text-xs"
+                  />
+                </div>
+              </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label
+                    htmlFor="smtp-user"
+                    className="block mb-1 text-xs font-semibold text-ink-secondary"
+                  >
+                    {extSettings.smtpUsernameLabel}
+                  </label>
+                  <input
+                    id="smtp-user"
+                    name="smtp_username"
+                    type="text"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    value={smtpDraft.username}
+                    onChange={(e) =>
+                      setSmtpDraft({ ...smtpDraft, username: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label
+                      htmlFor="smtp-pw"
+                      className="text-xs font-semibold text-ink-secondary"
+                    >
+                      {extSettings.smtpPasswordLabel}
+                    </label>
+                    {hasPassword && (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-mono text-accent-success inline-flex items-center gap-1">
+                          <IconCheck className="w-3 h-3" />
+                          <span>{extSettings.smtpPasswordSavedBadge}</span>
+                        </span>
+                        <button
+                          type="button"
+                          disabled={savingSmtp}
+                          onClick={() => void handleClearPassword()}
+                          className="text-accent-danger hover:underline cursor-pointer disabled:opacity-50"
+                        >
+                          {extSettings.smtpClearPasswordBtn}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <PasswordInput
+                    id="smtp-pw"
+                    name="smtp_password"
+                    locale={locale}
+                    variant="compact"
+                    autoComplete="new-password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    placeholder={hasPassword ? '••••••••' : ''}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Shared Sender Identity */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <div>
               <label
@@ -583,6 +854,7 @@ export function SmtpSettingsTab({
               </label>
               <input
                 id="smtp-from-name"
+                name="from_name"
                 type="text"
                 value={smtpDraft.from_name}
                 onChange={(e) =>
@@ -600,6 +872,7 @@ export function SmtpSettingsTab({
               </label>
               <input
                 id="smtp-from-email"
+                name="from_email"
                 type="email"
                 maxLength={MAX_EMAIL_LENGTH}
                 autoComplete="email"
@@ -614,6 +887,176 @@ export function SmtpSettingsTab({
                 className="w-full px-3 py-2 rounded-xl bg-surface-raised text-ink-primary border border-border-subtle text-xs font-mono ink-input-inset"
               />
             </div>
+          </div>
+
+          {/* Pre-flight MX / Domain Existence Verification & Delivery Guard */}
+          <div className="space-y-3 pt-2 border-t border-border-subtle">
+            <div className="space-y-1">
+              <SwitchRow
+                name="verify_recipient_mx"
+                label={extSettings.verifyRecipientMxLabel}
+                checked={smtpDraft.verify_recipient_mx}
+                onChange={(checked) =>
+                  setSmtpDraft((prev) => ({ ...prev, verify_recipient_mx: checked }))
+                }
+                variant="inline"
+                className="w-full justify-between text-xs font-semibold text-ink-secondary"
+              />
+              <p className="text-xs text-ink-muted m-0 leading-relaxed">
+                {extSettings.verifyRecipientMxHint}
+              </p>
+            </div>
+
+            {guardStatus && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="p-3.5 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-primary">
+                    <IconShield className="w-3.5 h-3.5 text-ink-muted" />
+                    <span>{extSettings.mailGuardTitle}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {guardStatus.circuit_open ? (
+                      <>
+                        <StatusBadge tone="danger" pill>
+                          <IconAlertCircle className="w-3 h-3" />
+                          <span>{extSettings.mailGuardCircuitOpen}</span>
+                        </StatusBadge>
+                        <button
+                          type="button"
+                          disabled={guardBusy}
+                          onClick={() => void handleResetCircuit()}
+                          className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-sheet border border-border-subtle hover:border-border-ink text-ink-primary cursor-pointer disabled:opacity-50 transition-colors"
+                        >
+                          {extSettings.mailGuardResetCircuitBtn}
+                        </button>
+                      </>
+                    ) : (
+                      <StatusBadge tone="success" pill>
+                        <IconCheck className="w-3 h-3" />
+                        <span>{extSettings.mailGuardCircuitHealthy}</span>
+                      </StatusBadge>
+                    )}
+                  </div>
+                </div>
+
+                {guardStatus.circuit_open && (
+                  <p
+                    className="text-xs m-0 px-3 py-2 rounded-lg border leading-relaxed"
+                    style={{
+                      backgroundColor: 'var(--alert-danger-bg)',
+                      borderColor: 'var(--alert-danger-border)',
+                      color: 'var(--alert-danger-body)',
+                    }}
+                  >
+                    {extSettings.mailGuardCircuitOpenDetail(
+                      guardStatus.circuit_retry_after_secs,
+                      guardStatus.circuit_reason || 'Rate limit / hard bounce spike',
+                    )}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="px-2.5 py-1.5 rounded-lg bg-surface-sheet border border-border-subtle">
+                    <div className="text-[11px] text-ink-muted">
+                      {extSettings.mailGuardStatSent}
+                    </div>
+                    <div className="text-sm font-semibold font-mono tabular-nums text-ink-primary">
+                      {guardStatus.total_sent}
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1.5 rounded-lg bg-surface-sheet border border-border-subtle">
+                    <div className="text-[11px] text-ink-muted">
+                      {extSettings.mailGuardStatBounced}
+                    </div>
+                    <div className="text-sm font-semibold font-mono tabular-nums text-ink-primary">
+                      {guardStatus.total_bounced}
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1.5 rounded-lg bg-surface-sheet border border-border-subtle">
+                    <div className="text-[11px] text-ink-muted">
+                      {extSettings.mailGuardStatBlocked}
+                    </div>
+                    <div className="text-sm font-semibold font-mono tabular-nums text-ink-primary">
+                      {guardStatus.total_blocked_domain +
+                        guardStatus.total_blocked_suppressed}
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1.5 rounded-lg bg-surface-sheet border border-border-subtle">
+                    <div className="text-[11px] text-ink-muted">
+                      {extSettings.mailGuardStatDeduped}
+                    </div>
+                    <div className="text-sm font-semibold font-mono tabular-nums text-ink-primary">
+                      {guardStatus.total_deduped}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-dashed border-border-subtle space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-ink-secondary">
+                      {extSettings.mailGuardSuppressedTitle(
+                        guardStatus.suppressed_count,
+                      )}
+                    </span>
+                    {guardStatus.suppressed_count > 0 && (
+                      <button
+                        type="button"
+                        disabled={guardBusy}
+                        onClick={() =>
+                          void handleClearSuppression({ clear_all: true })
+                        }
+                        className="text-xs text-accent-danger hover:underline cursor-pointer disabled:opacity-50"
+                      >
+                        {extSettings.mailGuardClearAllSuppressedBtn}
+                      </button>
+                    )}
+                  </div>
+
+                  {guardStatus.suppressed_recipients.length === 0 ? (
+                    <p className="text-xs text-ink-muted m-0">
+                      {extSettings.mailGuardSuppressedEmpty}
+                    </p>
+                  ) : (
+                    <ul className="m-0 p-0 list-none space-y-1.5 max-h-40 overflow-y-auto">
+                      {guardStatus.suppressed_recipients.map((entry) => (
+                        <li
+                          key={entry.email}
+                          className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-surface-sheet border border-border-subtle text-xs"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-ink-primary truncate">
+                                {entry.email}
+                              </span>
+                              <StatusBadge tone="neutral" mono>
+                                {entry.provider}
+                              </StatusBadge>
+                            </div>
+                            <p className="text-[11px] text-ink-muted m-0 truncate">
+                              {entry.reason}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={guardBusy}
+                            onClick={() =>
+                              void handleClearSuppression({ email: entry.email })
+                            }
+                            className="shrink-0 min-h-7 px-2 py-0.5 rounded-md text-xs text-ink-secondary hover:text-ink-primary hover:bg-surface-raised cursor-pointer disabled:opacity-50 transition-colors"
+                          >
+                            {extSettings.mailGuardRemoveSuppressedBtn}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Custom HTML Email Footer */}
@@ -715,27 +1158,29 @@ export function SmtpSettingsTab({
                     ]}
                   />
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <SegmentedControl<'preview' | 'source'>
-                      value={templateViewMode}
-                      onChange={setTemplateViewMode}
-                      options={[
-                        { value: 'preview', label: extSettings.smtpTemplatePreviewTab },
-                        { value: 'source', label: extSettings.smtpTemplateSourceTab },
-                      ]}
-                    />
+                  {activeTemplateKind !== 'email_change' && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <SegmentedControl<'preview' | 'source'>
+                        value={templateViewMode}
+                        onChange={setTemplateViewMode}
+                        options={[
+                          { value: 'preview', label: extSettings.smtpTemplatePreviewTab },
+                          { value: 'source', label: extSettings.smtpTemplateSourceTab },
+                        ]}
+                      />
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        updateCurrentTemplateField('subject', '');
-                        updateCurrentTemplateField('html', '');
-                      }}
-                      className="min-h-8 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer transition-colors"
-                    >
-                      {extSettings.smtpResetDefaultBtn}
-                    </button>
-                  </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          updateCurrentTemplateField('subject', '');
+                          updateCurrentTemplateField('html', '');
+                        }}
+                        className="min-h-8 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer transition-colors"
+                      >
+                        {extSettings.smtpResetDefaultBtn}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="p-4 rounded-xl bg-surface-raised/50 border border-border-subtle space-y-3.5">

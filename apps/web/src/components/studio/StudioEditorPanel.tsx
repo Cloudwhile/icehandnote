@@ -15,7 +15,7 @@ import {
   useState,
 } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../../lib/api';
+import { api, getClientTabId } from '../../lib/api';
 import { ApiError } from '../../lib/apiError';
 import { normalizeEmail } from '../../lib/email';
 import {
@@ -83,6 +83,8 @@ import type { TakedownStepTarget } from './StudioCatalogPanel';
 import { StudioEditorInspector } from './StudioEditorInspector';
 import type { StudioSectionId } from './StudioSidebarContent';
 import { VisualBlockEditor, VisualBlockToolStrip } from './VisualBlockEditor';
+import { UserAvatar } from '../ui/UserAvatar';
+import { useStudioCollabStream } from '../../lib/studioPresence';
 
 interface LocalDraftSnapshot {
   title: string;
@@ -118,14 +120,44 @@ function getSnippetBodies(locale: LocaleCode) {
         '\n```sketch\n{\n  "nodes": [\n    { "id": "n1", "label": "A", "x": 24, "y": 36, "width": 160, "height": 62, "tone": "ice" },\n    { "id": "n2", "label": "B", "x": 260, "y": 36, "width": 160, "height": 62, "tone": "violet" }\n  ],\n  "edges": [\n    { "from": "n1", "to": "n2" }\n  ]\n}\n```\n',
     } as const;
   }
+  if (locale === 'zh-TW') {
+    return {
+      sectionTask: '\n## [ ] 小節標題\n\n',
+      steps: '\n- [ ] 任務項目\n',
+      tip: '\n:::tip[提示]\n\n:::\n',
+      note: '\n:::note[筆記]\n\n:::\n',
+      info: '\n:::info[資訊]\n\n:::\n',
+      warn: '\n:::warning[注意]\n\n:::\n',
+      danger: '\n:::danger[警示]\n\n:::\n',
+      margin: '\n:::margin[]\n',
+      code: '\n```text\n\n```\n',
+      sketch:
+        '\n```sketch\n{\n  "nodes": [\n    { "id": "n1", "label": "A", "x": 24, "y": 36, "width": 160, "height": 62, "tone": "ice" },\n    { "id": "n2", "label": "B", "x": 245, "y": 36, "width": 160, "height": 62, "tone": "violet" }\n  ],\n  "edges": [\n    { "from": "n1", "to": "n2" }\n  ]\n}\n```\n',
+    } as const;
+  }
+  if (locale === 'ja') {
+    return {
+      sectionTask: '\n## [ ] セクション見出し\n\n',
+      steps: '\n- [ ] タスク項目\n',
+      tip: '\n:::tip[ヒント]\n\n:::\n',
+      note: '\n:::note[メモ]\n\n:::\n',
+      info: '\n:::info[情報]\n\n:::\n',
+      warn: '\n:::warning[注意]\n\n:::\n',
+      danger: '\n:::danger[警告]\n\n:::\n',
+      margin: '\n:::margin[]\n',
+      code: '\n```text\n\n```\n',
+      sketch:
+        '\n```sketch\n{\n  "nodes": [\n    { "id": "n1", "label": "A", "x": 24, "y": 36, "width": 160, "height": 62, "tone": "ice" },\n    { "id": "n2", "label": "B", "x": 245, "y": 36, "width": 160, "height": 62, "tone": "violet" }\n  ],\n  "edges": [\n    { "from": "n1", "to": "n2" }\n  ]\n}\n```\n',
+    } as const;
+  }
   return {
     sectionTask: '\n## [ ] 小节标题\n\n',
     steps: '\n- [ ] 任务项\n',
-    tip: '\n:::tip[]\n\n:::\n',
-    note: '\n:::note[]\n\n:::\n',
-    info: '\n:::info[]\n\n:::\n',
-    warn: '\n:::warning[]\n\n:::\n',
-    danger: '\n:::danger[]\n\n:::\n',
+    tip: '\n:::tip[提示]\n\n:::\n',
+    note: '\n:::note[笔记]\n\n:::\n',
+    info: '\n:::info[信息]\n\n:::\n',
+    warn: '\n:::warning[注意]\n\n:::\n',
+    danger: '\n:::danger[警示]\n\n:::\n',
     margin: '\n:::margin[]\n',
     code: '\n```text\n\n```\n',
     sketch:
@@ -134,26 +166,27 @@ function getSnippetBodies(locale: LocaleCode) {
 }
 
 function localDraftKey(
+  userId: string,
   track: string,
   chapter: string,
   step: string,
   loc: LocaleCode,
 ): string {
-  return `icehandnote_studio_draft::${track}::${chapter}::${step}::${loc}`;
+  return `icehandnote_studio_draft::${userId}::${track}::${chapter}::${step}::${loc}`;
 }
 
 function readLocalDraft(
+  userId: string,
   track: string,
   chapter: string,
   step: string,
   loc: LocaleCode,
 ): LocalDraftSnapshot | null {
+  if (!userId) return null;
   try {
-    const raw =
-      localStorage.getItem(localDraftKey(track, chapter, step, loc)) ??
-      localStorage.getItem(
-        `icetowne_studio_draft::${track}::${chapter}::${step}::${loc}`,
-      );
+    const raw = localStorage.getItem(
+      localDraftKey(userId, track, chapter, step, loc),
+    );
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<LocalDraftSnapshot>;
     if (typeof parsed.body !== 'string' || typeof parsed.savedAt !== 'number') {
@@ -175,15 +208,17 @@ function readLocalDraft(
 }
 
 function writeLocalDraft(
+  userId: string,
   track: string,
   chapter: string,
   step: string,
   loc: LocaleCode,
   snap: LocalDraftSnapshot,
 ): void {
+  if (!userId) return;
   try {
     localStorage.setItem(
-      localDraftKey(track, chapter, step, loc),
+      localDraftKey(userId, track, chapter, step, loc),
       JSON.stringify(snap),
     );
   } catch {
@@ -192,13 +227,15 @@ function writeLocalDraft(
 }
 
 function clearLocalDraft(
+  userId: string,
   track: string,
   chapter: string,
   step: string,
   loc: LocaleCode,
 ): void {
+  if (!userId) return;
   try {
-    localStorage.removeItem(localDraftKey(track, chapter, step, loc));
+    localStorage.removeItem(localDraftKey(userId, track, chapter, step, loc));
   } catch {
     // ignore storage restriction
   }
@@ -269,6 +306,7 @@ export function StudioEditorPanel({
   const saveActionRef = useRef<() => void>(() => {});
   const skipNextLoadKeyRef = useRef<string | null>(null);
   const slugManuallyEditedRef = useRef(false);
+  const invitingRef = useRef(false);
 
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
   const [inspectorOpen, setInspectorOpen] = useState(() =>
@@ -316,8 +354,18 @@ export function StudioEditorPanel({
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyMounted, setHistoryMounted] = useState(false);
+  useEffect(() => {
+    if (historyOpen) setHistoryMounted(true);
+  }, [historyOpen]);
   const [conflictState, setConflictState] =
     useState<RevisionConflictMeta | null>(null);
+  const [remoteNotice, setRemoteNotice] = useState<{
+    authorName: string;
+    editSeq: number;
+    locale: string;
+    etag: string;
+  } | null>(null);
   const [transferTarget, setTransferTarget] =
     useState<ArticleAuthorDto | null>(null);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
@@ -345,6 +393,9 @@ export function StudioEditorPanel({
   const activeTargetKey = `${selTrack}/${selChapter}/${selStep}/${editLocale}`;
   const activeTargetRef = useRef(activeTargetKey);
   activeTargetRef.current = activeTargetKey;
+  const loadSeqRef = useRef(0);
+  const userIdRef = useRef(user.id);
+  userIdRef.current = user.id;
 
   const handleTitleChange = (nextTitle: string) => {
     setDocTitle(nextTitle);
@@ -370,10 +421,12 @@ export function StudioEditorPanel({
     }
   }, [moderationPatch, selTrack, selChapter, selStep]);
 
-  // Load selected step into editor
+  // Load selected step into editor with monotonic sequence guard against stale async responses
   const loadEditorStep = useCallback(
     async (tSlug: string, cSlug: string, sSlug: string, loc: LocaleCode) => {
       if (!tSlug || !cSlug || !sSlug) return;
+      const reqSeq = (loadSeqRef.current += 1);
+      const targetKey = `${tSlug}/${cSlug}/${sSlug}/${loc}`;
       try {
         const dto: StudioStepEditorDto = await api.studioGetStep(
           tSlug,
@@ -381,11 +434,16 @@ export function StudioEditorPanel({
           sSlug,
           loc,
         );
+        if (loadSeqRef.current !== reqSeq || activeTargetRef.current !== targetKey) {
+          return;
+        }
+        const editable = dto.can_edit !== false;
         setDocExists(dto.exists);
         setDocEtag(dto.etag ?? '');
-        setCanEditDoc(dto.can_edit !== false);
+        setCanEditDoc(editable);
         setCanLeaveDoc(Boolean(dto.can_leave));
         setConflictState(null);
+        setRemoteNotice(null);
         const resolvedDtoSlug = dto.step_slug || sSlug;
         setDraftStepSlug(resolvedDtoSlug);
         slugManuallyEditedRef.current = false;
@@ -416,8 +474,8 @@ export function StudioEditorPanel({
         setSavedSnapshot(
           JSON.stringify({
             stepSlug: resolvedDtoSlug,
-            title: dto.title,
-            summary: dto.summary,
+            title: dto.title.trim(),
+            summary: dto.summary.trim(),
             stepNum: dto.step_number,
             status: nextStatus,
             license: nextLicense,
@@ -429,12 +487,15 @@ export function StudioEditorPanel({
         setAutosaveStatus({ kind: 'idle' });
         setLastLocalAutosaveSig('');
 
-        const localDraft = readLocalDraft(tSlug, cSlug, sSlug, loc);
+        const localDraft = editable
+          ? readLocalDraft(userIdRef.current, tSlug, cSlug, sSlug, loc)
+          : null;
         if (
+          editable &&
           autosaveEnabledRef.current &&
           localDraft &&
-          (localDraft.title !== dto.title ||
-            localDraft.summary !== dto.summary ||
+          (localDraft.title.trim() !== dto.title.trim() ||
+            localDraft.summary.trim() !== dto.summary.trim() ||
             (localDraft.license ?? '') !== nextLicense ||
             localDraft.body !== dto.body_markdown ||
             localDraft.tags !== nextTags)
@@ -444,6 +505,9 @@ export function StudioEditorPanel({
           setRecoverableDraft(null);
         }
       } catch (err) {
+        if (loadSeqRef.current !== reqSeq || activeTargetRef.current !== targetKey) {
+          return;
+        }
         setDocExists(false);
         setDocEtag('');
         setCanEditDoc(false);
@@ -559,8 +623,8 @@ export function StudioEditorPanel({
     () =>
       JSON.stringify({
         stepSlug: draftStepSlug.trim() || selStep,
-        title: docTitle,
-        summary: docSummary,
+        title: docTitle.trim(),
+        summary: docSummary.trim(),
         stepNum: docStepNum,
         status: docStatus,
         license: docLicense,
@@ -583,8 +647,51 @@ export function StudioEditorPanel({
   );
 
   const isEditorDirty = Boolean(savedSnapshot) && currentDocSig !== savedSnapshot;
+  const myTabId = useMemo(() => getClientTabId(), []);
+
+  const { members: collabMembers } = useStudioCollabStream({
+    enabled: docExists && Boolean(selTrack && selChapter && selStep),
+    track: selTrack,
+    chapter: selChapter,
+    step: selStep,
+    editLocale,
+    isDirty: isEditorDirty,
+    onRemoteSaved: (evt) => {
+      if (
+        evt.tab_id !== myTabId &&
+        evt.locale === editLocale &&
+        evt.etag !== docEtag
+      ) {
+        setRemoteNotice({
+          authorName: evt.author_name || '',
+          editSeq: evt.edit_seq,
+          locale: evt.locale,
+          etag: evt.etag,
+        });
+      }
+    },
+    onAclChanged: () => {
+      void onRefreshOverview();
+      if (!isEditorDirty) {
+        void loadEditorStep(selTrack, selChapter, selStep, editLocale);
+      }
+    },
+  });
+
+  const otherCollabMembers = useMemo(() => {
+    const map = new Map<string, (typeof collabMembers)[number]>();
+    for (const m of collabMembers) {
+      if (m.tab_id === myTabId) continue;
+      const prev = map.get(m.user_id);
+      if (!prev || m.state === 'editing') {
+        map.set(m.user_id, m);
+      }
+    }
+    return Array.from(map.values());
+  }, [collabMembers, myTabId]);
 
   const latestEditorRef = useRef({
+    userId: user.id,
     targetKey: activeTargetKey,
     selTrack,
     selChapter,
@@ -604,9 +711,11 @@ export function StudioEditorPanel({
     docEtag,
     canEditDoc,
     saving,
+    isDirty: isEditorDirty,
     currentDocSig,
   });
   latestEditorRef.current = {
+    userId: user.id,
     targetKey: activeTargetKey,
     selTrack,
     selChapter,
@@ -626,8 +735,42 @@ export function StudioEditorPanel({
     docEtag,
     canEditDoc,
     saving,
+    isDirty: isEditorDirty,
     currentDocSig,
   };
+
+  // Flush dirty draft locally on target switch or section unmount so edits are never silently discarded
+  useEffect(() => {
+    return () => {
+      const cur = latestEditorRef.current;
+      if (
+        autosaveEnabledRef.current &&
+        cur.canEditDoc &&
+        cur.isDirty &&
+        cur.selTrack &&
+        cur.selChapter &&
+        cur.selStep
+      ) {
+        writeLocalDraft(
+          cur.userId,
+          cur.selTrack,
+          cur.selChapter,
+          cur.selStep,
+          cur.editLocale,
+          {
+            title: cur.docTitle,
+            summary: cur.docSummary,
+            stepNum: cur.docStepNum,
+            minutes: cur.docMinutes,
+            license: cur.docLicense,
+            tags: cur.docTagsText,
+            body: cur.docBody,
+            savedAt: Date.now(),
+          },
+        );
+      }
+    };
+  }, [activeTargetKey]);
 
   // Unified periodic draft auto-save (automatically paused while resolving HTTP 412 conflict or in read-only role)
   const needsAutosave =
@@ -689,6 +832,7 @@ export function StudioEditorPanel({
           .then((saved) => {
             if (activeTargetRef.current !== cur.targetKey) return;
             clearLocalDraft(
+              cur.userId,
               cur.selTrack,
               cur.selChapter,
               cur.selStep,
@@ -722,6 +866,7 @@ export function StudioEditorPanel({
           .catch((err) => {
             if (activeTargetRef.current !== cur.targetKey) return;
             writeLocalDraft(
+              cur.userId,
               cur.selTrack,
               cur.selChapter,
               cur.selStep,
@@ -750,6 +895,7 @@ export function StudioEditorPanel({
           });
       } else {
         writeLocalDraft(
+          cur.userId,
           cur.selTrack,
           cur.selChapter,
           cur.selStep,
@@ -777,6 +923,7 @@ export function StudioEditorPanel({
     siteSettings.enable_draft_autosave,
     siteSettings.draft_autosave_interval_secs,
     needsAutosave,
+    currentDocSig,
     saving,
     activeTargetKey,
     onRefreshOverview,
@@ -967,6 +1114,7 @@ export function StudioEditorPanel({
       setCanEditDoc(saved.can_edit !== false);
       setCanLeaveDoc(Boolean(saved.can_leave));
       setConflictState(null);
+      setRemoteNotice(null);
       setDocMinutes(saved.estimated_minutes);
       setDocVersion(saved.version ?? saved.synced_revision);
       setDocSyncedRev(saved.synced_revision);
@@ -977,9 +1125,9 @@ export function StudioEditorPanel({
         setCanManageCollaborators(saved.can_manage_collaborators);
       }
       setBumpCanonical(false);
-      clearLocalDraft(selTrack, selChapter, selStep, editLocale);
+      clearLocalDraft(user.id, selTrack, selChapter, selStep, editLocale);
       if (resolvedSlug !== selStep) {
-        clearLocalDraft(selTrack, selChapter, resolvedSlug, editLocale);
+        clearLocalDraft(user.id, selTrack, selChapter, resolvedSlug, editLocale);
       }
       setRecoverableDraft(null);
       setLastLocalAutosaveSig('');
@@ -1056,7 +1204,7 @@ export function StudioEditorPanel({
     setDeletingStep(true);
     try {
       await api.studioDeleteStep(selTrack, selChapter, selStep);
-      clearLocalDraft(selTrack, selChapter, selStep, editLocale);
+      clearLocalDraft(user.id, selTrack, selChapter, selStep, editLocale);
       setRecoverableDraft(null);
       setDeleteModalOpen(false);
       const deletedSlug = selStep;
@@ -1088,7 +1236,8 @@ export function StudioEditorPanel({
       toast.error('INVALID_EMAIL');
       return;
     }
-    if (inviting) return;
+    if (invitingRef.current) return;
+    invitingRef.current = true;
     setInviting(true);
     try {
       const res = await api.createCollaboratorInvite(
@@ -1114,6 +1263,7 @@ export function StudioEditorPanel({
     } catch (err) {
       toast.error(err);
     } finally {
+      invitingRef.current = false;
       setInviting(false);
     }
   };
@@ -1218,26 +1368,41 @@ export function StudioEditorPanel({
   };
 
   const handleApplyRestoredSnapshot = (saved: StudioStepEditorDto) => {
+    const resolvedSlug = saved.step_slug || selStep;
+    const nextStatus = saved.status === 'draft' ? 'draft' : 'published';
+    const nextLicense = normalizeLicenseId(saved.license);
+    const nextTags = saved.tags.join(', ');
+
     setDocExists(true);
     setDocEtag(saved.etag ?? '');
+    setDraftStepSlug(resolvedSlug);
+    slugManuallyEditedRef.current = false;
     setDocTitle(saved.title);
     setDocSummary(saved.summary);
+    setDocStepNum(saved.step_number);
     setDocMinutes(saved.estimated_minutes);
     setDocVersion(saved.version ?? saved.synced_revision);
     setDocSyncedRev(saved.synced_revision);
     setDocCanonicalRev(saved.canonical_revision);
+    setBumpCanonical(false);
+    setDocStatus(nextStatus);
+    setDocLicense(nextLicense);
+    setDocTagsText(nextTags);
     setDocBody(saved.body_markdown);
     setVisualBlocks(parseMarkdownToVisualBlocks(saved.body_markdown));
     setConflictState(null);
+    setRemoteNotice(null);
+    clearLocalDraft(user.id, selTrack, selChapter, resolvedSlug, editLocale);
+    setRecoverableDraft(null);
     setSavedSnapshot(
       JSON.stringify({
-        stepSlug: saved.step_slug || selStep,
-        title: saved.title,
-        summary: saved.summary,
+        stepSlug: resolvedSlug,
+        title: saved.title.trim(),
+        summary: saved.summary.trim(),
         stepNum: saved.step_number,
-        status: saved.status === 'draft' ? 'draft' : 'published',
-        license: normalizeLicenseId(saved.license),
-        tags: saved.tags.join(', '),
+        status: nextStatus,
+        license: nextLicense,
+        tags: nextTags,
         body: saved.body_markdown,
         bump: false,
       }),
@@ -1381,8 +1546,6 @@ export function StudioEditorPanel({
             {isAdmin ? (
               <button
                 type="button"
-                role="status"
-                aria-live="polite"
                 aria-label={`${autosaveText} — ${s.configureAutosaveTitle}`}
                 title={`${autosaveText} — ${s.configureAutosaveTitle}`}
                 onClick={() => onSwitchSection('settings')}
@@ -1393,10 +1556,12 @@ export function StudioEditorPanel({
                   className="w-2 h-2 rounded-full bg-current shrink-0"
                 />
                 <span
+                  role="status"
+                  aria-live="polite"
                   className={
                     autosaveStatus.kind === 'error'
                       ? 'inline'
-                      : 'hidden 2xl:inline'
+                      : 'hidden lg:inline'
                   }
                 >
                   {autosaveText}
@@ -1418,12 +1583,50 @@ export function StudioEditorPanel({
                   className={
                     autosaveStatus.kind === 'error'
                       ? 'inline'
-                      : 'hidden 2xl:inline'
+                      : 'hidden lg:inline'
                   }
                 >
                   {autosaveText}
                 </span>
               </span>
+            )}
+
+            {otherCollabMembers.length > 0 && (
+              <div
+                aria-label={extCopy.collab.presenceLabel(otherCollabMembers.length)}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-border-subtle bg-surface-raised text-xs text-ink-secondary"
+              >
+                <div className="flex items-center -space-x-1.5">
+                  {otherCollabMembers.slice(0, 4).map((m) => (
+                    <span
+                      key={m.user_id}
+                      title={`${m.display_name} · ${
+                        m.state === 'editing'
+                          ? extCopy.collab.presenceEditingBadge
+                          : extCopy.collab.presenceViewingBadge
+                      } (${m.locale})`}
+                      className="relative inline-flex rounded-full ring-2 ring-surface-sheet"
+                    >
+                      <UserAvatar
+                        name={m.display_name || m.username}
+                        avatarUrl={m.avatar_url}
+                        sizeClass="w-5 h-5"
+                      />
+                      <span
+                        aria-hidden="true"
+                        className={`absolute -bottom-0.5 -end-0.5 w-2 h-2 rounded-full border border-surface-sheet ${
+                          m.state === 'editing'
+                            ? 'bg-accent-amber motion-safe:animate-pulse'
+                            : 'bg-accent-success'
+                        }`}
+                      />
+                    </span>
+                  ))}
+                </div>
+                <span className="font-mono text-xs tabular-nums hidden xl:inline">
+                  {extCopy.collab.presenceLabel(otherCollabMembers.length)}
+                </span>
+              </div>
             )}
           </div>
 
@@ -1707,12 +1910,45 @@ export function StudioEditorPanel({
             <button
               type="button"
               onClick={() => {
-                clearLocalDraft(selTrack, selChapter, selStep, editLocale);
+                clearLocalDraft(user.id, selTrack, selChapter, selStep, editLocale);
                 setRecoverableDraft(null);
               }}
               className="min-h-8 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink-primary hover:underline cursor-pointer"
             >
               {s.discardDraftBtn}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {remoteNotice && (
+        <div
+          role="status"
+          className="rounded-xl border border-border-ink/40 bg-action-subtle px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-primary"
+        >
+          <span className="font-medium">
+            {extCopy.collab.remoteSavedBanner(
+              remoteNotice.authorName,
+              remoteNotice.editSeq,
+            )}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setRemoteNotice(null);
+                void loadEditorStep(selTrack, selChapter, selStep, editLocale);
+              }}
+              className="min-h-7 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer"
+            >
+              {extCopy.collab.reloadLatestBtn}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRemoteNotice(null)}
+              className="min-h-7 px-2 py-1 text-xs text-ink-muted hover:text-ink-primary cursor-pointer"
+            >
+              {copy.cancelBtn}
             </button>
           </div>
         </div>
@@ -1747,7 +1983,7 @@ export function StudioEditorPanel({
                         onChange={(e) => handleTitleChange(e.target.value)}
                         placeholder={extCopy.studio.editorCanvasTitlePlaceholder}
                         style={{ fontFamily: 'var(--font-hand)' }}
-                        className="w-full min-w-0 bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted/60 focus:outline-none leading-tight tracking-tight"
+                        className="w-full min-w-0 bg-transparent border-0 p-0 text-2xl sm:text-3xl font-semibold text-ink-primary placeholder:text-ink-muted focus:outline-none leading-tight tracking-tight"
                       />
                       <MarkerUnderline variant="canvas" />
                       <textarea
@@ -1756,7 +1992,7 @@ export function StudioEditorPanel({
                         value={docSummary}
                         onChange={(e) => setDocSummary(e.target.value)}
                         placeholder={extCopy.studio.flowEditor.summaryInlinePlaceholder}
-                        className="flow-editor-textarea text-sm text-ink-secondary leading-relaxed placeholder:text-ink-muted/60"
+                        className="flow-editor-textarea text-sm text-ink-secondary leading-relaxed placeholder:text-ink-muted"
                       />
                     </div>
 
@@ -2005,7 +2241,7 @@ export function StudioEditorPanel({
       </div>
 
       {/* Revision History & Collaboration Audit Log Modal */}
-      {historyOpen && (
+      {historyMounted && (
         <RevisionHistoryModal
           open={historyOpen}
           onClose={() => setHistoryOpen(false)}
@@ -2031,7 +2267,15 @@ export function StudioEditorPanel({
         onClose={() => setConflictState(null)}
         onAdoptRemote={() => {
           setConflictState(null);
+          setRemoteNotice(null);
           void loadEditorStep(selTrack, selChapter, selStep, editLocale);
+        }}
+        onMergeIntoEditor={(mergedBody, currentEtag) => {
+          setConflictState(null);
+          setRemoteNotice(null);
+          setEditorMode('markdown');
+          setDocBody(mergedBody);
+          setDocEtag(currentEtag);
         }}
         onOverwriteWithLocal={(currentEtag) =>
           void performSaveStep(undefined, true, currentEtag)

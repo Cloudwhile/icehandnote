@@ -6,6 +6,7 @@ import { useCallback, useState } from 'react';
 import { api } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
 import { APP_VERSION, type LocaleCode, type UpdateCheckResponse } from '../../lib/types';
+import { toSafeHttpUrl } from '../../lib/urlSafety';
 import { IconCheck } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
@@ -71,12 +72,13 @@ export function UpdateCheckStatus({
         </span>
       )}
 
-      {!checking && !error && result && (
-        <>
-          {result.has_update ? (
-            compact ? (
+      {!checking && !error && result && (() => {
+        const safeReleaseUrl = toSafeHttpUrl(result.release_url);
+        return result.has_update ? (
+          compact ? (
+            safeReleaseUrl ? (
               <a
-                href={result.release_url}
+                href={safeReleaseUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-mono font-semibold text-link-ink no-underline hover:underline"
@@ -84,29 +86,18 @@ export function UpdateCheckStatus({
                 {st.updateAvailableBadge(result.latest_version)} ↗
               </a>
             ) : (
-              <>
-                <StatusBadge tone="warn" mono>
-                  {st.updateAvailableBadge(result.latest_version)}
-                </StatusBadge>
-                <a
-                  href={result.release_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
-                >
-                  {st.viewReleaseLink}
-                </a>
-              </>
+              <span className="font-mono font-semibold text-link-ink">
+                {st.updateAvailableBadge(result.latest_version)}
+              </span>
             )
           ) : (
             <>
-              <span className="font-semibold text-accent-success inline-flex items-center gap-1">
-                <IconCheck className="w-3.5 h-3.5" />
-                <span>{st.upToDateBadge}</span>
-              </span>
-              {!compact && (
+              <StatusBadge tone="warn" mono>
+                {st.updateAvailableBadge(result.latest_version)}
+              </StatusBadge>
+              {safeReleaseUrl && (
                 <a
-                  href={result.release_url}
+                  href={safeReleaseUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
@@ -115,9 +106,26 @@ export function UpdateCheckStatus({
                 </a>
               )}
             </>
-          )}
-        </>
-      )}
+          )
+        ) : (
+          <>
+            <span className="font-semibold text-accent-success inline-flex items-center gap-1">
+              <IconCheck className="w-3.5 h-3.5" />
+              <span>{st.upToDateBadge}</span>
+            </span>
+            {!compact && safeReleaseUrl && (
+              <a
+                href={safeReleaseUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
+              >
+                {st.viewReleaseLink}
+              </a>
+            )}
+          </>
+        );
+      })()}
     </span>
   );
 }

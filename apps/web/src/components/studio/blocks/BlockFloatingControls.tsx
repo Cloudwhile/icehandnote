@@ -730,11 +730,19 @@ export function InlineFormatToolbar({
 
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-  const openBelow = rect.top < 118;
+  const estimatedBarHalfW = Math.min(260, Math.floor((vw - 24) / 2));
+  const openBelow = rect.top < (subPanel ? 280 : 118);
+  const maxAllowedTop = Math.max(8, vh - (subPanel ? 260 : 68));
   const fixedTop = openBelow
-    ? Math.min(vh - 64, rect.bottom + 8)
+    ? Math.min(maxAllowedTop, rect.bottom + 8)
     : Math.max(8, rect.top - 48);
-  const fixedLeft = Math.max(12, Math.min(rect.left + rect.width / 2, vw - 220));
+  const fixedLeft = Math.max(
+    12,
+    Math.min(
+      rect.left + rect.width / 2 - estimatedBarHalfW,
+      vw - estimatedBarHalfW * 2 - 12,
+    ),
+  );
 
   const keepFocusOnPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
     if (e.button === 0) e.preventDefault();
@@ -753,9 +761,9 @@ export function InlineFormatToolbar({
   return (
     <div
       data-testid="flow-inline-toolbar"
-      className="fixed z-55 flex flex-col items-start gap-1.5 ui-popover-enter origin-bottom"
+      className="fixed z-(--z-popover) flex flex-col items-start gap-1.5 ui-popover-enter origin-bottom max-h-[calc(100dvh-1rem)] overflow-y-auto"
       style={{
-        left: `${Math.round(Math.max(12, fixedLeft - 140))}px`,
+        left: `${Math.round(fixedLeft)}px`,
         top: `${Math.round(fixedTop)}px`,
         maxWidth: 'calc(100dvw - 1.5rem)',
       }}
@@ -1021,6 +1029,7 @@ export function InlineFormatToolbar({
           <input
             ref={linkInputRef}
             type="url"
+            aria-label={rf.linkPlaceholder}
             value={linkDraft}
             placeholder={rf.linkPlaceholder}
             onCompositionEnd={(e) => {

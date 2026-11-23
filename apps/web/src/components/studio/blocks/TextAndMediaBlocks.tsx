@@ -10,6 +10,7 @@
 
 import {
   type DragEvent as ReactDragEvent,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -705,16 +706,21 @@ export function ImageBlockBody({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [showUrlField, setShowUrlField] = useState(false);
+  const urlInputId = useId();
+  const altInputId = useId();
+  const blockRef = useRef(block);
+  blockRef.current = block;
 
   const handleSelectFile = async (file: File) => {
     if (uploading) return;
     setUploading(true);
     try {
       const uploaded = await api.uploadStudioMedia(file);
+      const latest = blockRef.current;
       onUpdate({
-        ...block,
+        ...latest,
         src: uploaded.url,
-        alt: block.alt || file.name.replace(/\.[^.]+$/, ''),
+        alt: latest.alt || file.name.replace(/\.[^.]+$/, ''),
       });
       toast.success(extStudio.imageUploadedMsg);
     } catch (err) {
@@ -827,17 +833,21 @@ export function ImageBlockBody({
             variant="panel"
             align="end"
             showChevron={false}
-            triggerAriaLabel={v.imageAltLabel}
+            triggerAriaLabel={extFlow.stylePopoverBtn}
             triggerClassName="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold bg-surface-sheet/95 border border-border-ink/40 hover:border-border-ink text-ink-primary shadow-xs"
             triggerLabel={<span>{extFlow.stylePopoverBtn}</span>}
           >
             {({ close }) => (
               <div className="space-y-2.5 text-xs">
                 <div>
-                  <label className="block mb-1 font-semibold text-ink-secondary">
+                  <label
+                    htmlFor={urlInputId}
+                    className="block mb-1 font-semibold text-ink-secondary"
+                  >
                     {v.imageUrlLabel}
                   </label>
                   <input
+                    id={urlInputId}
                     type="text"
                     spellCheck={false}
                     value={block.src}
@@ -846,10 +856,14 @@ export function ImageBlockBody({
                   />
                 </div>
                 <div>
-                  <label className="block mb-1 font-semibold text-ink-secondary">
+                  <label
+                    htmlFor={altInputId}
+                    className="block mb-1 font-semibold text-ink-secondary"
+                  >
                     {v.imageAltLabel}
                   </label>
                   <input
+                    id={altInputId}
                     type="text"
                     value={block.alt}
                     onChange={(e) => onUpdate({ ...block, alt: e.target.value })}
@@ -885,10 +899,11 @@ export function ImageBlockBody({
             type="text"
             size={1}
             data-flow-input="primary"
+            aria-label={v.imageCaptionLabel}
             value={block.caption}
             onChange={(e) => onUpdate({ ...block, caption: e.target.value })}
             placeholder={v.imageCaptionLabel}
-            className="w-full min-w-0 bg-transparent border-0 p-0 text-center text-xs text-ink-muted placeholder:text-ink-muted/65 focus:outline-none"
+            className="w-full min-w-0 bg-transparent border-0 p-0 text-center text-xs text-ink-muted placeholder:text-ink-muted focus:outline-none"
           />
         </figcaption>
       </figure>
@@ -973,13 +988,16 @@ export function QuoteBlockBody({
 
 export function RawMarkdownBlockBody({
   block,
+  locale,
   onUpdate,
 }: {
   block: Extract<VisualBlock, { type: 'raw_markdown' }>;
+  locale: LocaleCode;
   onUpdate: (next: Extract<VisualBlock, { type: 'raw_markdown' }>) => void;
 }) {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   useAutoResizeTextarea(taRef, block.content);
+  const label = UI_COPY[locale].studio.visual.types.raw_markdown;
 
   return (
     <div className="rounded-xl p-3 bg-surface-raised border border-border-subtle">
@@ -987,6 +1005,8 @@ export function RawMarkdownBlockBody({
         ref={taRef}
         data-flow-input="primary"
         rows={3}
+        aria-label={label}
+        placeholder={label}
         value={block.content}
         onChange={(e) => onUpdate({ ...block, content: e.target.value })}
         spellCheck={false}

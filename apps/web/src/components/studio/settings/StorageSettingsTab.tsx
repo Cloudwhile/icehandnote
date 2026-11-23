@@ -370,8 +370,8 @@ export function StorageSettingsTab({ locale }: { locale: LocaleCode }) {
     <SettingsSectionCard>
       {!loaded ? (
         <div className="space-y-3" aria-busy="true">
-          <div className="h-9 w-56 rounded-xl bg-surface-raised animate-pulse" />
-          <div className="h-24 rounded-xl bg-surface-raised animate-pulse" />
+          <div className="h-9 w-56 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+          <div className="h-24 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
         </div>
       ) : (
         <div className="space-y-4">

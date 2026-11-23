@@ -190,10 +190,21 @@ export function StudioCatalogPanel({
                 </button>
               </div>
 
-              <div className="space-y-2">
-                {t.chapters
-                  .flatMap((ch) => ch.steps.map((st) => ({ ch, st })))
-                  .map(({ ch, st }) => (
+              {(() => {
+                const allSteps = t.chapters.flatMap((ch) =>
+                  ch.steps.map((st) => ({ ch, st })),
+                );
+                if (allSteps.length === 0) {
+                  return (
+                    <NotebookEmptyState
+                      title={s.catalogEmptyTitle}
+                      description={s.catalogEmptyDesc}
+                    />
+                  );
+                }
+                return (
+                  <div className="space-y-2">
+                    {allSteps.map(({ ch, st }) => (
                     <div
                       key={st.step_id}
                       className="p-3 rounded-xl bg-surface-sheet flex flex-wrap items-baseline justify-between gap-3"
@@ -323,7 +334,9 @@ export function StudioCatalogPanel({
                       </div>
                     </div>
                   ))}
-              </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         ))

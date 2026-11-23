@@ -163,6 +163,12 @@ export function StudioPage({
     () => searchParams.get('chapter') ?? '',
   );
   const [selStep, setSelStep] = useState(() => searchParams.get('step') ?? '');
+  const selTrackRef = useRef(selTrack);
+  selTrackRef.current = selTrack;
+  const selChapterRef = useRef(selChapter);
+  selChapterRef.current = selChapter;
+  const selStepRef = useRef(selStep);
+  selStepRef.current = selStep;
   const [editLocale, setEditLocale] = useState<LocaleCode>(() => {
     const raw = searchParams.get('edit_locale') ?? undefined;
     return isRegisteredLocale(raw) ? raw : locale;
@@ -183,6 +189,7 @@ export function StudioPage({
     useState<TakedownStepTarget | null>(null);
   const [takedownReasonInput, setTakedownReasonInput] = useState('');
   const [submittingTakedown, setSubmittingTakedown] = useState(false);
+  const submittingTakedownRef = useRef(false);
   const [moderationPatch, setModerationPatch] =
     useState<StepModerationPatch | null>(null);
 
@@ -325,29 +332,30 @@ export function StudioPage({
       const list = await api.studioOverview(locale);
       setTracks(list);
       if (list.length > 0) {
-        setSelTrack((prevTrack) => {
-          const matchedTrack = prevTrack
-            ? list.find((t) => t.slug === prevTrack)
+        const curTrack = selTrackRef.current;
+        const matchedTrack = curTrack
+          ? list.find((t) => t.slug === curTrack)
+          : undefined;
+        if (matchedTrack) {
+          const curCh = selChapterRef.current;
+          const matchedCh = curCh
+            ? matchedTrack.chapters.find((c) => c.slug === curCh)
             : undefined;
-          if (matchedTrack) {
-            const firstC = matchedTrack.chapters[0];
-            setSelChapter((prevCh) => {
-              const matchedCh = prevCh
-                ? matchedTrack.chapters.find((c) => c.slug === prevCh)
-                : undefined;
-              const resolvedCh = matchedCh ?? firstC;
-              setSelStep((prevStep) => prevStep || resolvedCh?.steps[0]?.slug || '');
-              return resolvedCh?.slug ?? '';
-            });
-            return matchedTrack.slug;
-          }
+          const resolvedCh = matchedCh ?? matchedTrack.chapters[0];
+          const nextChSlug = resolvedCh?.slug ?? '';
+          const curStep = selStepRef.current;
+          const resolvedStepSlug = curStep || resolvedCh?.steps[0]?.slug || '';
+          setSelTrack(matchedTrack.slug);
+          setSelChapter(nextChSlug);
+          setSelStep(resolvedStepSlug);
+        } else {
           const firstT = list[0];
           const firstC = firstT.chapters[0];
           const firstS = firstC?.steps[0];
+          setSelTrack(firstT.slug);
           setSelChapter(firstC?.slug ?? '');
           setSelStep(firstS?.slug ?? '');
-          return firstT.slug;
-        });
+        }
       }
       return list;
     } catch {
@@ -537,9 +545,14 @@ export function StudioPage({
 
   const handleConfirmTakedown = async (e: FormEvent) => {
     e.preventDefault();
-    if (!takedownTarget || !takedownReasonInput.trim() || submittingTakedown) {
+    if (
+      !takedownTarget ||
+      !takedownReasonInput.trim() ||
+      submittingTakedownRef.current
+    ) {
       return;
     }
+    submittingTakedownRef.current = true;
     setSubmittingTakedown(true);
     try {
       const reason = takedownReasonInput.trim();
@@ -562,6 +575,7 @@ export function StudioPage({
     } catch (err) {
       toast.error(err);
     } finally {
+      submittingTakedownRef.current = false;
       setSubmittingTakedown(false);
     }
   };

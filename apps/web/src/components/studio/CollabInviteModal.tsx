@@ -112,15 +112,15 @@ export function CollabInviteModal({
           titleId={titleId}
           title={c.inviteModalTitle}
           icon={<IconShield className="w-5 h-5 text-link-ink shrink-0" />}
-          closeLabel={ui.cancelBtn}
+          closeLabel={ui.closeLabel}
           onClose={onClose}
           handFont
         />
 
         {loading ? (
-          <div className="space-y-2.5 py-2">
-            <div className="h-12 rounded-xl bg-surface-raised animate-pulse" />
-            <div className="h-20 rounded-xl bg-surface-raised animate-pulse" />
+          <div className="space-y-2.5 py-2" aria-busy="true">
+            <div className="h-12 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
+            <div className="h-20 rounded-xl bg-surface-raised motion-safe:animate-pulse" />
           </div>
         ) : errorMsg ? (
           <div className="rounded-xl border border-accent-danger/40 bg-surface-raised p-4 space-y-2">

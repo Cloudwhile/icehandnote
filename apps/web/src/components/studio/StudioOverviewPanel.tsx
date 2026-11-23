@@ -256,9 +256,9 @@ export function StudioOverviewPanel({
                 return (
                   <li
                     key={`${item.trackSlug}/${item.chapterSlug}/${item.stepSlug}/${item.locale}`}
-                    className="px-5 py-3 flex items-center justify-between gap-3 hover:bg-surface-raised/50 transition-colors"
+                    className="px-5 py-3 flex flex-wrap items-center justify-between gap-2.5 hover:bg-surface-raised/50 transition-colors"
                   >
-                    <div className="min-w-0 flex-1 flex items-center gap-2.5">
+                    <div className="min-w-0 flex-1 flex flex-wrap items-center gap-2">
                       <span className="w-12 text-center py-0.5 rounded text-xs font-mono bg-surface-raised text-ink-secondary shrink-0">
                         {item.locale}
                       </span>
@@ -364,7 +364,7 @@ export function StudioOverviewPanel({
                           width: `${pct}%`,
                           backgroundColor:
                             pct === 100
-                              ? 'var(--palette-success-500)'
+                              ? 'var(--accent-success-ink)'
                               : 'var(--action-bg)',
                         }}
                       />
@@ -401,7 +401,7 @@ export function StudioOverviewPanel({
                   ) : (
                     <span
                       aria-hidden="true"
-                      className="inline-block w-24 h-3.5 rounded bg-surface-raised animate-pulse"
+                      className="inline-block w-24 h-3.5 rounded bg-surface-raised motion-safe:animate-pulse"
                     />
                   )}
                 </dd>

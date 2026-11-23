@@ -939,6 +939,14 @@ export function VisualBlockEditor({
         commitBlocks(latest);
         toast.success(extStudio.imageUploadedMsg);
       } catch (err) {
+        const rolledBack = blocksRef.current.filter(
+          (b) => !(b.id === imgBlock.id && b.type === 'image' && b.src === blobUrl),
+        );
+        commitBlocks(
+          rolledBack.length > 0
+            ? rolledBack
+            : [{ id: createVisualId(), type: 'paragraph', text: '', marginNote: '' }],
+        );
         toast.error(err);
       } finally {
         URL.revokeObjectURL(blobUrl);
@@ -1503,8 +1511,16 @@ export function VisualBlockEditor({
           };
 
           const updateCurrent = (nextBlock: VisualBlock) => {
-            const next = [...displayBlocks];
-            next[idx] = nextBlock;
+            const curList = blocksRef.current;
+            const targetIdx = curList.findIndex((b) => b.id === block.id);
+            if (targetIdx < 0) {
+              commitBlocks(
+                curList.map((b) => (b.id === nextBlock.id ? nextBlock : b)),
+              );
+              return;
+            }
+            const next = [...curList];
+            next[targetIdx] = nextBlock;
             commitBlocks(next);
           };
 
@@ -1749,6 +1765,7 @@ export function VisualBlockEditor({
                 {block.type === 'raw_markdown' && (
                   <RawMarkdownBlockBody
                     block={block}
+                    locale={locale}
                     onUpdate={(next) => updateCurrent(next)}
                   />
                 )}

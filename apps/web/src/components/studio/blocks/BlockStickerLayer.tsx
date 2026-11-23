@@ -440,7 +440,7 @@ export function BlockStickerLayer({
                 className={
                   st.locked
                     ? 'select-none'
-                    : 'ink-sticker-gizmo-handle select-none focus:outline-none'
+                    : 'ink-sticker-gizmo-handle select-none rounded-lg'
                 }
                 style={{
                   transform: st.flip ? 'scaleX(-1)' : undefined,
@@ -464,15 +464,15 @@ export function BlockStickerLayer({
                 <button
                   type="button"
                   data-testid="sticker-resize-handle"
-                  aria-label="Resize sticker"
-                  title="Resize sticker"
+                  aria-label={ext.resizeHandleAria}
+                  title={ext.resizeHandleAria}
                   onPointerDown={handleResizePointerDown}
                   onPointerMove={handleResizePointerMove}
                   onPointerUp={finishResizeDrag}
                   onLostPointerCapture={() => {
                     scaleDragRef.current = null;
                   }}
-                  className="ink-sticker-gizmo-handle absolute -bottom-2 -end-2 w-4 h-4 rounded-full bg-link-ink border-2 border-surface-sheet shadow-xs cursor-nwse-resize"
+                  className="ink-sticker-gizmo-handle ink-icon-target absolute -bottom-2 -end-2 w-5 h-5 rounded-full bg-link-ink border-2 border-surface-sheet shadow-(--shadow-control) cursor-nwse-resize"
                 />
               )}
             </div>
@@ -500,7 +500,7 @@ export function BlockStickerLayer({
               <div
                 data-testid="sticker-floating-toolbar"
                 onPointerDown={(e) => e.stopPropagation()}
-                className={`absolute ${toolbarPlacementClass} ${toolbarHorizClass} z-50 w-72 sm:w-80 p-2.5 rounded-2xl border-2 border-border-ink bg-surface-sheet shadow-lg space-y-2`}
+                className={`absolute ${toolbarPlacementClass} ${toolbarHorizClass} z-(--z-popover) w-72 sm:w-80 p-2.5 rounded-2xl border-2 border-border-ink bg-surface-sheet shadow-lg space-y-2`}
               >
                 {/* 12-Sprite Quick Picker */}
                 <div className="grid grid-cols-6 gap-1">
@@ -580,7 +580,8 @@ export function BlockStickerLayer({
                   </button>
                   <button
                     type="button"
-                    aria-label="Duplicate sticker"
+                    aria-label={ext.duplicateBtn}
+                    title={ext.duplicateBtn}
                     onClick={() => onDuplicateSticker(st.id)}
                     className="min-h-7 px-2 py-0.5 rounded-lg border border-border-subtle bg-surface-raised hover:border-border-ink text-ink-secondary cursor-pointer inline-flex items-center"
                   >
@@ -588,7 +589,8 @@ export function BlockStickerLayer({
                   </button>
                   <button
                     type="button"
-                    aria-label="Delete sticker"
+                    aria-label={ext.deleteBtn}
+                    title={ext.deleteBtn}
                     onClick={() => onDeleteSticker(st.id)}
                     className="ms-auto min-h-7 px-2 py-0.5 rounded-lg border border-border-subtle bg-surface-raised hover:border-accent-danger text-ink-muted hover:text-accent-danger cursor-pointer inline-flex items-center"
                   >
@@ -601,6 +603,7 @@ export function BlockStickerLayer({
                   <input
                     type="text"
                     data-testid="pixel-sticker-caption-input"
+                    aria-label={ext.captionPlaceholder}
                     value={st.caption ?? ''}
                     onChange={(e) =>
                       onUpdateSticker(st.id, { caption: e.target.value })

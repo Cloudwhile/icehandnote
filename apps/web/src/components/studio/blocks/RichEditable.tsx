@@ -350,17 +350,20 @@ export function RichEditable({
     });
   };
 
+  const syncSelectionRef = useRef(syncSelectionAndCaret);
+  syncSelectionRef.current = syncSelectionAndCaret;
+
   useEffect(() => {
     const onDocSelectionChange = () => {
       const el = elRef.current;
       if (!el || document.activeElement !== el || isComposingRef.current) return;
-      syncSelectionAndCaret();
+      syncSelectionRef.current();
     };
     document.addEventListener('selectionchange', onDocSelectionChange);
     return () => {
       document.removeEventListener('selectionchange', onDocSelectionChange);
     };
-  });
+  }, []);
 
   const emitDomValue = () => {
     const el = elRef.current;
@@ -596,7 +599,7 @@ export function RichEditable({
       ref={elRef}
       role="textbox"
       aria-multiline={multiline}
-      aria-label={ariaLabel}
+      aria-label={ariaLabel || placeholder || undefined}
       contentEditable
       suppressContentEditableWarning
       data-rich-editable="true"

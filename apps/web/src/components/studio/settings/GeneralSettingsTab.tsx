@@ -14,6 +14,7 @@ import type {
   LocaleCode,
   SiteSettingsDto,
 } from '../../../lib/types';
+import { toSafeMediaUrl } from '../../../lib/urlSafety';
 import { FileUploadButton } from '../../ui/FileUploadButton';
 import {
   CheckboxPillGroup,
@@ -142,9 +143,9 @@ export function GeneralSettingsTab({
             {st.siteLogoLabel}
           </label>
           <div className="relative flex flex-wrap items-center gap-2.5">
-            {draft.logo_url?.trim() && (
+            {toSafeMediaUrl(draft.logo_url) && (
               <img
-                src={draft.logo_url}
+                src={toSafeMediaUrl(draft.logo_url)}
                 alt=""
                 className="w-9 h-9 rounded-xl object-contain border border-border-subtle bg-surface-raised p-1 shrink-0"
               />

@@ -181,7 +181,7 @@ export function StudioSidebarContent({
                 className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
               >
                 <IconChevronDown
-                  className={`w-3.5 h-3.5 transition-transform ${
+                  className={`w-3.5 h-3.5 motion-safe:transition-transform ${
                     editorTreeOpen ? '' : '-rotate-90'
                   }`}
                 />
@@ -212,7 +212,7 @@ export function StudioSidebarContent({
                         <summary className="list-none px-1.5 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer select-none text-xs font-semibold text-ink-primary hover:bg-surface-sheet/70">
                           <span
                             aria-hidden="true"
-                            className="text-xs text-ink-muted transition-transform group-open:rotate-90 shrink-0"
+                            className="text-xs text-ink-muted motion-safe:transition-transform group-open:rotate-90 shrink-0"
                           >
                             ▸
                           </span>
@@ -323,15 +323,20 @@ export function StudioSidebarContent({
                                             </StatusBadge>
                                           )}
                                           {hasDrift && (
-                                            <span
-                                              aria-label={s.hasDriftTitle}
-                                              title={s.hasDriftTitle}
-                                              className="w-2 h-2 rounded-full shrink-0"
-                                              style={{
-                                                backgroundColor:
-                                                  'var(--marker-h3)',
-                                              }}
-                                            />
+                                            <>
+                                              <span
+                                                aria-hidden="true"
+                                                title={s.hasDriftTitle}
+                                                className="w-2 h-2 rounded-full shrink-0"
+                                                style={{
+                                                  backgroundColor:
+                                                    'var(--marker-h3)',
+                                                }}
+                                              />
+                                              <span className="sr-only">
+                                                {s.hasDriftTitle}
+                                              </span>
+                                            </>
                                           )}
                                         </button>
                                       </li>
@@ -415,7 +420,7 @@ export function StudioSidebarContent({
                     className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer shrink-0 transition-colors"
                   >
                     <IconChevronDown
-                      className={`w-3.5 h-3.5 transition-transform ${
+                      className={`w-3.5 h-3.5 motion-safe:transition-transform ${
                         settingsTreeOpen ? '' : '-rotate-90'
                       }`}
                     />

@@ -77,8 +77,9 @@ export function StepsBlockBody({
             size={1}
             value={block.title}
             onChange={(e) => onUpdate({ ...block, title: e.target.value })}
+            aria-label={v.stepsTitlePlaceholder || v.types.steps}
             placeholder={v.stepsTitlePlaceholder || v.types.steps}
-            className="flex-1 min-w-0 bg-transparent border-0 p-0 text-sm font-semibold text-ink-primary placeholder:text-ink-muted/70 focus:outline-none"
+            className="flex-1 min-w-0 bg-transparent border-0 p-0 text-sm font-semibold text-ink-primary placeholder:text-ink-muted focus:outline-none"
           />
           <span className="font-mono text-xs text-ink-muted tabular-nums shrink-0">
             {block.items.filter((it) => it.defaultChecked).length}/{block.items.length}
@@ -368,8 +369,9 @@ export function AlertBlockBody({
               size={1}
               value={block.title}
               onChange={(e) => onUpdate({ ...block, title: e.target.value })}
+              aria-label={v.alertTitlePlaceholder}
               placeholder={v.alertTitlePlaceholder}
-              className="flex-1 min-w-24 bg-transparent border-0 p-0 font-hand text-base sm:text-lg font-semibold leading-snug focus:outline-none placeholder:opacity-55"
+              className="flex-1 min-w-24 bg-transparent border-0 p-0 font-hand text-base sm:text-lg font-semibold leading-snug focus:outline-none"
               style={{ color: tokens.title }}
             />
           </div>
@@ -406,8 +408,9 @@ export function AlertBlockBody({
                 onChange={(e) =>
                   onUpdate({ ...block, detailSummary: e.target.value })
                 }
+                aria-label={v.alertDetailSummaryPlaceholder}
                 placeholder={v.alertDetailSummaryPlaceholder}
-                className="w-full bg-transparent border-0 p-0 text-xs font-semibold focus:outline-none placeholder:opacity-65"
+                className="w-full bg-transparent border-0 p-0 text-xs font-semibold focus:outline-none"
                 style={{ color: tokens.title }}
               />
               <div style={{ color: tokens.body }}>
@@ -445,12 +448,17 @@ export function CodeCardBlockBody({
 }) {
   const v = UI_COPY[locale].studio.visual;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const escapeTabBypassRef = useRef(false);
   const sheetStyle = normalizeCodeCardStyle(block.style);
   useAutoResizeTextarea(taRef, block.code, 384);
 
   const showMarginSticky = Boolean(block.marginNote.trim()) || flow.marginNoteOpen;
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape') {
+      escapeTabBypassRef.current = true;
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
       flow.onCommitAndInsertAfter(
@@ -462,6 +470,10 @@ export function CodeCardBlockBody({
     }
 
     if (e.key === 'Tab' && !e.shiftKey) {
+      if (escapeTabBypassRef.current) {
+        escapeTabBypassRef.current = false;
+        return;
+      }
       e.preventDefault();
       const el = e.currentTarget;
       const start = el.selectionStart ?? block.code.length;
@@ -472,7 +484,9 @@ export function CodeCardBlockBody({
       requestAnimationFrame(() => {
         el.setSelectionRange(start + 2, start + 2);
       });
+      return;
     }
+    escapeTabBypassRef.current = false;
   };
 
   return (
@@ -493,6 +507,7 @@ export function CodeCardBlockBody({
             size={1}
             value={block.filename}
             onChange={(e) => onUpdate({ ...block, filename: e.target.value })}
+            aria-label={v.codeFilePlaceholder}
             placeholder={v.codeFilePlaceholder}
             className="font-hand text-sm sm:text-base font-semibold min-w-16 max-w-full flex-1 px-2 py-0.5 rounded-md border border-dashed focus:outline-none"
             style={{
@@ -537,9 +552,13 @@ export function CodeCardBlockBody({
             value={block.code}
             onChange={(e) => onUpdate({ ...block, code: e.target.value })}
             onKeyDown={handleKeyDown}
+            onBlur={() => {
+              escapeTabBypassRef.current = false;
+            }}
+            aria-label={v.codeBodyPlaceholder}
             placeholder={v.codeBodyPlaceholder}
             spellCheck={false}
-            className="flow-editor-textarea flow-editor-textarea--code font-mono text-xs sm:text-sm placeholder:opacity-50"
+            className="flow-editor-textarea flow-editor-textarea--code font-mono text-xs sm:text-sm"
             style={{ color: 'var(--code-fg)' }}
           />
         </div>
