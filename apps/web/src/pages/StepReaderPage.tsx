@@ -16,7 +16,7 @@ import {
   PixelPaperPlaneSticker,
   PixelStarStampSticker,
 } from '../components/notebook/PixelStickers';
-import { IconCheck, IconHeart, IconHome, IconMenu, IconPen } from '../components/ui/Icons';
+import { IconCheck, IconClose, IconHeart, IconHome, IconMenu, IconPen } from '../components/ui/Icons';
 import { useToast } from '../components/ui/ToastProvider';
 import { UserAvatar } from '../components/ui/UserAvatar';
 import {
@@ -133,6 +133,14 @@ export function StepReaderPage({
   const [marginNotes, setMarginNotes] = useState<UserMarginNoteDto[]>([]);
   const [selectionDraft, setSelectionDraft] = useState<SelectionAnchorDraft | null>(null);
   const [selectionComposing, setSelectionComposing] = useState(false);
+  const selectionComposingRef = useRef(false);
+  selectionComposingRef.current = selectionComposing;
+  const [isMobileSelectionUi, setIsMobileSelectionUi] = useState(() =>
+    typeof window !== 'undefined'
+      ? window.innerWidth < 640 || Boolean(window.matchMedia?.('(pointer: coarse)').matches)
+      : false,
+  );
+  const [keyboardBottomInset, setKeyboardBottomInset] = useState(0);
   const [likes, setLikes] = useState(0);
   const [likedSession, setLikedSession] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
@@ -370,6 +378,48 @@ export function StepReaderPage({
     toast,
   ]);
 
+  // Track narrow viewports / coarse touch pointers for bottom-docked selection toolbar
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const coarseMq = window.matchMedia?.('(pointer: coarse)') ?? null;
+    const updateMode = () => {
+      setIsMobileSelectionUi(
+        window.innerWidth < 640 || Boolean(coarseMq?.matches),
+      );
+    };
+    updateMode();
+    window.addEventListener('resize', updateMode, { passive: true });
+    coarseMq?.addEventListener('change', updateMode);
+    return () => {
+      window.removeEventListener('resize', updateMode);
+      coarseMq?.removeEventListener('change', updateMode);
+    };
+  }, []);
+
+  // Track visualViewport height offset while selection popover/composer is open above virtual keyboard
+  useEffect(() => {
+    if (!selectionDraft || typeof window === 'undefined') {
+      setKeyboardBottomInset(0);
+      return;
+    }
+    const vv = window.visualViewport;
+    if (!vv) {
+      setKeyboardBottomInset(0);
+      return;
+    }
+    const updateInset = () => {
+      const inset = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
+      setKeyboardBottomInset(inset);
+    };
+    updateInset();
+    vv.addEventListener('resize', updateInset);
+    vv.addEventListener('scroll', updateInset);
+    return () => {
+      vv.removeEventListener('resize', updateInset);
+      vv.removeEventListener('scroll', updateInset);
+    };
+  }, [selectionDraft]);
+
   // Capture passage text selections for semantic `<mark>` highlight & annotation popover
   useEffect(() => {
     if (!detail?.step_id || !siteSettings.enable_margin_notes) {
@@ -377,6 +427,8 @@ export function StepReaderPage({
       setSelectionComposing(false);
       return;
     }
+
+    let selChangeTimer: number | null = null;
 
     const handleSelectionCheck = (e: Event) => {
       const target = e.target;
@@ -405,6 +457,36 @@ export function StepReaderPage({
       });
     };
 
+    const handleSelectionChange = () => {
+      if (selectionComposingRef.current) return;
+      const activeEl = document.activeElement;
+      if (
+        activeEl instanceof Element &&
+        activeEl.closest('[data-selection-popover="true"]')
+      ) {
+        return;
+      }
+      if (selChangeTimer !== null) {
+        window.clearTimeout(selChangeTimer);
+      }
+      selChangeTimer = window.setTimeout(() => {
+        selChangeTimer = null;
+        if (selectionComposingRef.current) return;
+        const container = articleSheetRef.current;
+        if (!container) return;
+        const captured = captureSelectionWithinContainer(
+          container,
+          detail.step_id,
+          locale,
+          detail.synced_revision,
+        );
+        setSelectionDraft(captured);
+        if (!captured) {
+          setSelectionComposing(false);
+        }
+      }, 140);
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setSelectionDraft(null);
@@ -413,22 +495,36 @@ export function StepReaderPage({
     };
 
     const handleViewportChange = () => {
-      setSelectionDraft((prev) => {
-        if (!prev) return null;
-        return selectionComposing ? prev : null;
-      });
+      if (selectionComposingRef.current) return;
+      const container = articleSheetRef.current;
+      if (!container) {
+        setSelectionDraft(null);
+        return;
+      }
+      const captured = captureSelectionWithinContainer(
+        container,
+        detail.step_id,
+        locale,
+        detail.synced_revision,
+      );
+      setSelectionDraft(captured);
     };
 
     document.addEventListener('mouseup', handleSelectionCheck);
     document.addEventListener('touchend', handleSelectionCheck);
     document.addEventListener('keyup', handleSelectionCheck);
+    document.addEventListener('selectionchange', handleSelectionChange);
     document.addEventListener('keydown', handleKeyDown);
     window.addEventListener('scroll', handleViewportChange, { passive: true });
     window.addEventListener('resize', handleViewportChange, { passive: true });
     return () => {
+      if (selChangeTimer !== null) {
+        window.clearTimeout(selChangeTimer);
+      }
       document.removeEventListener('mouseup', handleSelectionCheck);
       document.removeEventListener('touchend', handleSelectionCheck);
       document.removeEventListener('keyup', handleSelectionCheck);
+      document.removeEventListener('selectionchange', handleSelectionChange);
       document.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('scroll', handleViewportChange);
       window.removeEventListener('resize', handleViewportChange);
@@ -437,7 +533,6 @@ export function StepReaderPage({
     detail?.step_id,
     detail?.synced_revision,
     locale,
-    selectionComposing,
     siteSettings.enable_margin_notes,
   ]);
 
@@ -861,7 +956,7 @@ export function StepReaderPage({
     <>
       <div id="reading-progress" aria-hidden="true" />
 
-      <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-16 flex items-start gap-8">
+      <div className="w-full max-w-6xl mx-auto px-3.5 sm:px-6 pt-4 sm:pt-6 pb-20 sm:pb-16 flex items-start gap-8">
         <ChapterSidebarAndDrawer
           locale={locale}
           trackSlug={detail.track_slug}
@@ -907,7 +1002,7 @@ export function StepReaderPage({
                     <SafeHtml
                       as="span"
                       html={detail.title}
-                      className="truncate max-w-[16rem] sm:max-w-[26rem]"
+                      className="truncate max-w-[12rem] sm:max-w-[26rem]"
                     />
                   </Link>
                 </li>
@@ -919,7 +1014,7 @@ export function StepReaderPage({
               onClick={() => setMobileDrawerOpen(true)}
               aria-expanded={mobileDrawerOpen}
               aria-controls="mobile-chapter-drawer"
-              className="lg:hidden min-h-8 px-3 py-1.5 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer"
+              className="lg:hidden min-h-9 px-3 py-1.5 rounded-xl text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer ink-icon-target"
             >
               <IconMenu className="w-3.5 h-3.5 text-ink-secondary" />
               <span>{copy.chapterDrawerButton}</span>
@@ -964,7 +1059,7 @@ export function StepReaderPage({
           <article className="notebook-sheet-stack">
             <div
               ref={articleSheetRef}
-              className="notebook-sheet-card relative p-6 sm:p-10"
+              className="notebook-sheet-card relative p-4 sm:p-8 lg:p-10"
             >
               {/* Peeking Pixel Cat Bookmark perched at upper-right sheet edge */}
               <div
@@ -1196,7 +1291,7 @@ export function StepReaderPage({
                         type="button"
                         onClick={() => void handleLike()}
                         aria-pressed={likedSession}
-                        className="min-h-9 px-4 py-2 rounded-full text-xs font-semibold ink-btn-secondary inline-flex items-center gap-2 cursor-pointer"
+                        className="min-h-10 sm:min-h-9 px-4 py-2 rounded-full text-xs font-semibold ink-btn-secondary inline-flex items-center gap-2 cursor-pointer"
                       >
                         <span
                           key={likedSession ? 'liked' : 'idle'}
@@ -1259,8 +1354,8 @@ export function StepReaderPage({
                   }
                 />
 
-                {/* Directional Navigation Row (One Primary Action on the right!) */}
-                <div className="flex flex-wrap items-center justify-between gap-4 pt-5 border-t border-dashed border-border-subtle">
+                {/* Directional Navigation Row (One Primary Action on the right / top on mobile) */}
+                <div className="flex flex-col-reverse sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-3 sm:gap-4 pt-5 border-t border-dashed border-border-subtle">
                   {detail.prev_step ? (
                     <button
                       type="button"
@@ -1274,9 +1369,11 @@ export function StepReaderPage({
                           'backward',
                         );
                       }}
-                      className="min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
+                      className="w-full sm:w-auto justify-center inline-flex items-center min-h-11 sm:min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
                     >
-                      {copy.prevStep} · <SafeHtml as="span" html={detail.prev_step.title} />
+                      <span>
+                        {copy.prevStep} · <SafeHtml as="span" html={detail.prev_step.title} />
+                      </span>
                     </button>
                   ) : (
                     <span className="hidden sm:inline-flex items-center text-ink-muted">
@@ -1284,7 +1381,7 @@ export function StepReaderPage({
                     </span>
                   )}
 
-                  <div className="flex items-center gap-3 ms-auto">
+                  <div className="flex items-center gap-3 w-full sm:w-auto sm:ms-auto">
                     {detail.prev_step && (
                       <span className="hidden sm:inline-flex" aria-hidden="true">
                         <PixelPaperPlaneSticker size={24} />
@@ -1293,7 +1390,7 @@ export function StepReaderPage({
                     <button
                       type="button"
                       onClick={handleAdvance}
-                      className="min-h-10 px-5 py-2.5 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer"
+                      className="w-full sm:w-auto justify-center inline-flex items-center min-h-11 sm:min-h-10 px-5 py-2.5 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer"
                     >
                       {detail.next_step
                         ? copy.nextStepPrimary
@@ -1319,24 +1416,47 @@ export function StepReaderPage({
                   setSelectionDraft(null);
                 }
               }}
-              style={{
-                position: 'fixed',
-                top: `${Math.max(
-                  16,
-                  Math.min(
-                    window.innerHeight - (selectionComposing ? 360 : 68),
-                    selectionDraft.rect.top - 52,
-                  ),
-                )}px`,
-                left: `${Math.max(
-                  12,
-                  Math.min(
-                    window.innerWidth - (selectionComposing ? 340 : 210),
-                    selectionDraft.rect.left - (selectionComposing ? 160 : 95),
-                  ),
-                )}px`,
-              }}
-              className="z-(--z-popover) max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-xl border border-border-ink bg-surface-sheet shadow-(--shadow-floating) p-2"
+              style={
+                isMobileSelectionUi
+                  ? selectionComposing
+                    ? {
+                        position: 'fixed',
+                        left: 'max(0.75rem, env(safe-area-inset-left, 0px))',
+                        right: 'max(0.75rem, env(safe-area-inset-right, 0px))',
+                        bottom: `calc(max(0.75rem, env(safe-area-inset-bottom, 0px)) + ${keyboardBottomInset}px)`,
+                        maxWidth: '26rem',
+                        marginInline: 'auto',
+                      }
+                    : {
+                        position: 'fixed',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        bottom: `calc(max(1rem, env(safe-area-inset-bottom, 0px) + 0.75rem) + ${keyboardBottomInset}px)`,
+                        maxWidth: 'calc(100dvw - 1.5rem)',
+                      }
+                  : {
+                      position: 'fixed',
+                      top: `${Math.max(
+                        16,
+                        Math.min(
+                          window.innerHeight - (selectionComposing ? 360 : 68),
+                          selectionDraft.rect.top - 52,
+                        ),
+                      )}px`,
+                      left: `${Math.max(
+                        12,
+                        Math.min(
+                          window.innerWidth - (selectionComposing ? 340 : 210),
+                          selectionDraft.rect.left - (selectionComposing ? 160 : 95),
+                        ),
+                      )}px`,
+                    }
+              }
+              className={`z-(--z-popover) overflow-y-auto overscroll-contain rounded-xl border border-border-ink bg-surface-sheet shadow-(--shadow-floating) p-2 ${
+                isMobileSelectionUi && selectionComposing
+                  ? 'max-h-[min(75dvh,calc(100dvh-1.5rem))]'
+                  : 'max-h-[calc(100dvh-2rem)]'
+              }`}
             >
               {!selectionComposing ? (
                 <div className="flex items-center gap-1.5">
@@ -1356,7 +1476,9 @@ export function StepReaderPage({
                         target: draft.target,
                       });
                     }}
-                    className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer"
+                    className={`${
+                      isMobileSelectionUi ? 'min-h-10 px-3.5 py-2' : 'min-h-8 px-3 py-1'
+                    } rounded-lg text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap`}
                   >
                     <span
                       aria-hidden="true"
@@ -1368,14 +1490,37 @@ export function StepReaderPage({
                   <button
                     type="button"
                     onClick={() => setSelectionComposing(true)}
-                    className="min-h-8 px-3 py-1 rounded-lg text-xs font-semibold bg-surface-raised border border-border-ink text-ink-primary hover:border-action-bg inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    className={`${
+                      isMobileSelectionUi ? 'min-h-10 px-3.5 py-2' : 'min-h-8 px-3 py-1'
+                    } rounded-lg text-xs font-semibold bg-surface-raised border border-border-ink text-ink-primary hover:border-action-bg inline-flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap`}
                   >
                     <IconPen className="w-3.5 h-3.5" />
                     <span>{extCopy.notes.annotateSelectionBtn}</span>
                   </button>
+                  {isMobileSelectionUi && (
+                    <button
+                      type="button"
+                      aria-label={copy.closeLabel}
+                      title={copy.closeLabel}
+                      onClick={() => {
+                        window.getSelection()?.removeAllRanges();
+                        setSelectionComposing(false);
+                        setSelectionDraft(null);
+                      }}
+                      className="w-9 h-9 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer shrink-0 ink-icon-target"
+                    >
+                      <IconClose className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               ) : (
-                <div className="w-[min(20rem,calc(100vw-2rem))] space-y-2">
+                <div
+                  className={
+                    isMobileSelectionUi
+                      ? 'w-full space-y-2'
+                      : 'w-[min(20rem,calc(100dvw-2rem))] space-y-2'
+                  }
+                >
                   <blockquote className="m-0 px-2.5 py-1.5 rounded-lg bg-surface-raised border-s-2 border-border-ink text-xs text-ink-secondary line-clamp-2 italic">
                     {selectionDraft.exact}
                   </blockquote>

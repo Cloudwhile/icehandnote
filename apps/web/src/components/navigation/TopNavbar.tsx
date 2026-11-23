@@ -110,7 +110,7 @@ export function TopNavbar({
 
   return (
     <header
-      className="w-full sticky top-0 z-30 pt-3 px-3 sm:px-6"
+      className="w-full sticky top-0 z-30 pt-[max(0.75rem,env(safe-area-inset-top,0px))] ps-[max(0.75rem,env(safe-area-inset-left,0px))] pe-[max(0.75rem,env(safe-area-inset-right,0px))] sm:px-6"
       style={{
         background:
           'linear-gradient(to bottom, var(--surface-page) 62%, transparent)',
@@ -255,7 +255,7 @@ export function TopNavbar({
               <Link
                 to={`/${locale}`}
                 aria-current={isHome ? 'page' : undefined}
-                className={`block no-underline px-3 py-2 rounded-lg text-sm ${
+                className={`flex items-center min-h-11 no-underline px-3 py-2.5 rounded-lg text-sm ${
                   isHome
                     ? 'font-semibold bg-action-subtle text-ink-primary'
                     : 'text-ink-secondary hover:bg-surface-raised hover:text-ink-primary'
@@ -267,7 +267,7 @@ export function TopNavbar({
                 <Link
                   to={`/${locale}/studio`}
                   aria-current={isStudio ? 'page' : undefined}
-                  className={`flex items-center gap-2 no-underline px-3 py-2 rounded-lg text-sm ${
+                  className={`flex items-center gap-2 min-h-11 no-underline px-3 py-2.5 rounded-lg text-sm ${
                     isStudio
                       ? 'font-semibold bg-action-subtle text-ink-primary'
                       : 'text-ink-secondary hover:bg-surface-raised hover:text-ink-primary'
@@ -284,7 +284,7 @@ export function TopNavbar({
                     setMobileMenuOpen(false);
                     onOpenNotes();
                   }}
-                  className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-ink-secondary hover:text-ink-primary cursor-pointer transition-colors"
+                  className="w-full text-start flex items-center gap-2 min-h-11 px-3 py-2.5 rounded-lg text-sm text-ink-secondary hover:text-ink-primary cursor-pointer transition-colors"
                 >
                   <IconBook className="w-4 h-4 shrink-0" />
                   <span>{notesCopy.myNotesBtn}</span>
@@ -295,7 +295,7 @@ export function TopNavbar({
                   href={safeBlogOriginUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="block no-underline px-3 py-2 rounded-lg text-sm text-ink-secondary hover:text-ink-primary"
+                  className="flex items-center min-h-11 no-underline px-3 py-2.5 rounded-lg text-sm text-ink-secondary hover:text-ink-primary"
                 >
                   {siteSettings.blog_nav_label}
                 </a>
@@ -335,7 +335,7 @@ export function TopNavbar({
                         setMobileMenuOpen(false);
                         onOpenProfile();
                       }}
-                      className="flex-1 min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer"
+                      className="flex-1 min-h-10 px-3 py-2 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer"
                     >
                       {profCopy.menuItem}
                     </button>
@@ -345,7 +345,7 @@ export function TopNavbar({
                         setMobileMenuOpen(false);
                         onLogout();
                       }}
-                      className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer shrink-0"
+                      className="min-h-10 px-3 py-2 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer shrink-0"
                     >
                       {copy.logoutBtn}
                     </button>

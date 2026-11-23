@@ -104,11 +104,11 @@ export function HomePage({
       : null;
 
   return (
-    <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-14 space-y-16">
+    <main className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-14 space-y-10 sm:space-y-16">
       {/* 1. Dusk Sketch Hero + Pixel Desk Stickers + Parallax Wave Divider */}
       <section className="notebook-sheet-stack">
         <div
-          className="notebook-sheet-card relative overflow-hidden pt-8 sm:pt-12 pb-16 px-6 sm:px-10"
+          className="notebook-sheet-card relative overflow-hidden pt-6 sm:pt-12 pb-14 sm:pb-16 px-5 sm:px-10"
           style={{
             background:
               'linear-gradient(160deg, var(--hero-grad-start) 0%, var(--surface-sheet) 72%)',
@@ -191,7 +191,7 @@ export function HomePage({
                   if (!primaryHref) return;
                   runDirectionalTransition(() => navigate(primaryHref), 'forward');
                 }}
-                className="min-h-10 px-5 py-2.5 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                className="min-h-11 sm:min-h-10 px-5 py-2.5 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {copy.heroPrimaryCta}
               </button>
@@ -199,7 +199,7 @@ export function HomePage({
               <button
                 type="button"
                 onClick={onOpenSearch}
-                className="min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
+                className="min-h-11 sm:min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
               >
                 {formatShortcutK(copy.heroSecondaryCta)}
               </button>

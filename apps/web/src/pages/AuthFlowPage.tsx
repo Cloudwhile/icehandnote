@@ -181,7 +181,7 @@ export function AuthFlowPage({
             : '';
 
   return (
-    <div className="min-h-svh w-full flex flex-col auth-canvas-bg">
+    <div className="min-h-svh w-full flex flex-col auth-canvas-bg pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]">
       {/* Minimal Distraction-Free Auth Top Bar */}
       <header className="w-full max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
         <SiteBrand
@@ -223,7 +223,7 @@ export function AuthFlowPage({
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-6 sm:py-10">
         <div className="w-full max-w-md mx-auto">
           <div className="notebook-sheet-stack">
-            <div className="notebook-sheet-card p-6 sm:p-8">
+            <div className="notebook-sheet-card p-5 sm:p-8">
               <div className="mb-6">
                 <div className="flex items-center gap-2.5">
                   {mode === 'login' && hasLoginChallenge && (

@@ -79,6 +79,7 @@ export function CommandSearchDialog({
       onClose={onClose}
       ariaLabelledBy={titleId}
       maxWidthClass="max-w-lg"
+      mobilePlacement="top"
     >
       <div className="p-4 sm:p-5 space-y-4">
         <ModalHeader
@@ -109,7 +110,7 @@ export function CommandSearchDialog({
               }
             }}
             placeholder={copy.searchPlaceholder}
-            className={`w-full px-3.5 py-2.5 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-sm ink-input-inset ${
+            className={`w-full px-3.5 py-2.5 rounded-xl bg-surface-raised text-ink-primary border border-border-ink text-base sm:text-sm ink-input-inset ${
               query ? 'pe-10' : ''
             }`.trim()}
           />
@@ -129,7 +130,7 @@ export function CommandSearchDialog({
         </search>
 
         {query.trim() && (
-          <div className="max-h-80 overflow-y-auto overscroll-contain space-y-2">
+          <div className="max-h-[min(20rem,52dvh)] overflow-y-auto overscroll-contain space-y-2">
             <div className="sr-only" aria-live="polite" aria-atomic="true">
               {!loading && hits.length === 0 ? copy.searchEmptyTitle : ''}
             </div>

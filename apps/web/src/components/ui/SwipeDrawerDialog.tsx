@@ -260,7 +260,7 @@ export function SwipeDrawerDialog({
           data-surface={surface}
           className="swipe-drawer-sheet"
         >
-          <div className="px-4 py-3 border-b border-border-subtle flex items-center justify-between gap-2 bg-surface-sheet shrink-0">
+          <div className="swipe-drawer-header px-4 py-3 border-b border-border-subtle flex items-center justify-between gap-2 bg-surface-sheet shrink-0">
             <span
               className="inline-flex items-center gap-2 text-sm font-semibold text-ink-primary"
               style={{ fontFamily: 'var(--font-hand)' }}
@@ -273,7 +273,7 @@ export function SwipeDrawerDialog({
               type="button"
               aria-label={closeAriaLabel}
               onClick={slideClose}
-              className="w-8 h-8 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer transition-colors"
+              className="w-9 h-9 ink-icon-target rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer transition-colors"
             >
               <IconClose className="w-4 h-4" />
             </button>

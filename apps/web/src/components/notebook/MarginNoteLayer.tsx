@@ -235,14 +235,14 @@ export function MarginStickerCard({
           </div>
 
           {(onEdit || onDelete) && (
-            <div className="flex items-center gap-0.5 -me-1 -mt-1 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-1 -me-1 -mt-1 shrink-0">
               {onEdit && (
                 <button
                   type="button"
                   aria-label={editAriaLabel}
                   title={editAriaLabel}
                   onClick={onEdit}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
+                  className="w-8 h-8 sm:w-7 sm:h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
                   style={{ color: tokens.badgeFg }}
                 >
                   <IconPen className="w-3.5 h-3.5" />
@@ -254,7 +254,7 @@ export function MarginStickerCard({
                   aria-label={deleteAriaLabel}
                   title={deleteAriaLabel}
                   onClick={onDelete}
-                  className="w-7 h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
+                  className="w-8 h-8 sm:w-7 sm:h-7 rounded-lg inline-flex items-center justify-center cursor-pointer hover:bg-surface-sheet/50 transition-colors ink-icon-target"
                   style={{ color: tokens.badgeFg }}
                 >
                   <IconClose className="w-3.5 h-3.5" />
@@ -379,7 +379,7 @@ export function MarginNoteEditorForm({
               type="button"
               aria-pressed={selected}
               onClick={() => setTag(t)}
-              className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold border inline-flex items-center gap-1 cursor-pointer transition-colors"
+              className="min-h-8 sm:min-h-7 px-2.5 sm:px-2 py-0.5 rounded-lg text-xs font-semibold border inline-flex items-center gap-1 cursor-pointer transition-colors"
               style={
                 selected
                   ? {
@@ -411,7 +411,7 @@ export function MarginNoteEditorForm({
               type="button"
               aria-pressed={selected}
               onClick={() => setStyle(st)}
-              className={`min-h-7 px-2 py-0.5 rounded-md text-xs border cursor-pointer transition-colors ${
+              className={`min-h-8 sm:min-h-7 px-2.5 sm:px-2 py-0.5 rounded-md text-xs border cursor-pointer transition-colors ${
                 selected
                   ? 'font-semibold bg-surface-sheet text-ink-primary border-border-ink'
                   : 'bg-surface-sheet/60 text-ink-muted border-border-subtle hover:text-ink-primary'
@@ -476,7 +476,7 @@ export function MarginNoteEditorForm({
           <button
             type="button"
             onClick={onCancel}
-            className="min-h-7 px-2.5 py-1 text-xs text-ink-muted hover:text-ink-primary cursor-pointer transition-colors"
+            className="min-h-9 sm:min-h-7 px-3 sm:px-2.5 py-1 text-xs text-ink-muted hover:text-ink-primary cursor-pointer transition-colors"
           >
             {copy.cancelBtn}
           </button>
@@ -484,7 +484,7 @@ export function MarginNoteEditorForm({
             type="button"
             disabled={saving || !draft.trim() || isTooLong}
             onClick={() => void handleSave()}
-            className="min-h-7 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-50"
+            className="min-h-9 sm:min-h-7 px-3 py-1 rounded-lg text-xs font-semibold ink-btn-secondary cursor-pointer disabled:opacity-50"
           >
             {copy.saveStickyBtn}
           </button>
@@ -578,7 +578,7 @@ export function BlockWithMargin({
           type="button"
           onClick={() => setComposing((v) => !v)}
           aria-expanded={composing}
-          className={`mt-1.5 min-h-7 px-2 -ms-1 rounded-lg inline-flex items-center gap-1 font-hand text-xs sm:text-sm font-semibold text-ink-muted hover:text-ink-primary transition-all cursor-pointer ${
+          className={`mt-1.5 min-h-9 sm:min-h-7 px-2 -ms-1 rounded-lg inline-flex items-center gap-1 font-hand text-xs sm:text-sm font-semibold text-ink-muted hover:text-ink-primary transition-all cursor-pointer ${
             compactTrigger && !composing && userNotes.length === 0
               ? '[@media(hover:hover)]:sm:opacity-0 [@media(hover:hover)]:sm:group-hover/margin:opacity-100 focus-visible:opacity-100'
               : ''

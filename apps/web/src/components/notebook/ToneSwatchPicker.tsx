@@ -31,7 +31,7 @@ export function ToneSwatchPicker({
     <div
       role="group"
       aria-label={ariaLabel}
-      className={`flex items-center gap-1.5 ${className}`.trim()}
+      className={`flex flex-wrap items-center gap-2 sm:gap-1.5 ${className}`.trim()}
     >
       {autoOptionLabel !== undefined && (
         <button
@@ -59,7 +59,7 @@ export function ToneSwatchPicker({
             aria-label={copy.stickyColorAria(copy.stickerTones[tone])}
             aria-pressed={active}
             onClick={() => onChange(tone)}
-            className={`w-6 h-6 rounded-full border-2 inline-flex items-center justify-center cursor-pointer motion-safe:transition-transform ink-icon-target ${
+            className={`w-7 h-7 sm:w-6 sm:h-6 rounded-full border-2 inline-flex items-center justify-center cursor-pointer motion-safe:transition-transform ink-icon-target ${
               active ? `scale-110 ring-2 ring-ink-primary ring-offset-1 ${ringOffsetClass}` : ''
             }`}
             style={{

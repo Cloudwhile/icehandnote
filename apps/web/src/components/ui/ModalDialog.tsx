@@ -18,6 +18,7 @@ export interface ModalDialogProps {
   maxWidthClass?: string;
   closedBy?: 'any' | 'closerequest' | 'none';
   stableScrollbarGutter?: boolean;
+  mobilePlacement?: 'bottom' | 'top' | 'center';
   children: ReactNode;
 }
 
@@ -61,7 +62,7 @@ export function ModalHeader({
         <button
           type="button"
           onClick={onClose}
-          className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary border border-border-subtle hover:border-border-ink cursor-pointer shrink-0 transition-colors"
+          className="min-h-9 sm:min-h-8 px-3 sm:px-2.5 py-1 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink-primary border border-border-subtle hover:border-border-ink cursor-pointer shrink-0 transition-colors ink-icon-target"
         >
           {closeLabel}
         </button>
@@ -110,6 +111,7 @@ export function ModalDialog({
   maxWidthClass = 'max-w-lg',
   closedBy = 'any',
   stableScrollbarGutter = false,
+  mobilePlacement = 'bottom',
   children,
 }: ModalDialogProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
@@ -211,16 +213,28 @@ export function ModalDialog({
     };
   }, [closeAnimated, closedBy]);
 
+  const placementClass =
+    mobilePlacement === 'top'
+      ? `w-[calc(100%-1.5rem)] sm:w-[calc(100%-2rem)] ${maxWidthClass} max-sm:mt-3 max-sm:mb-auto mx-auto sm:m-auto rounded-2xl`
+      : mobilePlacement === 'center'
+        ? `w-[calc(100%-2rem)] ${maxWidthClass} m-auto rounded-2xl`
+        : `w-full sm:w-[calc(100%-2rem)] ${maxWidthClass} max-sm:mt-auto max-sm:mb-0 max-sm:mx-0 max-sm:max-w-none max-sm:rounded-b-none rounded-2xl sm:m-auto`;
+
+  const scrollBoundsClass =
+    mobilePlacement === 'bottom'
+      ? 'max-h-[min(92dvh,calc(100dvh-0.75rem))] sm:max-h-[min(90dvh,calc(100dvh-2rem))] max-sm:pb-[env(safe-area-inset-bottom,0px)]'
+      : 'max-h-[min(90dvh,calc(100dvh-2rem))]';
+
   return (
     <dialog
       ref={dialogRef}
       aria-labelledby={ariaLabelledBy}
       aria-label={ariaLabelledBy ? undefined : ariaLabel}
-      className={`search-dialog ink-surface-modal w-[calc(100%-2rem)] ${maxWidthClass} m-auto rounded-2xl p-0 overflow-hidden bg-surface-sheet text-ink-primary`}
+      className={`search-dialog ink-surface-modal ${placementClass} p-0 overflow-hidden bg-surface-sheet text-ink-primary`}
       {...({ closedby: closedBy } as Record<string, unknown>)}
     >
       <div
-        className={`max-h-[min(90dvh,calc(100dvh-2rem))] overflow-y-auto overscroll-contain ink-thin-scrollbar ${
+        className={`${scrollBoundsClass} overflow-y-auto overscroll-contain ink-thin-scrollbar ${
           stableScrollbarGutter ? '[scrollbar-gutter:stable]' : ''
         }`.trim()}
       >

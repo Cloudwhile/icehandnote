@@ -488,7 +488,7 @@ export function BlockStickerLayer({
                   onUpdateSticker(st.id, { locked: false });
                   onSelectSticker(st.id);
                 }}
-                className="pointer-events-auto opacity-0 group-hover/block:opacity-95 focus:opacity-100 absolute -top-2 -end-2 px-1.5 py-0.5 rounded-md bg-surface-sheet/95 border border-border-ink text-xs font-semibold text-link-ink shadow-xs cursor-pointer transition-opacity whitespace-nowrap inline-flex items-center gap-1"
+                className="pointer-events-auto opacity-0 group-hover/block:opacity-95 focus:opacity-100 [@media(hover:none)]:opacity-95 absolute -top-2 -end-2 min-h-7 px-2 py-1 rounded-md bg-surface-sheet/95 border border-border-ink text-xs font-semibold text-link-ink shadow-xs cursor-pointer transition-opacity whitespace-nowrap inline-flex items-center gap-1 ink-icon-target"
               >
                 <IconUnlock className="w-3 h-3" />
                 <span>{ext.unlockShortBtn}</span>
@@ -500,7 +500,7 @@ export function BlockStickerLayer({
               <div
                 data-testid="sticker-floating-toolbar"
                 onPointerDown={(e) => e.stopPropagation()}
-                className={`absolute ${toolbarPlacementClass} ${toolbarHorizClass} z-(--z-popover) w-72 sm:w-80 p-2.5 rounded-2xl border-2 border-border-ink bg-surface-sheet shadow-lg space-y-2`}
+                className={`absolute ${toolbarPlacementClass} ${toolbarHorizClass} z-(--z-popover) w-72 sm:w-80 max-w-[calc(100dvw-2rem)] p-2.5 rounded-2xl border-2 border-border-ink bg-surface-sheet shadow-lg space-y-2`}
               >
                 {/* 12-Sprite Quick Picker */}
                 <div className="grid grid-cols-6 gap-1">

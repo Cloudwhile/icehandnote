@@ -729,12 +729,22 @@ export function InlineFormatToolbar({
   }, []);
 
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+  const vh = vv
+    ? vv.height + vv.offsetTop
+    : typeof window !== 'undefined'
+      ? window.innerHeight
+      : 800;
+  const isCoarse =
+    typeof window !== 'undefined' &&
+    Boolean(window.matchMedia?.('(pointer: coarse)').matches);
   const estimatedBarHalfW = Math.min(260, Math.floor((vw - 24) / 2));
-  const openBelow = rect.top < (subPanel ? 280 : 118);
+  const preferBelowCoarse =
+    isCoarse && rect.bottom + (subPanel ? 260 : 72) <= vh;
+  const openBelow = preferBelowCoarse || rect.top < (subPanel ? 280 : 118);
   const maxAllowedTop = Math.max(8, vh - (subPanel ? 260 : 68));
   const fixedTop = openBelow
-    ? Math.min(maxAllowedTop, rect.bottom + 8)
+    ? Math.min(maxAllowedTop, rect.bottom + (isCoarse ? 10 : 8))
     : Math.max(8, rect.top - 48);
   const fixedLeft = Math.max(
     12,

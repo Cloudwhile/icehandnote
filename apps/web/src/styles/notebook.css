@@ -11,9 +11,10 @@ html {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Prevent keyboard focus & #hash targets from hiding behind sticky TopNavbar (WCAG 2.4.11) */
+/* Prevent keyboard focus & #hash targets from hiding behind sticky TopNavbar or bottom UI (WCAG 2.4.11) */
 html:not(:has(.studio-shell)) {
-  scroll-padding-top: 5.5rem;
+  scroll-padding-top: calc(5.5rem + env(safe-area-inset-top, 0px));
+  scroll-padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
 }
 
 /* Normalize Latin lowercase x-height on English pages only; CJK ideographs use full 1em em-boxes
@@ -179,9 +180,14 @@ body {
   min-height: 100svh;
   background-color: var(--surface-page);
   color: var(--ink-primary);
+  overflow-wrap: break-word;
   /* Subtle low-contrast dot-grid paper pattern via fallback-safe token (Refactoring UI §8.3.2) */
   background-image: radial-gradient(var(--dot-grid-color) 1px, transparent 1px);
   background-size: 20px 20px;
+}
+
+:where(button, [role="button"], a[href], summary, input, select, textarea, label) {
+  touch-action: manipulation;
 }
 
 /* Locale-aware line height for long-form tutorial prose (Refactoring UI §4.5 + `typography`) */
@@ -219,6 +225,7 @@ body {
   background-color: var(--code-bg);
   border: 1px dashed var(--border-control);
   color: var(--code-fg);
+  overflow-wrap: anywhere;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
@@ -227,6 +234,7 @@ body {
 a.ink-inline-link {
   color: var(--link-ink);
   font-weight: 600;
+  overflow-wrap: anywhere;
   text-decoration-line: underline;
   text-decoration-style: wavy;
   text-decoration-color: var(--link-ink);
@@ -622,7 +630,7 @@ input[type="search"]::-webkit-search-decoration {
   .ink-icon-target::after {
     content: "";
     position: absolute;
-    inset: -4px;
+    inset: -6px;
   }
 }
 
@@ -1077,12 +1085,17 @@ dialog.search-dialog[open]:where(:not([data-closing]))::backdrop {
   flex-direction: column;
   block-size: 100%;
   max-block-size: 100dvh;
+  padding-block-end: env(safe-area-inset-bottom, 0px);
+  padding-inline-start: env(safe-area-inset-left, 0px);
   background-color: var(--surface-sheet);
   color: var(--ink-primary);
   border-inline-end: 2px solid var(--border-ink);
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-snap-align: start;
+}
+.swipe-drawer-header {
+  padding-block-start: max(0.75rem, env(safe-area-inset-top, 0px));
 }
 .swipe-drawer-sheet[data-surface="sunken"] {
   background-color: var(--surface-sunken);
@@ -1308,7 +1321,7 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   display: grid;
   min-block-size: 100dvh;
   inline-size: 100%;
-  grid-template-rows: 3.5rem minmax(0, 1fr);
+  grid-template-rows: minmax(3.5rem, auto) minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
     "topbar"
@@ -1325,7 +1338,10 @@ html:active-view-transition-type(backward)::view-transition-new(root) {
   justify-content: space-between;
   gap: 0.75rem;
   min-inline-size: 0;
-  padding-inline: 1rem;
+  min-block-size: 3.5rem;
+  padding-block-start: env(safe-area-inset-top, 0px);
+  padding-inline-start: max(1rem, env(safe-area-inset-left, 0px));
+  padding-inline-end: max(1rem, env(safe-area-inset-right, 0px));
   background-color: var(--surface-sheet);
   border-block-end: 1px solid var(--border-subtle);
 }
@@ -1464,7 +1480,8 @@ input[type="checkbox"][switch]:disabled {
 
   .studio-topbar {
     position: relative;
-    padding-inline: 1.5rem;
+    padding-inline-start: max(1.5rem, env(safe-area-inset-left, 0px));
+    padding-inline-end: max(1.5rem, env(safe-area-inset-right, 0px));
   }
 
   .studio-sidebar {
@@ -1586,6 +1603,13 @@ input[type="checkbox"][switch]:disabled {
   border-inline-start-color: var(--action-bg);
 }
 
+@media (pointer: coarse) {
+  .studio-nav-item {
+    min-block-size: 2.75rem;
+    padding-block: 0.625rem;
+  }
+}
+
 /* Single-line text overflow inside flex/grid items (`single-line-overflow`) */
 @layer components {
   .studio-ellipsis {
@@ -1634,6 +1658,12 @@ input[type="checkbox"][switch]:disabled {
 
 .editor-mode-tab[aria-selected="true"] {
   color: var(--ink-primary);
+}
+
+@media (pointer: coarse) {
+  .editor-mode-tab {
+    min-block-size: 2.75rem;
+  }
 }
 
 @supports (position-anchor: --editor-active-tab) {
@@ -2069,6 +2099,14 @@ input[type="checkbox"][switch]:disabled {
   transition: background-color 120ms ease-out, color 120ms ease-out;
 }
 
+@media (pointer: coarse) {
+  .ink-menu-list button:not(.ink-menu-compact button),
+  .ink-menu-list a:not(.ink-menu-compact a) {
+    min-block-size: 2.625rem;
+    padding-block: 0.5rem;
+  }
+}
+
 .ink-menu-list button:not(.ink-menu-compact button):hover:not(:disabled),
 .ink-menu-list a:not(.ink-menu-compact a):hover {
   background-color: var(--surface-raised);
@@ -2236,13 +2274,30 @@ input[type="checkbox"][switch]:disabled {
   }
 }
 
+/* Prevent iOS Safari < 16px auto-zoom on touch screens even when paired with Tailwind `text-xs`/`text-sm` utilities,
+ * without overriding larger display headings or bare borderless canvas title inputs. */
+@media (pointer: coarse) and (max-width: 767px) {
+  .ink-field-input,
+  .ink-select,
+  .ink-url-slug-field {
+    font-size: 1rem;
+  }
+
+  .ink-field-input {
+    min-block-size: 2.75rem;
+  }
+}
+
 /* ============================================================================
  * Top-Layer Toast Stack (Popover API `popover="manual"`)
  * Renders ABOVE native `<dialog>.showModal()` backdrops so modal errors stay crisp
  * ============================================================================ */
 .ink-toast-stack {
   position: fixed;
-  inset: auto 1rem 1rem auto;
+  inset-block-start: auto;
+  inset-block-end: max(1rem, calc(env(safe-area-inset-bottom, 0px) + 0.5rem));
+  inset-inline-start: auto;
+  inset-inline-end: max(1rem, env(safe-area-inset-right, 0px));
   z-index: var(--z-toast);
   margin: 0;
   padding: 0;
@@ -2251,6 +2306,26 @@ input[type="checkbox"][switch]:disabled {
   overflow: visible;
   inline-size: min(24rem, calc(100dvw - 2rem));
   pointer-events: none;
+}
+
+@media (max-width: 639px) {
+  .ink-toast-stack {
+    inset-inline-start: max(0.75rem, env(safe-area-inset-left, 0px));
+    inset-inline-end: max(0.75rem, env(safe-area-inset-right, 0px));
+    inline-size: auto;
+  }
+
+  html:has(#mobile-toc-fab) .ink-toast-stack,
+  html:has([data-selection-popover="true"]) .ink-toast-stack {
+    inset-block-end: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 1023px) {
+  html:has([data-selection-popover="true"]) #mobile-toc-fab {
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 .ink-toast-stack[popover]:not(:popover-open) {
@@ -2573,6 +2648,12 @@ input[type="checkbox"][switch]:disabled {
   background-color: var(--surface-sheet);
   border-color: var(--border-subtle);
   box-shadow: 0 1px 2px rgb(17 18 31 / 0.08);
+}
+
+@media (pointer: coarse) {
+  .mwg-tab {
+    min-height: 2.5rem;
+  }
 }
 
 @media (forced-colors: active) {

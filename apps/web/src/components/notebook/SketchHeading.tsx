@@ -142,7 +142,7 @@ export function SketchHeading({
           <a
             href={`#${id}`}
             aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-2 shrink-0"
+            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-2 shrink-0 ink-icon-target"
           >
             #
           </a>
@@ -183,7 +183,7 @@ export function SketchHeading({
         <a
           href={`#${id}`}
           aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
-          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-1 ink-icon-target"
         >
           #
         </a>

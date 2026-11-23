@@ -172,11 +172,11 @@ export function VisualBlockToolStrip({
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex sm:flex-wrap items-center gap-1.5 max-sm:overflow-x-auto max-sm:pb-1 ink-thin-scrollbar">
       <button
         type="button"
         onClick={() => onInsertBlock('alert')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconAlertCircle className="w-3.5 h-3.5 text-accent-amber" />
         <span>{v.types.alert}</span>
@@ -185,7 +185,7 @@ export function VisualBlockToolStrip({
       <button
         type="button"
         onClick={() => onInsertBlock('steps')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconCheckSquare className="w-3.5 h-3.5 text-accent-ice" />
         <span>{copy.taskScopeParagraph}</span>
@@ -194,7 +194,7 @@ export function VisualBlockToolStrip({
       <button
         type="button"
         onClick={() => onInsertBlock('code_card')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconCode className="w-3.5 h-3.5 text-ink-secondary" />
         <span>{v.types.code_card}</span>
@@ -206,14 +206,14 @@ export function VisualBlockToolStrip({
         label={v.types.image}
         uploadingLabel={v.imageUploading}
         icon={<IconImage className="w-3.5 h-3.5 text-link-ink" />}
-        buttonClassName="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer disabled:opacity-60 transition-colors"
+        buttonClassName="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer disabled:opacity-60 transition-colors"
         onSelectFile={onUploadImageFile}
       />
 
       <button
         type="button"
         onClick={() => onInsertBlock('rough_diagram')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconDiagram className="w-3.5 h-3.5 text-ink-secondary" />
         <span>{v.types.rough_diagram}</span>
@@ -223,7 +223,7 @@ export function VisualBlockToolStrip({
         type="button"
         data-testid="insert-pixel-sticker-btn"
         onClick={() => onInsertBlock('pixel_sticker')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconPixelSticker className="w-3.5 h-3.5 text-accent-amber" />
         <span>+ {v.types.pixel_sticker}</span>
@@ -236,7 +236,7 @@ export function VisualBlockToolStrip({
           if (e.button === 0) e.preventDefault();
         }}
         onClick={() => dispatchRichQuickAction('inline-code')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconInlineCode className="w-3.5 h-3.5 text-ink-secondary" />
         <span>+ {extRich.inlineCode}</span>
@@ -249,7 +249,7 @@ export function VisualBlockToolStrip({
           if (e.button === 0) e.preventDefault();
         }}
         onClick={() => dispatchRichQuickAction('kbd-combo')}
-        className="ui-press-tactile min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
+        className="ui-press-tactile shrink-0 whitespace-nowrap min-h-9 sm:min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-surface-raised text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1 cursor-pointer transition-colors"
       >
         <IconKeyboardKey className="w-3.5 h-3.5 text-link-ink" />
         <span>+ {extRich.kbdCombo}</span>
@@ -259,7 +259,7 @@ export function VisualBlockToolStrip({
         {extFlow.quickToolbarHint}
       </span>
 
-      <span className="ms-auto text-xs font-mono text-ink-muted tabular-nums ps-1.5 whitespace-nowrap">
+      <span className="ms-auto shrink-0 text-xs font-mono text-ink-muted tabular-nums ps-1.5 whitespace-nowrap">
         {v.blockCount(blockCount)}
       </span>
     </div>
@@ -1258,27 +1258,30 @@ export function VisualBlockEditor({
 
       {standaloneKbdTarget && (
         <div
-          className="fixed z-60 ui-popover-enter"
-          style={{
-            top: `${Math.round(
-              Math.max(
-                12,
-                Math.min(
-                  (typeof window !== 'undefined' ? window.innerHeight : 800) - 220,
-                  standaloneKbdTarget.rect.bottom + 8,
-                ),
-              ),
-            )}px`,
-            left: `${Math.round(
-              Math.max(
-                12,
-                Math.min(
-                  (typeof window !== 'undefined' ? window.innerWidth : 1280) - 332,
-                  standaloneKbdTarget.rect.left,
-                ),
-              ),
-            )}px`,
-          }}
+          className="fixed z-60 ui-popover-enter max-w-[calc(100dvw-1.5rem)]"
+          style={(() => {
+            const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+            const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+            const vh = vv
+              ? vv.height + vv.offsetTop
+              : typeof window !== 'undefined'
+                ? window.innerHeight
+                : 800;
+            const popW = Math.min(320, vw - 24);
+            const top = Math.max(
+              12,
+              Math.min(vh - 220, standaloneKbdTarget.rect.bottom + 8),
+            );
+            const left = Math.max(
+              12,
+              Math.min(vw - popW - 12, standaloneKbdTarget.rect.left),
+            );
+            return {
+              top: `${Math.round(top)}px`,
+              left: `${Math.round(left)}px`,
+              width: `${Math.round(popW)}px`,
+            };
+          })()}
         >
           <KbdComboComposer
             locale={locale}

@@ -66,7 +66,7 @@ export function ConfirmDialog({
           autoFocus={isDanger && !children}
           disabled={busy}
           onClick={onClose}
-          className="min-h-9 px-3 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer disabled:opacity-50"
+          className="min-h-10 sm:min-h-9 px-4 py-1.5 text-xs font-semibold text-ink-muted hover:text-ink-primary hover:underline cursor-pointer disabled:opacity-50"
         >
           {cancelLabel}
         </button>
@@ -77,8 +77,8 @@ export function ConfirmDialog({
           onClick={onSubmit ? undefined : onConfirm}
           className={
             isDanger
-              ? 'min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-danger cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
-              : 'min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
+              ? 'min-h-10 sm:min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-danger cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
+              : 'min-h-10 sm:min-h-9 px-4 py-2 rounded-xl text-xs font-semibold ink-btn-primary cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed'
           }
         >
           {confirmLabel}
@@ -95,6 +95,7 @@ export function ConfirmDialog({
       }}
       ariaLabelledBy={titleId}
       maxWidthClass={maxWidthClass}
+      mobilePlacement="center"
     >
       {onSubmit ? (
         <form onSubmit={onSubmit} className="p-5 flex flex-col gap-4">

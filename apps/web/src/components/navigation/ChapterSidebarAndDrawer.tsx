@@ -133,7 +133,7 @@ export function ChapterSidebarAndDrawer({
                 )
               }
               aria-current={active ? 'page' : undefined}
-              className={`flex items-start gap-2 min-h-9 px-2.5 py-1.5 rounded-lg text-sm no-underline transition-colors ${
+              className={`flex items-start gap-2 min-h-11 lg:min-h-9 px-2.5 py-2 lg:py-1.5 rounded-lg text-sm no-underline transition-colors ${
                 active
                   ? 'font-semibold text-ink-primary border-s-3 border-action-bg bg-action-subtle/60'
                   : 'text-ink-muted hover:text-ink-primary'
@@ -228,7 +228,7 @@ export function ChapterSidebarAndDrawer({
                     onClick={(e) =>
                       navigateSeriesStep(e, href, 'forward', onSelect)
                     }
-                    className="group flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
+                    className="group flex items-start gap-2.5 min-h-11 lg:min-h-0 px-2.5 py-2.5 lg:py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
                   >
                     <span
                       aria-hidden="true"
@@ -310,8 +310,13 @@ export function ChapterSidebarAndDrawer({
 
       {toc.length > 0 && (
         <div
+          id="mobile-toc-fab"
           ref={tocContainerRef}
-          className="lg:hidden fixed end-4 bottom-5 z-20"
+          className="lg:hidden fixed z-20 transition-opacity"
+          style={{
+            bottom: 'calc(1.25rem + env(safe-area-inset-bottom, 0px))',
+            insetInlineEnd: 'max(1rem, env(safe-area-inset-right, 0px))',
+          }}
         >
           <button
             ref={tocTriggerRef}
@@ -357,13 +362,13 @@ export function ChapterSidebarAndDrawer({
                     <a
                       href={`#${item.id}`}
                       onClick={() => setTocOpen(false)}
-                      className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
-                      style={{ paddingInlineStart: `${(item.level - 1) * 8}px` }}
+                      className="flex items-start gap-2 min-h-10 py-2 px-2 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
+                      style={{ paddingInlineStart: `${8 + (item.level - 1) * 8}px` }}
                     >
-                      <span className="font-mono font-semibold text-link-ink shrink-0">
+                      <span className="font-mono font-semibold text-link-ink shrink-0 pt-0.5">
                         {item.number}
                       </span>
-                      <span className="truncate">{stripHtmlTags(item.text)}</span>
+                      <span className="line-clamp-2 leading-snug">{stripHtmlTags(item.text)}</span>
                     </a>
                   </li>
                 ))}

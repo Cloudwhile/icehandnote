@@ -60,6 +60,7 @@ import { NotebookEmptyState } from '../notebook/NotebookEmptyState';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { FileUploadButton } from '../ui/FileUploadButton';
 import { SwitchRow } from '../ui/FormControls';
+import { ModalDialog } from '../ui/ModalDialog';
 import {
   IconAlertTriangle,
   IconBook,
@@ -309,10 +310,28 @@ export function StudioEditorPanel({
   const invitingRef = useRef(false);
 
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
+  const [isDesktopInspector, setIsDesktopInspector] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1280 : true,
+  );
   const [inspectorOpen, setInspectorOpen] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 1024 : true,
+    typeof window !== 'undefined' ? window.innerWidth >= 1280 : true,
   );
   const [previewSplitOpen, setPreviewSplitOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(min-width: 1280px)');
+    const sync = (matches: boolean) => setIsDesktopInspector(matches);
+    sync(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => {
+      sync(e.matches);
+      if (!e.matches) {
+        setInspectorOpen(false);
+      }
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deletingStep, setDeletingStep] = useState(false);
 
@@ -998,7 +1017,7 @@ export function StudioEditorPanel({
   };
 
   const handleToggleInspector = () => {
-    runLayoutTransition(null, () => {
+    const toggle = () => {
       setInspectorOpen((prev) => {
         const next = !prev;
         if (next && typeof window !== 'undefined' && window.innerWidth < 1536) {
@@ -1006,7 +1025,12 @@ export function StudioEditorPanel({
         }
         return next;
       });
-    });
+    };
+    if (isDesktopInspector) {
+      runLayoutTransition(null, toggle);
+    } else {
+      toggle();
+    }
   };
 
   const handleSwitchEditorMode = (nextMode: 'visual' | 'markdown') => {
@@ -1674,7 +1698,7 @@ export function StudioEditorPanel({
               align="end"
               showChevron={false}
               triggerAriaLabel={s.editorHeadingSr}
-              triggerClassName="w-8 h-8 rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary"
+              triggerClassName="w-8 h-8 ink-icon-target rounded-xl bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-secondary hover:text-ink-primary"
               triggerLabel={<IconMoreHorizontal className="w-4 h-4" />}
             >
               {({ close }) => (
@@ -1810,13 +1834,13 @@ export function StudioEditorPanel({
               onUploadImageFile={(file) => void handleUploadVisualImage(file)}
             />
           ) : (
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex sm:flex-wrap items-center gap-1.5 max-sm:overflow-x-auto max-sm:pb-1 ink-thin-scrollbar">
               <FileUploadButton
                 accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
                 uploading={uploadingMdImage}
                 label={s.snippets.image}
                 icon={<IconImage className="w-3.5 h-3.5 text-ink-muted" />}
-                buttonClassName="min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
+                buttonClassName="min-h-9 sm:min-h-8 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
                 onSelectFile={(file) => void handleUploadMdImage(file)}
               />
               {stationerySnippets.map((item) => (
@@ -1824,7 +1848,7 @@ export function StudioEditorPanel({
                   key={item.id}
                   type="button"
                   onClick={() => insertSnippetAtCursor(item.snippet)}
-                  className="min-h-8 px-2.5 py-1 rounded-lg text-xs font-mono bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink cursor-pointer transition-colors"
+                  className="min-h-9 sm:min-h-8 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-mono bg-surface-sheet hover:bg-action-subtle text-ink-primary border border-border-subtle hover:border-border-ink cursor-pointer transition-colors"
                 >
                   {item.label}
                 </button>
@@ -1992,7 +2016,7 @@ export function StudioEditorPanel({
                         value={docSummary}
                         onChange={(e) => setDocSummary(e.target.value)}
                         placeholder={extCopy.studio.flowEditor.summaryInlinePlaceholder}
-                        className="flow-editor-textarea text-sm text-ink-secondary leading-relaxed placeholder:text-ink-muted"
+                        className="flow-editor-textarea text-base sm:text-sm text-ink-secondary leading-relaxed placeholder:text-ink-muted"
                       />
                     </div>
 
@@ -2057,7 +2081,7 @@ export function StudioEditorPanel({
                       }
                     }}
                     spellCheck={false}
-                    className="ink-field-input min-h-[34rem] p-4 font-mono text-xs sm:text-sm leading-relaxed resize-y"
+                    className="ink-field-input min-h-[22rem] sm:min-h-[34rem] p-3.5 sm:p-4 font-mono text-base sm:text-sm leading-relaxed resize-y"
                   />
                 </div>
               </div>
@@ -2147,8 +2171,9 @@ export function StudioEditorPanel({
         </div>
 
         {/* ZONE 3: Collapsible Article Info Inspector */}
-        {inspectorOpen &&
+        {(inspectorOpen || !isDesktopInspector) &&
           (() => {
+            if (isDesktopInspector && !inspectorOpen) return null;
             let savedTitleVal = '';
             try {
               if (savedSnapshot) {
@@ -2169,7 +2194,7 @@ export function StudioEditorPanel({
                 ? rawSuggestedSlug
                 : undefined;
 
-            return (
+            const inspectorNode = (
               <StudioEditorInspector
                 locale={locale}
                 editLocale={editLocale}
@@ -2232,10 +2257,31 @@ export function StudioEditorPanel({
                 onTransferOwnership={(author) => setTransferTarget(author)}
                 onLeaveCollaboration={() => setLeaveConfirmOpen(true)}
                 onOpenHistory={() => setHistoryOpen(true)}
-                onClose={() =>
-                  runLayoutTransition(null, () => setInspectorOpen(false))
-                }
+                embeddedInModal={!isDesktopInspector}
+                onClose={() => {
+                  if (isDesktopInspector) {
+                    runLayoutTransition(null, () => setInspectorOpen(false));
+                  } else {
+                    setInspectorOpen(false);
+                  }
+                }}
               />
+            );
+
+            if (isDesktopInspector) {
+              return inspectorNode;
+            }
+
+            return (
+              <ModalDialog
+                open={inspectorOpen}
+                onClose={() => setInspectorOpen(false)}
+                ariaLabel={extCopy.studio.editorInspectorTitle}
+                maxWidthClass="max-w-md"
+                stableScrollbarGutter
+              >
+                {inspectorNode}
+              </ModalDialog>
             );
           })()}
       </div>

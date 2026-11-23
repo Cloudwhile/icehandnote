@@ -73,6 +73,7 @@ interface StudioEditorInspectorProps {
   onLeaveCollaboration: () => void;
   onOpenHistory: () => void;
   onClose: () => void;
+  embeddedInModal?: boolean;
 }
 
 export function StudioEditorInspector({
@@ -123,6 +124,7 @@ export function StudioEditorInspector({
   onLeaveCollaboration,
   onOpenHistory,
   onClose,
+  embeddedInModal = false,
 }: StudioEditorInspectorProps) {
   const copy = UI_COPY[locale];
   const s = copy.studio;
@@ -142,7 +144,11 @@ export function StudioEditorInspector({
   return (
     <aside
       aria-label={extCopy.studio.editorInspectorTitle}
-      className="studio-editor-inspector studio-panel overflow-hidden"
+      className={
+        embeddedInModal
+          ? 'studio-editor-inspector'
+          : 'studio-editor-inspector studio-panel overflow-hidden'
+      }
     >
       {/* Inspector Header */}
       <div className="px-4 py-3 border-b border-border-subtle bg-surface-raised/50 flex items-center justify-between gap-2">
@@ -154,7 +160,7 @@ export function StudioEditorInspector({
           onClick={onClose}
           aria-label={extCopy.studio.editorCloseInspectorAria}
           title={extCopy.studio.editorCloseInspectorAria}
-          className="w-7 h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors"
+          className="w-8 h-8 sm:w-7 sm:h-7 rounded-lg inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-sheet cursor-pointer transition-colors ink-icon-target"
         >
           <IconClose className="w-3.5 h-3.5" />
         </button>
@@ -233,7 +239,7 @@ export function StudioEditorInspector({
                   }}
                   aria-label={extCopy.studio.publishedUrl.copyUrlBtn}
                   title={extCopy.studio.publishedUrl.copyUrlBtn}
-                  className="min-h-6 px-2 py-0.5 rounded-lg border border-border-subtle bg-surface-raised hover:border-border-ink text-xs font-semibold text-ink-secondary inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  className="min-h-8 sm:min-h-6 px-2.5 sm:px-2 py-0.5 rounded-lg border border-border-subtle bg-surface-raised hover:border-border-ink text-xs font-semibold text-ink-secondary inline-flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <IconCopy className="w-3.5 h-3.5" />
                   <span>{extCopy.studio.publishedUrl.copyUrlBtn}</span>
@@ -243,7 +249,7 @@ export function StudioEditorInspector({
                   <Link
                     data-testid="studio-open-published-link"
                     to={`/${editLocale}/series/${trackSlug}/${stepSlug}`}
-                    className="min-h-6 px-2 py-0.5 rounded-lg border border-border-subtle bg-action-subtle/70 hover:border-link-ink text-xs font-semibold text-link-ink inline-flex items-center gap-1 transition-colors"
+                    className="min-h-8 sm:min-h-6 px-2.5 sm:px-2 py-0.5 rounded-lg border border-border-subtle bg-action-subtle/70 hover:border-link-ink text-xs font-semibold text-link-ink inline-flex items-center gap-1 transition-colors"
                   >
                     <IconExternalLink className="w-3.5 h-3.5" />
                     <span>{extCopy.studio.publishedUrl.openUrlBtn}</span>
@@ -477,7 +483,7 @@ export function StudioEditorInspector({
                                   e.target.value as CollaboratorRole,
                                 )
                               }
-                              className="text-[11px] bg-surface-sheet border border-border-subtle rounded-lg px-1.5 py-0.5 text-ink-secondary cursor-pointer"
+                              className="min-h-9 sm:min-h-0 text-base sm:text-xs bg-surface-sheet border border-border-subtle rounded-lg px-2 sm:px-1.5 py-0.5 text-ink-secondary cursor-pointer"
                             >
                               <option value="editor">{extCopy.collab.roles.editor}</option>
                               <option value="translator">{extCopy.collab.roles.translator}</option>
@@ -487,14 +493,14 @@ export function StudioEditorInspector({
                               <button
                                 type="button"
                                 onClick={() => onTransferOwnership(author)}
-                                className="text-[11px] font-semibold text-ink-muted hover:text-ink-primary cursor-pointer transition-colors"
+                                className="min-h-8 sm:min-h-0 px-1.5 sm:px-0 text-xs font-semibold text-ink-muted hover:text-ink-primary cursor-pointer transition-colors"
                               >
                                 {extCopy.collab.transferOwnerBtn}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => onRemoveCollaborator(author.user_id!)}
-                                className="text-[11px] font-semibold text-accent-danger/85 hover:text-accent-danger cursor-pointer transition-colors"
+                                className="min-h-8 sm:min-h-0 px-1.5 sm:px-0 text-xs font-semibold text-accent-danger/85 hover:text-accent-danger cursor-pointer transition-colors"
                               >
                                 {extCopy.studio.removeCollaboratorBtn}
                               </button>
@@ -550,7 +556,7 @@ export function StudioEditorInspector({
                       onChange={(e) =>
                         onChangeInviteRole(e.target.value as CollaboratorRole)
                       }
-                      className="min-h-8 text-xs bg-surface-raised border border-border-subtle rounded-xl px-2 py-1 text-ink-secondary cursor-pointer shrink-0"
+                      className="min-h-11 sm:min-h-8 text-base sm:text-xs bg-surface-raised border border-border-subtle rounded-xl px-2 py-1 text-ink-secondary cursor-pointer shrink-0"
                     >
                       <option value="editor">{extCopy.collab.roles.editor}</option>
                       <option value="translator">{extCopy.collab.roles.translator}</option>

@@ -183,22 +183,25 @@ export function MyNotesModal({
             <IconSearch className="w-4 h-4 text-ink-muted absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="search"
-              autoFocus
+              autoFocus={
+                typeof window !== 'undefined' &&
+                window.matchMedia('(pointer: fine)').matches
+              }
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={notesCopy.searchPlaceholder}
               aria-label={notesCopy.searchPlaceholder}
-              className="ink-field-input w-full ps-9 pe-3 py-2 text-sm"
+              className="ink-field-input w-full ps-9 pe-3 py-2 text-base sm:text-sm"
             />
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex sm:flex-wrap items-center gap-1.5 max-sm:overflow-x-auto max-sm:pb-1 max-sm:w-full ink-thin-scrollbar">
               <button
                 type="button"
                 aria-pressed={activeTag === 'all'}
                 onClick={() => setActiveTag('all')}
-                className={`min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
+                className={`min-h-8 sm:min-h-7 shrink-0 px-2.5 py-0.5 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
                   activeTag === 'all'
                     ? 'bg-action-subtle text-link-ink border-action-bg'
                     : 'bg-surface-raised text-ink-secondary border-border-subtle hover:text-ink-primary'
@@ -214,7 +217,7 @@ export function MyNotesModal({
                     type="button"
                     aria-pressed={selected}
                     onClick={() => setActiveTag(t)}
-                    className={`min-h-7 px-2.5 py-0.5 rounded-lg text-xs font-semibold border inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                    className={`min-h-8 sm:min-h-7 shrink-0 px-2.5 py-0.5 rounded-lg text-xs font-semibold border inline-flex items-center gap-1 cursor-pointer transition-colors ${
                       selected
                         ? 'bg-action-subtle text-link-ink border-action-bg'
                         : 'bg-surface-raised text-ink-secondary border-border-subtle hover:text-ink-primary'
@@ -233,7 +236,7 @@ export function MyNotesModal({
                   type="button"
                   disabled={exporting !== null}
                   onClick={() => void handleExport('markdown')}
-                  className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
+                  className="min-h-8 sm:min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
                 >
                   {notesCopy.exportMdBtn}
                 </button>
@@ -241,7 +244,7 @@ export function MyNotesModal({
                   type="button"
                   disabled={exporting !== null}
                   onClick={() => void handleExport('w3c-jsonld')}
-                  className="min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
+                  className="min-h-8 sm:min-h-7 px-2.5 py-1 rounded-lg text-xs font-semibold border border-border-subtle bg-surface-raised text-ink-secondary hover:text-ink-primary hover:border-border-ink cursor-pointer disabled:opacity-50 transition-colors"
                 >
                   {notesCopy.exportJsonLdBtn}
                 </button>
