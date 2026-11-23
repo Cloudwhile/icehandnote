@@ -1,22 +1,29 @@
 use crate::{
     error::ApiError,
-    state::{internal_err, require_authenticated_user, AppState},
+    state::{
+        check_sliding_rate_limit, extract_client_ip, internal_err, require_authenticated_user,
+        AppState,
+    },
 };
 use axum::{
     body::Body,
-    extract::{Multipart, Path as AxumPath, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    extract::{ConnectInfo, Multipart, Path as AxumPath, State},
+    http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use chrono::{Datelike, Utc};
-use icehandnote_core::{auth::percent_encode_component, error::ErrorCode};
+use icehandnote_core::{
+    auth::{percent_encode_component, UserProfileDto},
+    error::ErrorCode,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::{fs, net::SocketAddr, time::UNIX_EPOCH};
 use uuid::Uuid;
 
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_RASTER_UNPRIVILEGED_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Serialize)]
 pub struct UploadMediaResponse {
@@ -27,7 +34,88 @@ pub struct UploadMediaResponse {
     pub sha256: String,
 }
 
+fn has_dangerous_svg_attr_or_css(lower: &str) -> bool {
+    // Scan attributes inside `<...>` so even whitespace-padded `onload =` or `href =` cannot evade
+    let bytes = lower.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            i += 1;
+            // Skip closing/comment tags
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'/' {
+                while i < bytes.len() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Skip tag name
+            while i < bytes.len()
+                && !bytes[i].is_ascii_whitespace()
+                && bytes[i] != b'>'
+                && bytes[i] != b'/'
+            {
+                i += 1;
+            }
+            let mut in_quote: Option<u8> = None;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if let Some(q) = in_quote {
+                    if b == q {
+                        in_quote = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if b == b'"' || b == b'\'' {
+                    in_quote = Some(b);
+                    i += 1;
+                    continue;
+                }
+                if b == b'>' {
+                    i += 1;
+                    break;
+                }
+                if b.is_ascii_alphabetic() || b == b':' || b == b'-' || b == b'_' {
+                    let start = i;
+                    while i < bytes.len()
+                        && (bytes[i].is_ascii_alphanumeric()
+                            || bytes[i] == b':'
+                            || bytes[i] == b'-'
+                            || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    let attr = &lower[start..i];
+                    let mut j = i;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len()
+                        && bytes[j] == b'='
+                        && (attr == "href"
+                            || attr == "xlink:href"
+                            || (attr.starts_with("on") && attr.len() > 2))
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn is_safe_svg(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return false;
+    }
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
@@ -37,6 +125,8 @@ fn is_safe_svg(bytes: &[u8]) -> bool {
         return false;
     }
     for forbidden in [
+        "<!doctype",
+        "<!entity",
         "<script",
         "javascript:",
         "vbscript:",
@@ -45,14 +135,25 @@ fn is_safe_svg(bytes: &[u8]) -> bool {
         "<iframe",
         "<embed",
         "<object",
-        "onload=",
-        "onerror=",
-        "onclick=",
-        "onmouseover=",
+        "<use",
+        "<image",
+        "<set",
+        "<animate",
+        "<handler",
+        "<listener",
+        "<audio",
+        "<video",
+        "xlink:href",
+        "@import",
+        "url(",
+        "url (",
     ] {
         if lower.contains(forbidden) {
             return false;
         }
+    }
+    if has_dangerous_svg_attr_or_css(&lower) {
+        return false;
     }
     true
 }
@@ -114,9 +215,26 @@ pub fn detect_safe_image_format(
     Some(detected)
 }
 
-async fn authorize_uploader(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if require_authenticated_user(state, headers).await.is_ok() {
-        return Ok(());
+enum UploaderKind {
+    Authenticated(Box<UserProfileDto>),
+    Onboarding,
+}
+
+struct UploaderContext {
+    kind: UploaderKind,
+    rate_key: String,
+}
+
+async fn authorize_uploader(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Result<UploaderContext, ApiError> {
+    if let Ok(user) = require_authenticated_user(state, headers).await {
+        return Ok(UploaderContext {
+            rate_key: format!("upload:user:{}", user.id),
+            kind: UploaderKind::Authenticated(Box::new(user)),
+        });
     }
     if let Some(tok) = headers
         .get("x-onboarding-token")
@@ -127,7 +245,11 @@ async fn authorize_uploader(state: &AppState, headers: &HeaderMap) -> Result<(),
         let now = Utc::now().timestamp();
         let onboardings = state.oauth_onboardings.lock().await;
         if onboardings.get(tok).map(|o| o.expires_at > now).unwrap_or(false) {
-            return Ok(());
+            let ip = extract_client_ip(headers, peer_ip, state.trust_proxy_headers);
+            return Ok(UploaderContext {
+                rate_key: format!("upload:onb:{ip}"),
+                kind: UploaderKind::Onboarding,
+            });
         }
     }
     Err(ApiError::new(
@@ -138,10 +260,20 @@ async fn authorize_uploader(state: &AppState, headers: &HeaderMap) -> Result<(),
 
 pub async fn upload_media_handler(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
-    authorize_uploader(&state, &headers).await?;
+    let peer_ip = extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
+    let uploader = authorize_uploader(&state, &headers, peer_ip).await?;
+    check_sliding_rate_limit(
+        &state,
+        &uploader.rate_key,
+        30,
+        60,
+        "Too many media uploads. Please wait a moment and try again.",
+    )
+    .await?;
 
     let req_ct = headers
         .get(header::CONTENT_TYPE)
@@ -191,6 +323,32 @@ pub async fn upload_media_handler(
                 "Unsupported or mismatched image format (PNG, JPEG, WebP, GIF, AVIF, ICO, or safe SVG required).",
             ));
         };
+
+        let is_admin = matches!(&uploader.kind, UploaderKind::Authenticated(u) if u.role.is_admin());
+        let is_privileged_uploader = matches!(
+            &uploader.kind,
+            UploaderKind::Authenticated(u) if u.role.can_author()
+        );
+        if ext == "svg" && !is_admin {
+            return Err(ApiError::new(
+                ErrorCode::Forbidden,
+                "Only administrators may upload SVG files.",
+            ));
+        }
+        if !is_privileged_uploader {
+            if !matches!(ext, "png" | "jpg" | "gif" | "webp") {
+                return Err(ApiError::new(
+                    ErrorCode::Forbidden,
+                    "Avatars must be PNG, JPEG, GIF, or WebP images.",
+                ));
+            }
+            if bytes.len() > MAX_RASTER_UNPRIVILEGED_BYTES {
+                return Err(ApiError::new(
+                    ErrorCode::UploadTooLarge,
+                    "Uploaded image exceeds the 2 MB size limit.",
+                ));
+            }
+        }
 
         let sha256_hex = hex::encode(Sha256::digest(&bytes));
         let now = Utc::now();
@@ -255,8 +413,8 @@ pub async fn serve_uploaded_media_handler(
         return Err(ApiError::new(ErrorCode::BadRequest, "Invalid filename."));
     }
 
-    let ext = filename.rsplit('.').next().unwrap_or("");
-    let Some(content_type) = mime_for_ext(ext) else {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let Some(content_type) = mime_for_ext(&ext) else {
         return Err(ApiError::new(
             ErrorCode::UnsupportedMediaType,
             "Unsupported media extension.",
@@ -264,12 +422,29 @@ pub async fn serve_uploaded_media_handler(
     };
 
     let full_path = state.uploads_dir.join(&ym).join(&filename);
-    let bytes = tokio::fs::read(&full_path)
+    let meta = tokio::fs::symlink_metadata(&full_path)
         .await
         .map_err(|_| ApiError::new(ErrorCode::MediaNotFound, "Media file not found."))?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(ApiError::new(
+            ErrorCode::MediaNotFound,
+            "Media file not found.",
+        ));
+    }
+    if meta.len() > MAX_IMAGE_BYTES as u64 {
+        return Err(ApiError::new(
+            ErrorCode::UploadTooLarge,
+            "Media file exceeds maximum allowed size.",
+        ));
+    }
 
-    let sha256_hex = hex::encode(Sha256::digest(&bytes));
-    let etag_val = format!("\"{sha256_hex}\"");
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let etag_val = format!("W/\"u-{}-{}\"", meta.len(), mtime_ns);
 
     if let Some(inm) = headers
         .get(header::IF_NONE_MATCH)
@@ -288,8 +463,16 @@ pub async fn serve_uploaded_media_handler(
         }
     }
 
+    let bytes = tokio::fs::read(&full_path)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::MediaNotFound, "Media file not found."))?;
+
     let encoded_name = percent_encode_component(&filename);
-    let disposition = format!("inline; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}");
+    let disposition = if ext == "svg" {
+        format!("attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}")
+    } else {
+        format!("inline; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}")
+    };
 
     let mut resp = Response::new(Body::from(bytes.clone()));
     *resp.status_mut() = StatusCode::OK;
@@ -317,9 +500,11 @@ pub async fn serve_uploaded_media_handler(
     );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
-        ),
+        HeaderValue::from_static(if ext == "svg" {
+            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
+        } else {
+            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox"
+        }),
     );
     Ok(resp)
 }

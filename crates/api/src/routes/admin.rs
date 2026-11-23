@@ -1,13 +1,14 @@
 use crate::{
     error::ApiError,
     mailer::{
-        is_smtp_ready, send_takedown_notice_email, send_test_email, send_user_ban_notice_email,
-        MailBrandContext,
+        active_mail_provider, is_mail_ready, send_takedown_notice_email, send_test_email,
+        send_user_ban_notice_email, MailBrandContext, MailCredentials, MailGuardStatusDto,
+        MailSendContext,
     },
     state::{
-        build_postgres_url, detect_external_origin, extract_client_context, internal_err,
-        mask_database_url, parse_postgres_url, repo_err, repo_err_or, require_admin,
-        resolve_request_locale, AppState, PostgresConnectionFields,
+        build_postgres_url, detect_external_origin, evict_collab_user_everywhere,
+        extract_client_context, internal_err, mask_database_url, parse_postgres_url, repo_err,
+        repo_err_or, require_admin, resolve_request_locale, AppState, PostgresConnectionFields,
     },
 };
 use axum::{
@@ -22,7 +23,10 @@ use icehandnote_core::{
         validate_and_normalize_email, SiteSettingsDto, UserRole,
     },
     error::ErrorCode,
-    mail_templates::{render_mail_preview, SmtpSettingsDto},
+    mail_templates::{
+        is_valid_cloudflare_account_id, normalize_mail_provider, render_mail_preview,
+        SmtpSettingsDto,
+    },
 };
 use icehandnote_db::{
     content_loader::load_content_directory, LocalSeedRepository, PostgresRepository,
@@ -140,7 +144,7 @@ fn extract_saved_pg_status(saved_or_env_url: &str) -> (PostgresConnectionFields,
     }
 }
 
-fn resolve_target_db_url(
+pub(crate) fn resolve_target_db_url(
     database_url: &str,
     postgres: Option<&PostgresConnectionFields>,
     clear_password: bool,
@@ -148,14 +152,23 @@ fn resolve_target_db_url(
 ) -> Result<Option<String>, ApiError> {
     let fallback_saved = resolve_saved_or_env_db_url(saved_url);
     if let Some(pg) = postgres {
+        let requested_port = if pg.port == 0 { 5432 } else { pg.port };
         let effective_pw = if !pg.password.is_empty() {
             pg.password.clone()
         } else if clear_password {
             String::new()
         } else {
-            parse_postgres_url(&fallback_saved)
-                .and_then(|(_, pw)| pw)
-                .unwrap_or_default()
+            match parse_postgres_url(&fallback_saved) {
+                Some((saved_fields, Some(saved_pw)))
+                    if saved_fields.host.eq_ignore_ascii_case(pg.host.trim())
+                        && saved_fields.port == requested_port
+                        && saved_fields.database == pg.database.trim()
+                        && saved_fields.username == pg.username.trim() =>
+                {
+                    saved_pw
+                }
+                _ => String::new(),
+            }
         };
         let built = build_postgres_url(pg, &effective_pw)?;
         return Ok(Some(built));
@@ -221,7 +234,7 @@ pub async fn admin_test_storage_handler(
     };
 
     let start = Instant::now();
-    let pg = PostgresRepository::connect_and_migrate(&db_url, false)
+    PostgresRepository::ping_readonly(&db_url)
         .await
         .map_err(|e| {
             ApiError::new(
@@ -229,10 +242,6 @@ pub async fn admin_test_storage_handler(
                 format!("PostgreSQL connection failed: {e}"),
             )
         })?;
-    let _ = pg
-        .get_site_settings(&state.default_settings)
-        .await
-        .map_err(repo_err)?;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     Ok(Json(TestStorageResponse {
@@ -249,6 +258,7 @@ pub async fn admin_update_storage_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let current_admin = require_admin(&state, &headers).await?;
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
@@ -474,6 +484,9 @@ pub async fn admin_update_oauth_secret_handler(
 pub struct SmtpStatusResponse {
     pub settings: SmtpSettingsDto,
     pub has_password: bool,
+    pub has_cloudflare_api_token: bool,
+    pub active_provider: Option<String>,
+    pub guard_status: MailGuardStatusDto,
 }
 
 #[derive(Deserialize)]
@@ -483,6 +496,10 @@ pub struct UpdateSmtpBody {
     pub password: String,
     #[serde(default)]
     pub clear_password: bool,
+    #[serde(default)]
+    pub cloudflare_api_token: String,
+    #[serde(default)]
+    pub clear_cloudflare_api_token: bool,
 }
 
 #[derive(Deserialize)]
@@ -493,7 +510,17 @@ pub struct TestSmtpBody {
     #[serde(default)]
     pub password: String,
     #[serde(default)]
+    pub cloudflare_api_token: String,
+    #[serde(default)]
     pub locale: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ClearSuppressionBody {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub clear_all: bool,
 }
 
 pub async fn admin_get_smtp_handler(
@@ -502,9 +529,16 @@ pub async fn admin_get_smtp_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
     let secrets = state.runtime_secrets.read().await;
+    let creds = MailCredentials {
+        smtp_password: &secrets.smtp_password,
+        cloudflare_api_token: &secrets.cloudflare_api_token,
+    };
     Ok(Json(SmtpStatusResponse {
         settings: secrets.smtp.clone(),
         has_password: !secrets.smtp_password.trim().is_empty(),
+        has_cloudflare_api_token: !secrets.cloudflare_api_token.trim().is_empty(),
+        active_provider: active_mail_provider(&secrets.smtp, &creds).map(str::to_string),
+        guard_status: state.mail_guard.status_dto(),
     }))
 }
 
@@ -515,24 +549,99 @@ pub async fn admin_update_smtp_handler(
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
     let clean = body.settings.sanitize();
+    let provider = normalize_mail_provider(&clean.provider);
     if (clean.enabled || !clean.from_email.is_empty()) && !is_valid_email(&clean.from_email) {
         return Err(ApiError::new(
             ErrorCode::InvalidEmail,
             "Please provide a valid sender email address.",
         ));
     }
+
     let mut secrets = state.runtime_secrets.write().await;
+    let next_cf_token = if body.clear_cloudflare_api_token {
+        String::new()
+    } else if !body.cloudflare_api_token.trim().is_empty() {
+        body.cloudflare_api_token.trim().to_string()
+    } else {
+        secrets.cloudflare_api_token.clone()
+    };
+
+    if clean.enabled {
+        match provider {
+            "cloudflare_api" => {
+                if !is_valid_cloudflare_account_id(&clean.cloudflare_account_id) {
+                    return Err(ApiError::new(
+                        ErrorCode::BadRequest,
+                        "Please provide a valid Cloudflare Account ID (16–64 alphanumeric characters).",
+                    ));
+                }
+                if next_cf_token.trim().is_empty() {
+                    return Err(ApiError::new(
+                        ErrorCode::BadRequest,
+                        "Please provide a Cloudflare Email Sending API Token.",
+                    ));
+                }
+                if !is_deliverable_email(&clean.from_email) {
+                    return Err(ApiError::new(
+                        ErrorCode::InvalidEmail,
+                        "Cloudflare Email Sending requires a valid verified sender domain email address.",
+                    ));
+                }
+            }
+            _ => {
+                if clean.host.trim().is_empty() {
+                    return Err(ApiError::new(
+                        ErrorCode::BadRequest,
+                        "Please provide an SMTP server host.",
+                    ));
+                }
+            }
+        }
+    }
+
     secrets.smtp = clean.clone();
     if body.clear_password {
         secrets.smtp_password.clear();
     } else if !body.password.trim().is_empty() {
         secrets.smtp_password = body.password.trim().to_string();
     }
+    secrets.cloudflare_api_token = next_cf_token;
     secrets.save(&state.secrets_path).map_err(internal_err)?;
+
+    state.mail_guard.reset_circuit_if_provider_changed(provider);
+
+    let creds = MailCredentials {
+        smtp_password: &secrets.smtp_password,
+        cloudflare_api_token: &secrets.cloudflare_api_token,
+    };
     Ok(Json(SmtpStatusResponse {
         settings: clean,
         has_password: !secrets.smtp_password.trim().is_empty(),
+        has_cloudflare_api_token: !secrets.cloudflare_api_token.trim().is_empty(),
+        active_provider: active_mail_provider(&secrets.smtp, &creds).map(str::to_string),
+        guard_status: state.mail_guard.status_dto(),
     }))
+}
+
+pub async fn admin_reset_mail_circuit_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let _admin = require_admin(&state, &headers).await?;
+    let status = state.mail_guard.reset_circuit();
+    Ok(Json(status))
+}
+
+pub async fn admin_clear_mail_suppression_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClearSuppressionBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let _admin = require_admin(&state, &headers).await?;
+    let status = state
+        .mail_guard
+        .clear_suppression(body.email.as_deref(), body.clear_all);
+    Ok(Json(status))
 }
 
 #[derive(Deserialize)]
@@ -573,7 +682,7 @@ pub async fn admin_preview_smtp_template_handler(
         .email_footer_text
         .as_deref()
         .unwrap_or(saved_footer.as_str());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &site_settings.default_locale);
     let (subject, html) = render_mail_preview(
@@ -602,7 +711,7 @@ pub async fn admin_test_smtp_handler(
         )
     })?;
 
-    let (cfg, pw) = {
+    let (cfg, pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
         let effective_cfg = body
             .settings
@@ -613,7 +722,12 @@ pub async fn admin_test_smtp_handler(
         } else {
             secrets.smtp_password.clone()
         };
-        (effective_cfg, effective_pw)
+        let effective_cf = if !body.cloudflare_api_token.trim().is_empty() {
+            body.cloudflare_api_token.trim().to_string()
+        } else {
+            secrets.cloudflare_api_token.clone()
+        };
+        (effective_cfg, effective_pw, effective_cf)
     };
     if !is_valid_email(&cfg.from_email) {
         return Err(ApiError::new(
@@ -627,30 +741,39 @@ pub async fn admin_test_smtp_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &site_settings.default_locale);
 
-    send_test_email(
-        &cfg,
-        &pw,
-        MailBrandContext {
+    let dedup_key = format!("test:{to_email}");
+    let ctx = MailSendContext {
+        guard: &state.mail_guard,
+        http_client: &state.http_client,
+        smtp: &cfg,
+        creds: MailCredentials {
+            smtp_password: &pw,
+            cloudflare_api_token: &cf_token,
+        },
+        brand: MailBrandContext {
             site_name: &site_settings.site_name,
             logo_url: &site_settings.logo_url,
             origin: &origin,
             locale: target_locale,
         },
-        &to_email,
-    )
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            ErrorCode::SmtpSendFailed,
-            format!("Failed to send test email: {e}"),
-        )
-    })?;
+        dedup_key: Some(&dedup_key),
+        cooldown_secs: 10,
+        allow_disabled_draft: true,
+    };
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    send_test_email(&ctx, &to_email)
+        .await
+        .map_err(|e| e.to_api_error("Failed to send test email"))?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "provider": normalize_mail_provider(&cfg.provider),
+        "guard_status": state.mail_guard.status_dto(),
+    })))
 }
 
 // ============================================================================
@@ -722,10 +845,17 @@ pub async fn admin_create_user_handler(
             )
         })?
     };
-    if body.password.chars().count() < 8 {
+    let pw_len = body.password.chars().count();
+    if pw_len < 8 {
         return Err(ApiError::new(
             ErrorCode::PasswordTooShort,
             "Password must be at least 8 characters long.",
+        ));
+    }
+    if pw_len > 256 {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "Password must be at most 256 characters long.",
         ));
     }
     let created = state
@@ -787,35 +917,58 @@ pub async fn admin_set_user_ban_handler(
     match updated {
         Some(u) => {
             if body.banned {
+                evict_collab_user_everywhere(&state, user_id).await;
                 let email = u.email.trim().to_string();
                 if is_deliverable_email(&email) {
-                    let (smtp_cfg, smtp_pw) = {
+                    let (smtp_cfg, smtp_pw, cf_token) = {
                         let secrets = state.runtime_secrets.read().await;
-                        (secrets.smtp.clone(), secrets.smtp_password.clone())
+                        (
+                            secrets.smtp.clone(),
+                            secrets.smtp_password.clone(),
+                            secrets.cloudflare_api_token.clone(),
+                        )
                     };
-                    if is_smtp_ready(&smtp_cfg) {
+                    let creds = MailCredentials {
+                        smtp_password: &smtp_pw,
+                        cloudflare_api_token: &cf_token,
+                    };
+                    if is_mail_ready(&smtp_cfg, &creds) {
                         let settings = state
                             .repo
                             .get_site_settings(&state.default_settings)
                             .await
                             .unwrap_or_else(|_| state.default_settings.clone());
-                        let origin = detect_external_origin(&headers);
+                        let origin = detect_external_origin(&state, &headers);
                         let target_locale =
                             resolve_request_locale(None, &headers, &settings.default_locale)
                                 .to_string();
                         let display_name = u.display_name.clone();
                         let username = u.username.clone();
                         let reason = body.reason.clone();
+                        let guard_cl = Arc::clone(&state.mail_guard);
+                        let http_cl = state.http_client.clone();
+                        let dedup_key = format!("account_ban:{user_id}:{email}");
                         tokio::spawn(async move {
-                            if let Err(err) = send_user_ban_notice_email(
-                                &smtp_cfg,
-                                &smtp_pw,
-                                MailBrandContext {
+                            let ctx = MailSendContext {
+                                guard: &guard_cl,
+                                http_client: &http_cl,
+                                smtp: &smtp_cfg,
+                                creds: MailCredentials {
+                                    smtp_password: &smtp_pw,
+                                    cloudflare_api_token: &cf_token,
+                                },
+                                brand: MailBrandContext {
                                     site_name: &settings.site_name,
                                     logo_url: &settings.logo_url,
                                     origin: &origin,
                                     locale: &target_locale,
                                 },
+                                dedup_key: Some(&dedup_key),
+                                cooldown_secs: 60,
+                                allow_disabled_draft: false,
+                            };
+                            if let Err(err) = send_user_ban_notice_email(
+                                &ctx,
                                 &display_name,
                                 &username,
                                 &reason,
@@ -845,10 +998,17 @@ pub async fn admin_reset_user_password_handler(
     Json(body): Json<AdminResetPasswordBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let _admin = require_admin(&state, &headers).await?;
-    if body.new_password.chars().count() < 8 {
+    let pw_len = body.new_password.chars().count();
+    if pw_len < 8 {
         return Err(ApiError::new(
             ErrorCode::PasswordTooShort,
             "Password must be at least 8 characters long.",
+        ));
+    }
+    if pw_len > 256 {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "Password must be at most 256 characters long.",
         ));
     }
     let updated = state
@@ -880,6 +1040,7 @@ pub async fn admin_delete_user_handler(
         .await
         .map_err(repo_err)?;
     if deleted {
+        evict_collab_user_everywhere(&state, user_id).await;
         Ok(Json(serde_json::json!({ "deleted": true })))
     } else {
         Err(ApiError::new(ErrorCode::UserNotFound, "User not found."))
@@ -928,16 +1089,27 @@ pub async fn admin_takedown_step_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale = resolve_request_locale(None, &headers, &settings.default_locale);
     let action_url = format!("{origin}/{target_locale}/studio");
 
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
     let mut emails_sent = 0usize;
-    if is_smtp_ready(&smtp_cfg) {
+    let ready = is_mail_ready(
+        &smtp_cfg,
+        &MailCredentials {
+            smtp_password: &smtp_pw,
+            cloudflare_api_token: &cf_token,
+        },
+    );
+    if ready {
         // Dispatch takedown notifications concurrently so multiple collaborators never stall the HTTP request
         let mut tasks = tokio::task::JoinSet::new();
         for recipient in &recipients {
@@ -945,8 +1117,11 @@ pub async fn admin_takedown_step_handler(
             if !is_deliverable_email(&email) {
                 continue;
             }
+            let guard_cl = Arc::clone(&state.mail_guard);
+            let http_cl = state.http_client.clone();
             let smtp_cfg_cl = smtp_cfg.clone();
             let smtp_pw_cl = smtp_pw.clone();
+            let cf_token_cl = cf_token.clone();
             let site_name_cl = settings.site_name.clone();
             let logo_url_cl = settings.logo_url.clone();
             let origin_cl = origin.clone();
@@ -955,16 +1130,28 @@ pub async fn admin_takedown_step_handler(
             let article_title_cl = article_title.clone();
             let reason_cl = reason.to_string();
             let action_url_cl = action_url.clone();
+            let dedup_key = format!("takedown:{track}:{chapter}:{step}:{email}");
             tasks.spawn(async move {
-                let res = send_takedown_notice_email(
-                    &smtp_cfg_cl,
-                    &smtp_pw_cl,
-                    MailBrandContext {
+                let ctx = MailSendContext {
+                    guard: &guard_cl,
+                    http_client: &http_cl,
+                    smtp: &smtp_cfg_cl,
+                    creds: MailCredentials {
+                        smtp_password: &smtp_pw_cl,
+                        cloudflare_api_token: &cf_token_cl,
+                    },
+                    brand: MailBrandContext {
                         site_name: &site_name_cl,
                         logo_url: &logo_url_cl,
                         origin: &origin_cl,
                         locale: &locale_cl,
                     },
+                    dedup_key: Some(&dedup_key),
+                    cooldown_secs: 60,
+                    allow_disabled_draft: false,
+                };
+                let res = send_takedown_notice_email(
+                    &ctx,
                     &display_name_cl,
                     &article_title_cl,
                     &reason_cl,

@@ -6,7 +6,7 @@ mod state;
 use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderName, HeaderValue, Method},
-    routing::{any, delete, get, patch, post},
+    routing::{any, delete, get, patch, post, put},
     Router,
 };
 use error::ApiError;
@@ -315,6 +315,11 @@ async fn main() -> anyhow::Result<()> {
     let blog_wp_api_url = env::var("BLOG_WP_API_URL")
         .ok()
         .filter(|s| !s.trim().is_empty());
+    let public_origin = env::var("PUBLIC_ORIGIN")
+        .ok()
+        .as_deref()
+        .and_then(state::normalize_origin_url);
+    let trust_proxy_headers = env_flag("TRUST_PROXY_HEADERS", false);
     let default_settings = SiteSettingsDto::default_with_env(&default_locale, &blog_origin_url);
 
     let state = AppState {
@@ -327,6 +332,10 @@ async fn main() -> anyhow::Result<()> {
         oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -334,13 +343,23 @@ async fn main() -> anyhow::Result<()> {
         note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        mail_guard: Arc::new(mailer::MailDeliveryGuard::load_or_default(Some(
+            data_dir.join("mail-guard.json"),
+        ))),
+        update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        public_origin: public_origin.clone(),
+        trust_proxy_headers,
         guest_cookie_secret,
         blog_sso_secret,
-        blog_origin_url,
+        blog_origin_url: blog_origin_url.clone(),
         blog_wp_api_url,
         dev_sso_simulator,
         default_settings,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
     };
 
     let exposed_headers = [
@@ -350,10 +369,29 @@ async fn main() -> anyhow::Result<()> {
         header::CONTENT_DISPOSITION,
         HeaderName::from_static("x-total-count"),
     ];
-    let cors = if let Ok(origin) = env::var("CORS_ORIGIN") {
-        if let Ok(hv) = origin.parse::<HeaderValue>() {
+    let mut default_allowed_origins: Vec<String> = vec![
+        "http://localhost:5173".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+        "http://localhost:3001".to_string(),
+        "http://127.0.0.1:3001".to_string(),
+    ];
+    if let Some(ref po) = public_origin {
+        default_allowed_origins.push(po.clone());
+    }
+    if let Some(blog_orig) = state::normalize_origin_url(&blog_origin_url) {
+        default_allowed_origins.push(blog_orig);
+    }
+
+    let cors = if let Ok(raw_cors) = env::var("CORS_ORIGIN") {
+        let parsed: Vec<HeaderValue> = raw_cors
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<HeaderValue>().ok())
+            .collect();
+        if !parsed.is_empty() {
             CorsLayer::new()
-                .allow_origin(hv)
+                .allow_origin(parsed)
                 .allow_methods([
                     Method::GET,
                     Method::POST,
@@ -365,10 +403,10 @@ async fn main() -> anyhow::Result<()> {
                 .allow_headers(Any)
                 .expose_headers(exposed_headers)
         } else {
-            CorsLayer::permissive().expose_headers(exposed_headers)
+            build_strict_default_cors(default_allowed_origins, exposed_headers)
         }
     } else {
-        CorsLayer::permissive().expose_headers(exposed_headers)
+        build_strict_default_cors(default_allowed_origins, exposed_headers)
     };
 
     let web_dist_dir = resolve_web_dist_dir(env_dir.as_deref());
@@ -538,6 +576,10 @@ fn build_router(
             get(routes::auth::oauth_authorize_handler),
         )
         .route(
+            "/api/v1/auth/oauth/bind-ticket",
+            post(routes::auth::oauth_create_bind_ticket_handler),
+        )
+        .route(
             "/api/v1/auth/oauth/callback",
             get(routes::auth::oauth_callback_handler),
         )
@@ -580,8 +622,21 @@ fn build_router(
             get(routes::studio::list_step_revisions_handler),
         )
         .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/{locale}/revisions/{rev_id}/diff",
+            get(routes::studio::diff_step_revision_handler),
+        )
+        .route(
             "/api/v1/studio/steps/{track}/{chapter}/{step}/{locale}/revisions/{rev_id}/restore",
             post(routes::studio::restore_step_revision_handler),
+        )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/events",
+            get(routes::studio::step_events_sse_handler),
+        )
+        .route(
+            "/api/v1/studio/steps/{track}/{chapter}/{step}/presence",
+            put(routes::studio::upsert_step_presence_handler)
+                .delete(routes::studio::delete_step_presence_handler),
         )
         .route("/api/v1/studio/steps", post(routes::studio::studio_save_step_handler))
         .route(
@@ -683,6 +738,14 @@ fn build_router(
             post(routes::admin::admin_preview_smtp_template_handler),
         )
         .route(
+            "/api/v1/admin/smtp/guard/reset-circuit",
+            post(routes::admin::admin_reset_mail_circuit_handler),
+        )
+        .route(
+            "/api/v1/admin/smtp/guard/clear-suppression",
+            post(routes::admin::admin_clear_mail_suppression_handler),
+        )
+        .route(
             "/api/v1/admin/users",
             get(routes::admin::admin_list_users_handler)
                 .post(routes::admin::admin_create_user_handler),
@@ -761,8 +824,92 @@ fn build_router(
     router
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(security_headers_middleware))
         .layer(cors)
         .with_state(state)
+}
+
+fn build_strict_default_cors(allowed_origins: Vec<String>, exposed_headers: [HeaderName; 5]) -> CorsLayer {
+    let allow_origin = tower_http::cors::AllowOrigin::predicate(
+        move |origin: &HeaderValue, request_parts: &axum::http::request::Parts| {
+            let Ok(orig_str) = origin.to_str() else {
+                return false;
+            };
+            let Some(norm_origin) = state::normalize_origin_url(orig_str) else {
+                return false;
+            };
+            if allowed_origins.iter().any(|allowed| allowed == &norm_origin) {
+                return true;
+            }
+            if let Some(host_val) = request_parts
+                .headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|h| state::is_valid_authority(h))
+            {
+                let host_lower = host_val.to_ascii_lowercase();
+                return norm_origin == format!("https://{host_lower}")
+                    || norm_origin == format!("http://{host_lower}");
+            }
+            false
+        },
+    );
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::IF_MATCH,
+            header::IF_NONE_MATCH,
+            HeaderName::from_static("idempotency-key"),
+            HeaderName::from_static("last-event-id"),
+            HeaderName::from_static("x-client-tab-id"),
+            HeaderName::from_static("x-device-id"),
+            HeaderName::from_static("x-onboarding-token"),
+            HeaderName::from_static("x-site-locale"),
+        ])
+        .expose_headers(exposed_headers)
+}
+
+async fn security_headers_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    h.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("frame-ancestors 'none'"),
+        );
+    }
+    resp
 }
 
 fn escape_html_text(raw: &str) -> String {
@@ -796,7 +943,7 @@ fn render_bootstrapped_index_html(raw_html: &str, settings: &SiteSettingsDto) ->
     };
 
     let custom_logo = settings.logo_url.trim();
-    if !custom_logo.is_empty() {
+    if !custom_logo.is_empty() && icehandnote_core::is_safe_image_src(custom_logo) {
         let escaped_logo = escape_html_text(custom_logo);
         html = html.replacen(
             "rel=\"icon\"",
@@ -887,6 +1034,15 @@ mod tests {
             note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
             guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
@@ -1398,15 +1554,25 @@ mod tests {
             from_email: "noreply@icehandnote.dev".to_string(),
             ..Default::default()
         };
-        mailer::send_user_ban_notice_email(
-            &smtp,
-            "",
-            mailer::MailBrandContext {
+        let guard = Arc::new(mailer::MailDeliveryGuard::in_memory());
+        let http_client = reqwest::Client::new();
+        let mail_ctx = mailer::MailSendContext {
+            guard: &guard,
+            http_client: &http_client,
+            smtp: &smtp,
+            creds: mailer::MailCredentials::default(),
+            brand: mailer::MailBrandContext {
                 site_name: "IceHandnote",
                 logo_url: "",
                 origin: "https://notes.test",
                 locale: "zh-CN",
             },
+            dedup_key: Some("test-ban-notice"),
+            cooldown_secs: 60,
+            allow_disabled_draft: false,
+        };
+        mailer::send_user_ban_notice_email(
+            &mail_ctx,
             &oauth_user.display_name,
             &oauth_user.username,
             "恶意刷屏灌水",
@@ -1723,6 +1889,15 @@ mod tests {
             note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
             guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
@@ -2025,6 +2200,15 @@ mod tests {
             note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
             guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
@@ -2489,6 +2673,15 @@ mod tests {
             note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: true,
             guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
             blog_origin_url: String::new(),
@@ -2700,6 +2893,1021 @@ mod tests {
 
         server_task.abort();
         smtp_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn collaboration_diff_sse_events_presence_and_bola_acl_end_to_end() {
+        let content_dir = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-sse-diff-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        std::fs::create_dir_all(&tmp_content).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        // Copy minimal seeded content into isolated tmp_content so step saves don't pollute workspace
+        let seed_track_dir = content_dir.join("getting-started").join("01-welcome");
+        let tmp_step_dir = tmp_content.join("getting-started").join("01-welcome");
+        std::fs::create_dir_all(&tmp_step_dir).unwrap();
+        std::fs::copy(
+            content_dir.join("getting-started").join("track.toml"),
+            tmp_content.join("getting-started").join("track.toml"),
+        )
+        .unwrap();
+        std::fs::copy(
+            seed_track_dir.join("01-welcome-to-icehandnote.zh-CN.md"),
+            tmp_step_dir.join("01-welcome-to-icehandnote.zh-CN.md"),
+        )
+        .unwrap();
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&tmp_content, store_path.clone(), false)
+                .unwrap();
+        let owner = repo
+            .register_local_account(
+                "sse_owner",
+                "Owner Author",
+                "owner@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Author,
+            )
+            .await
+            .unwrap();
+        let collab = repo
+            .register_local_account(
+                "sse_collab",
+                "Collab Editor",
+                "collab@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Author,
+            )
+            .await
+            .unwrap();
+        let outsider = repo
+            .register_local_account(
+                "sse_outsider",
+                "Outsider Author",
+                "outsider@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Author,
+            )
+            .await
+            .unwrap();
+        let _ = (&owner, &collab, &outsider);
+
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir: tmp_content.clone(),
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        async fn login_user(client: &reqwest::Client, base: &str, u: &str) -> String {
+            let res: serde_json::Value = client
+                .post(format!("{base}/api/v1/auth/login"))
+                .json(&serde_json::json!({ "identifier": u, "password": "StrongPass123!" }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            res["session_token"].as_str().unwrap().to_string()
+        }
+
+        let owner_tok = login_user(&client, &base, "sse_owner").await;
+        let collab_tok = login_user(&client, &base, "sse_collab").await;
+        let outsider_tok = login_user(&client, &base, "sse_outsider").await;
+
+        // 1. Owner creates a brand new collaborative article and saves v1 & v2
+        let save_v1 = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&owner_tok)
+            .header("x-client-tab-id", "tab_owner")
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "09-sse-collab-test",
+                "locale": "zh-CN",
+                "step_number": 9,
+                "estimated_minutes": 3,
+                "status": "draft",
+                "title": "SSE Collab Article",
+                "summary": "Initial",
+                "author": "Owner Author",
+                "license": "cc-by-sa-4.0",
+                "tags": [],
+                "body_markdown": "## Section A {#sec-a}\n\nLine one\nLine two",
+                "write_to_content_dir": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(save_v1.status(), reqwest::StatusCode::OK);
+        let v1_json: serde_json::Value = save_v1.json().await.unwrap();
+        let etag1 = v1_json["etag"].as_str().unwrap().to_string();
+
+        // Owner invites collab_editor
+        let inv_res: serde_json::Value = client
+            .post(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/invites"
+            ))
+            .bearer_auth(&owner_tok)
+            .json(&serde_json::json!({
+                "email": "collab@icehandnote.dev",
+                "role": "editor",
+                "locale_scope": []
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let inv_url = inv_res["invite_url"].as_str().unwrap();
+        let token = inv_url.split("#token=").nth(1).unwrap();
+        let acc = client
+            .post(format!("{base}/api/v1/studio/invites/accept"))
+            .bearer_auth(&collab_tok)
+            .json(&serde_json::json!({ "token": token }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(acc.status(), reqwest::StatusCode::OK);
+
+        // 2. Outsider BOLA ACL checks: SSE /events, PUT /presence, GET /revisions/{id}/diff MUST return 403
+        let outsider_sse = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/events"
+            ))
+            .bearer_auth(&outsider_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(outsider_sse.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let outsider_presence = client
+            .put(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/presence"
+            ))
+            .bearer_auth(&outsider_tok)
+            .json(&serde_json::json!({ "locale": "zh-CN", "state": "editing", "tab_id": "bad" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(outsider_presence.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 3. Collaborator opens SSE stream with Bearer header (RFC 9700 §4.3.2 compliant)
+        let mut sse_resp = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/events"
+            ))
+            .bearer_auth(&collab_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse_resp.status(), reqwest::StatusCode::OK);
+        let ctype = sse_resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ctype.contains("text/event-stream"), "ctype={ctype}");
+
+        // Initial presence frame arrives
+        let first_chunk = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            sse_resp.chunk(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let first_text = String::from_utf8_lossy(&first_chunk);
+        assert!(first_text.contains("event: presence"), "first_text={first_text}");
+
+        // Collaborator advertises presence + Owner saves v2 -> SSE receives both!
+        let put_pres = client
+            .put(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/presence"
+            ))
+            .bearer_auth(&collab_tok)
+            .json(&serde_json::json!({
+                "locale": "zh-CN",
+                "state": "editing",
+                "tab_id": "tab_collab"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put_pres.status(), reqwest::StatusCode::OK);
+        let pres_body: serde_json::Value = put_pres.json().await.unwrap();
+        assert_eq!(pres_body["members"][0]["username"], "sse_collab");
+
+        let save_v2 = client
+            .post(format!("{base}/api/v1/studio/steps"))
+            .bearer_auth(&owner_tok)
+            .header(header::IF_MATCH, &etag1)
+            .header("x-client-tab-id", "tab_owner")
+            .json(&serde_json::json!({
+                "track_slug": "getting-started",
+                "chapter_slug": "01-welcome",
+                "step_slug": "09-sse-collab-test",
+                "locale": "zh-CN",
+                "step_number": 9,
+                "estimated_minutes": 3,
+                "status": "draft",
+                "title": "SSE Collab Article",
+                "summary": "Initial",
+                "author": "Owner Author",
+                "license": "cc-by-sa-4.0",
+                "tags": [],
+                "body_markdown": "## Section A {#sec-a}\n\nLine one updated\nLine two\nLine three",
+                "write_to_content_dir": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(save_v2.status(), reqwest::StatusCode::OK);
+
+        let mut collected = String::new();
+        for _ in 0..8 {
+            if let Ok(Ok(Some(chunk))) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                sse_resp.chunk(),
+            )
+            .await
+            {
+                collected.push_str(&String::from_utf8_lossy(&chunk));
+                if collected.contains("event: revision_saved") && collected.contains("tab_owner") {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(
+            collected.contains("event: revision_saved") && collected.contains("tab_owner"),
+            "collected={collected}"
+        );
+
+        // 4. Last-Event-ID=1 replays event id > 1 immediately on reconnect!
+        let mut replay_resp = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/events"
+            ))
+            .bearer_auth(&collab_tok)
+            .header("last-event-id", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay_resp.status(), reqwest::StatusCode::OK);
+        let mut replay_text = String::new();
+        for _ in 0..6 {
+            if let Ok(Ok(Some(chunk))) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                replay_resp.chunk(),
+            )
+            .await
+            {
+                replay_text.push_str(&String::from_utf8_lossy(&chunk));
+                if replay_text.contains("event: revision_saved") {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(replay_text.contains("event: revision_saved"), "replay={replay_text}");
+
+        // 5. Diff API returns structured line diff and enforces outsider 403
+        let revs: Vec<serde_json::Value> = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/zh-CN/revisions"
+            ))
+            .bearer_auth(&collab_tok)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(revs.len(), 2);
+        let latest_id = revs[0]["id"].as_str().unwrap();
+
+        let outsider_diff = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/zh-CN/revisions/{latest_id}/diff"
+            ))
+            .bearer_auth(&outsider_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(outsider_diff.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let diff_json: serde_json::Value = client
+            .get(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/zh-CN/revisions/{latest_id}/diff"
+            ))
+            .bearer_auth(&collab_tok)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(diff_json["base_edit_seq"], 1);
+        assert_eq!(diff_json["target_edit_seq"], 2);
+        assert_eq!(diff_json["additions"], 2);
+        assert_eq!(diff_json["deletions"], 1);
+
+        // 6. Leave presence clears tab cleanly
+        let del_pres = client
+            .delete(format!(
+                "{base}/api/v1/studio/steps/getting-started/01-welcome/09-sse-collab-test/presence?tab_id=tab_collab"
+            ))
+            .bearer_auth(&collab_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(del_pres.status(), reqwest::StatusCode::OK);
+        let del_body: serde_json::Value = del_pres.json().await.unwrap();
+        assert_eq!(del_body["members"].as_array().unwrap().len(), 0);
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn hardened_security_headers_bind_ticket_sso_replay_svg_rbac_and_feature_toggles() {
+        let tmp_root = env::temp_dir().join(format!("icehandnote-sec-int-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        let seed_track_dir = resolve_content_dir(None)
+            .join("getting-started")
+            .join("01-welcome");
+        let tmp_step_dir = tmp_content.join("getting-started").join("01-welcome");
+        std::fs::create_dir_all(&tmp_step_dir).unwrap();
+        std::fs::copy(
+            resolve_content_dir(None)
+                .join("getting-started")
+                .join("track.toml"),
+            tmp_content.join("getting-started").join("track.toml"),
+        )
+        .unwrap();
+        std::fs::copy(
+            seed_track_dir.join("01-welcome-to-icehandnote.zh-CN.md"),
+            tmp_step_dir.join("01-welcome-to-icehandnote.zh-CN.md"),
+        )
+        .unwrap();
+
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&tmp_content, store_path.clone(), false)
+                .unwrap();
+        let admin = repo
+            .admin_create_user(
+                "sec_admin",
+                "Security Admin",
+                "sec-admin@icehandnote.dev",
+                UserRole::Admin,
+                "StrongPass123!",
+            )
+            .await
+            .unwrap();
+        let _author = repo
+            .register_local_account(
+                "sec_author",
+                "Security Author",
+                "sec-author@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Author,
+            )
+            .await
+            .unwrap();
+
+        let mut custom_settings = SiteSettingsDto::default_with_env("zh-CN", "");
+        custom_settings.sso_enabled = true;
+        custom_settings.oauth_enabled = true;
+        custom_settings.oauth_providers = vec![icehandnote_core::settings::OAuthProviderDto {
+            id: "github".to_string(),
+            enabled: true,
+            name: "GitHub".to_string(),
+            client_id: "cid".to_string(),
+            authorize_url: "https://github.com/login/oauth/authorize".to_string(),
+            token_url: "https://github.com/login/oauth/access_token".to_string(),
+            userinfo_url: "https://api.github.com/user".to_string(),
+            scopes: "read:user".to_string(),
+        }];
+        custom_settings.enable_likes = false;
+        custom_settings.enable_margin_notes = false;
+        custom_settings.enable_progress_tracking = false;
+        custom_settings.enable_passkeys = false;
+        repo.update_site_settings(admin.id, custom_settings.clone())
+            .await
+            .unwrap();
+
+        let sso_secret = "0123456789abcdef0123456789abcdef".to_string();
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir: tmp_content,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: sso_secret.clone(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: custom_settings,
+            http_client: reqwest::Client::new(),
+        };
+
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let base = format!("http://{addr}");
+
+        // 1. Security response headers
+        let health = client.get(format!("{base}/api/v1/health")).send().await.unwrap();
+        assert_eq!(health.status(), reqwest::StatusCode::OK);
+        let csp = health
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(csp.contains("frame-ancestors 'none'"), "csp={csp}");
+        assert_eq!(
+            health
+                .headers()
+                .get("x-frame-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            health
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+
+        async fn sign_in(client: &reqwest::Client, base: &str, u: &str) -> String {
+            let res: serde_json::Value = client
+                .post(format!("{base}/api/v1/auth/login"))
+                .json(&serde_json::json!({ "identifier": u, "password": "StrongPass123!" }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            res["session_token"].as_str().unwrap().to_string()
+        }
+        let admin_tok = sign_in(&client, &base, "sec_admin").await;
+        let author_tok = sign_in(&client, &base, "sec_author").await;
+
+        // 2. Disabled feature toggles return 403 Forbidden
+        let dummy_step = Uuid::new_v4();
+        let like_res = client
+            .post(format!("{base}/api/v1/steps/{dummy_step}/like"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(like_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let note_res = client
+            .post(format!("{base}/api/v1/me/notes"))
+            .bearer_auth(&author_tok)
+            .json(&serde_json::json!({
+                "step_id": dummy_step,
+                "locale_code": "zh-CN",
+                "block_anchor_id": "p-1",
+                "content": "note"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(note_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let prog_res = client
+            .post(format!("{base}/api/v1/me/progress"))
+            .bearer_auth(&author_tok)
+            .json(&serde_json::json!({
+                "step_id": dummy_step,
+                "completed": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(prog_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let pk_res = client
+            .post(format!("{base}/api/v1/auth/passkeys/register/options"))
+            .bearer_auth(&author_tok)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pk_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 3. Single-use OAuth bind ticket
+        let bt_resp = client
+            .post(format!("{base}/api/v1/auth/oauth/bind-ticket"))
+            .bearer_auth(&author_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bt_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            bt_resp
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let bt_json: serde_json::Value = bt_resp.json().await.unwrap();
+        let bt = bt_json["bind_ticket"].as_str().unwrap();
+
+        let auth_first = client
+            .get(format!(
+                "{base}/api/v1/auth/oauth/authorize?provider=github&bind_ticket={bt}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(auth_first.status().is_redirection(), "status={}", auth_first.status());
+
+        let auth_replay = client
+            .get(format!(
+                "{base}/api/v1/auth/oauth/authorize?provider=github&bind_ticket={bt}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(auth_replay.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // 4. SSO jti replay protection
+        let now = chrono::Utc::now().timestamp();
+        let claims = icehandnote_core::auth::BlogSsoClaims {
+            wp_user_id: 99,
+            username: "sso_replay_user".to_string(),
+            display_name: "SSO Replay".to_string(),
+            email: "sso-replay@example.com".to_string(),
+            avatar_url: String::new(),
+            wp_roles: vec!["subscriber".to_string()],
+            blog_origin: "https://blog.example.com".to_string(),
+            jti: "replay-jti-001".to_string(),
+            iat: now,
+            exp: now + 120,
+        };
+        let sso_tok = icehandnote_core::auth::sign_blog_sso_token(&claims, &sso_secret).unwrap();
+
+        let sso_first = client
+            .post(format!("{base}/api/v1/auth/sso/verify"))
+            .json(&serde_json::json!({ "sso_token": sso_tok }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sso_first.status(), reqwest::StatusCode::OK);
+
+        let sso_replay = client
+            .post(format!("{base}/api/v1/auth/sso/verify"))
+            .json(&serde_json::json!({ "sso_token": sso_tok }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sso_replay.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // 5. Non-admin .svg upload forbidden (403); admin allowed (201)
+        let svg_body = concat!(
+            "--ihnbound\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"icon.svg\"\r\n",
+            "Content-Type: image/svg+xml\r\n\r\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><rect width=\"16\" height=\"16\"/></svg>\r\n",
+            "--ihnbound--\r\n"
+        );
+        let author_svg = client
+            .post(format!("{base}/api/v1/studio/uploads"))
+            .bearer_auth(&author_tok)
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=ihnbound")
+            .body(svg_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(author_svg.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let admin_svg = client
+            .post(format!("{base}/api/v1/studio/uploads"))
+            .bearer_auth(&admin_tok)
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=ihnbound")
+            .body(svg_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(admin_svg.status(), reqwest::StatusCode::CREATED);
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn admin_mail_provider_mutual_exclusivity_guard_routes_and_concurrent_forgot_password_dedup()
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let tmp_root = env::temp_dir().join(format!("icehandnote-mail-api-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        let uploads_dir = tmp_root.join("uploads");
+        std::fs::create_dir_all(&tmp_content).unwrap();
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo = LocalSeedRepository::from_content_dir_with_options(
+            &tmp_content,
+            store_path.clone(),
+            false,
+        )
+        .unwrap();
+        let _admin = repo
+            .admin_create_user(
+                "mail_admin",
+                "Mail Admin",
+                "mail-admin@icehandnote.dev",
+                UserRole::Admin,
+                "StrongPass123!",
+            )
+            .await
+            .unwrap();
+        let _member = repo
+            .register_local_account(
+                "mail_member",
+                "Mail Member",
+                "member@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Reader,
+            )
+            .await
+            .unwrap();
+
+        let default_settings = SiteSettingsDto::default_with_env("zh-CN", "");
+        let guard = Arc::new(mailer::MailDeliveryGuard::in_memory());
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir: tmp_content,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: guard.clone(),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: false,
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings,
+            http_client: reqwest::Client::new(),
+        };
+
+        let app = build_router(state, CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        let admin_tok = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .json(&serde_json::json!({
+                "identifier": "mail_admin",
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let member_tok = client
+            .post(format!("{base}/api/v1/auth/login"))
+            .json(&serde_json::json!({
+                "identifier": "mail_member",
+                "password": "StrongPass123!"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 1. Non-admin cannot access mail guard management routes
+        let forbidden_reset = client
+            .post(format!("{base}/api/v1/admin/smtp/guard/reset-circuit"))
+            .bearer_auth(&member_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden_reset.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let forbidden_clear = client
+            .post(format!("{base}/api/v1/admin/smtp/guard/clear-suppression"))
+            .bearer_auth(&member_tok)
+            .json(&serde_json::json!({ "clear_all": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forbidden_clear.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 2. Cloudflare API mode rejects missing Account ID or API Token when enabled
+        let mut cf_settings = icehandnote_core::mail_templates::SmtpSettingsDto {
+            enabled: true,
+            provider: "cloudflare_api".to_string(),
+            cloudflare_account_id: "too-short".to_string(),
+            from_name: "IceHandnote".to_string(),
+            from_email: "noreply@icehandnote.dev".to_string(),
+            ..Default::default()
+        };
+        let bad_acct = client
+            .put(format!("{base}/api/v1/admin/smtp"))
+            .bearer_auth(&admin_tok)
+            .json(&serde_json::json!({
+                "settings": cf_settings,
+                "cloudflare_api_token": "cf-secret-token-xyz-999"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_acct.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        cf_settings.cloudflare_account_id = "0123456789abcdef0123456789abcdef".to_string();
+        let missing_tok = client
+            .put(format!("{base}/api/v1/admin/smtp"))
+            .bearer_auth(&admin_tok)
+            .json(&serde_json::json!({ "settings": cf_settings }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing_tok.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // 3. Valid Cloudflare API config activates ONLY cloudflare_api and never leaks token
+        let cf_secret = "cf-secret-token-xyz-999";
+        let ok_cf = client
+            .put(format!("{base}/api/v1/admin/smtp"))
+            .bearer_auth(&admin_tok)
+            .json(&serde_json::json!({
+                "settings": cf_settings,
+                "cloudflare_api_token": cf_secret
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok_cf.status(), reqwest::StatusCode::OK);
+        let ok_cf_text = ok_cf.text().await.unwrap();
+        assert!(
+            !ok_cf_text.contains(cf_secret),
+            "Cloudflare API token must never be serialized in HTTP response"
+        );
+        let ok_cf_json: serde_json::Value = serde_json::from_str(&ok_cf_text).unwrap();
+        assert_eq!(ok_cf_json["active_provider"].as_str(), Some("cloudflare_api"));
+        assert_eq!(ok_cf_json["has_cloudflare_api_token"].as_bool(), Some(true));
+
+        // 4. Slow local SMTP sink + switching strictly to SMTP (mutual exclusivity)
+        let smtp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let smtp_port = smtp_listener.local_addr().unwrap().port();
+        let deliveries = Arc::new(AtomicUsize::new(0));
+        let deliveries_bg = deliveries.clone();
+        let sink_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = smtp_listener.accept().await else {
+                    break;
+                };
+                let counter = deliveries_bg.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut reader = BufReader::new(r);
+                    let _ = w.write_all(b"220 slow-sink.local ESMTP Ready\r\n").await;
+                    let mut in_data = false;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let Ok(n) = reader.read_line(&mut line).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        if in_data {
+                            if line.trim_end_matches(['\r', '\n']) == "." {
+                                // Simulate 250ms mail server latency jitter
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                counter.fetch_add(1, Ordering::SeqCst);
+                                in_data = false;
+                                let _ = w.write_all(b"250 OK queued\r\n").await;
+                            }
+                            continue;
+                        }
+                        let upper = line.to_ascii_uppercase();
+                        if upper.starts_with("EHLO ") || upper.starts_with("HELO ") {
+                            let _ = w.write_all(b"250-slow-sink.local\r\n250 OK\r\n").await;
+                        } else if upper.starts_with("DATA") {
+                            in_data = true;
+                            let _ = w.write_all(b"354 End data\r\n").await;
+                        } else if upper.starts_with("QUIT") {
+                            let _ = w.write_all(b"221 Bye\r\n").await;
+                            break;
+                        } else {
+                            let _ = w.write_all(b"250 OK\r\n").await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let smtp_settings = icehandnote_core::mail_templates::SmtpSettingsDto {
+            enabled: true,
+            provider: "smtp".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: smtp_port,
+            encryption: "none".to_string(),
+            cloudflare_account_id: cf_settings.cloudflare_account_id.clone(),
+            verify_recipient_mx: false,
+            from_name: "IceHandnote".to_string(),
+            from_email: "noreply@icehandnote.dev".to_string(),
+            ..Default::default()
+        };
+        let ok_smtp = client
+            .put(format!("{base}/api/v1/admin/smtp"))
+            .bearer_auth(&admin_tok)
+            .json(&serde_json::json!({ "settings": smtp_settings }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok_smtp.status(), reqwest::StatusCode::OK);
+        let ok_smtp_json: serde_json::Value = ok_smtp.json().await.unwrap();
+        assert_eq!(ok_smtp_json["active_provider"].as_str(), Some("smtp"));
+        assert_eq!(ok_smtp_json["has_cloudflare_api_token"].as_bool(), Some(true));
+
+        // 5. Concurrent forgot-password requests during slow SMTP latency deliver strictly ONCE
+        let req1 = client
+            .post(format!("{base}/api/v1/auth/forgot-password"))
+            .json(&serde_json::json!({ "email": "member@icehandnote.dev", "locale": "zh-CN" }))
+            .send();
+        let req2 = client
+            .post(format!("{base}/api/v1/auth/forgot-password"))
+            .json(&serde_json::json!({ "email": "member@icehandnote.dev", "locale": "zh-CN" }))
+            .send();
+        let (r1, r2) = tokio::join!(req1, req2);
+        let mut statuses = vec![r1.unwrap().status(), r2.unwrap().status()];
+        statuses.sort_by_key(|s| s.as_u16());
+        assert_eq!(
+            statuses,
+            vec![
+                reqwest::StatusCode::OK,
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ],
+            "concurrent forgot-password under slow mail latency must allow strictly one send"
+        );
+        assert_eq!(
+            deliveries.load(Ordering::SeqCst),
+            1,
+            "slow SMTP sink must receive strictly 1 email across concurrent requests"
+        );
+
+        // 6. Admin guard management endpoints work
+        let reset_ok = client
+            .post(format!("{base}/api/v1/admin/smtp/guard/reset-circuit"))
+            .bearer_auth(&admin_tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reset_ok.status(), reqwest::StatusCode::OK);
+        let reset_json: serde_json::Value = reset_ok.json().await.unwrap();
+        assert_eq!(reset_json["circuit_open"].as_bool(), Some(false));
+
+        let clear_ok = client
+            .post(format!("{base}/api/v1/admin/smtp/guard/clear-suppression"))
+            .bearer_auth(&admin_tok)
+            .json(&serde_json::json!({ "clear_all": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(clear_ok.status(), reqwest::StatusCode::OK);
+        let clear_json: serde_json::Value = clear_ok.json().await.unwrap();
+        assert_eq!(clear_json["suppressed_count"].as_u64(), Some(0));
+
+        sink_task.abort();
+        server_task.abort();
         let _ = std::fs::remove_dir_all(tmp_root);
     }
 }

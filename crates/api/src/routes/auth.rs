@@ -1,15 +1,18 @@
 use crate::{
     error::ApiError,
     mailer::{
-        is_smtp_ready, send_email_change_code_email, send_login_anomaly_otp_email,
-        send_password_reset_email, send_registration_code_email, MailBrandContext,
+        is_mail_ready, send_email_change_code_email, send_login_anomaly_otp_email,
+        send_password_reset_email, send_registration_code_email, MailBrandContext, MailCredentials,
+        MailSendContext, MailSendError,
     },
     state::{
-        detect_external_origin, extract_bearer_token, extract_client_context,
-        finalize_login_session, internal_err, percent_decode_component, repo_err, repo_err_or,
-        require_authenticated_user, resolve_request_locale, resolve_webauthn_rp_and_origins,
-        AppState, ClientContext, OneTimeOAuthTicket, PendingEmailChangeOtp,
-        PendingOAuthAuthorization, PendingOAuthOnboarding, PendingPasskeyCeremony,
+        check_sliding_rate_limit, detect_external_origin, enforce_map_capacity,
+        extract_bearer_token, extract_client_context, extract_client_ip, extract_cookie_value,
+        finalize_login_session, internal_err, normalize_origin_url, percent_decode_component,
+        repo_err, repo_err_or, require_authenticated_user, resolve_request_locale,
+        resolve_webauthn_rp_and_origins, AppState, ClientContext, OneTimeOAuthTicket,
+        PendingEmailChangeOtp, PendingOAuthAuthorization, PendingOAuthBind,
+        PendingOAuthOnboarding, PendingPasskeyCeremony, EPHEMERAL_MAP_MAX_ENTRIES,
         GUEST_COOKIE_NAME,
     },
 };
@@ -180,7 +183,7 @@ pub struct OAuthAuthorizeQuery {
     #[serde(default)]
     pub return_to: Option<String>,
     #[serde(default)]
-    pub bind_token: Option<String>,
+    pub bind_ticket: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -238,6 +241,8 @@ pub struct OAuthOnboardingInfoResponse {
     pub suggested_username: String,
     pub display_name: String,
     pub email: String,
+    pub email_verified: bool,
+    pub smtp_enabled: bool,
     pub oauth_avatar_url: String,
     pub gravatar_preview_url: String,
     pub allow_registration: bool,
@@ -251,6 +256,8 @@ pub struct CompleteOAuthRegistrationRequest {
     #[serde(default)]
     pub display_name: String,
     pub email: String,
+    #[serde(default)]
+    pub verification_code: String,
     #[serde(default)]
     pub role: Option<UserRole>,
     #[serde(default = "default_avatar_source")]
@@ -302,10 +309,17 @@ fn validate_email(raw: &str) -> Result<String, ApiError> {
 }
 
 fn validate_password(raw: &str) -> Result<(), ApiError> {
-    if raw.chars().count() < 8 {
+    let char_len = raw.chars().count();
+    if char_len < 8 {
         return Err(ApiError::new(
             ErrorCode::PasswordTooShort,
             "Password must be at least 8 characters long.",
+        ));
+    }
+    if char_len > 256 {
+        return Err(ApiError::new(
+            ErrorCode::BadRequest,
+            "Password must be at most 256 characters long.",
         ));
     }
     Ok(())
@@ -411,18 +425,20 @@ async fn try_wordpress_remote_login(
         avatar_url,
         wp_roles,
         blog_origin: state.blog_origin_url.clone(),
+        jti: String::new(),
         iat: now,
         exp: now + 300,
     })
 }
 
-async fn complete_password_login_or_challenge(
+async fn complete_password_login_or_challenge_with_bind(
     state: &AppState,
     headers: &HeaderMap,
-    user: UserProfileDto,
+    mut user: UserProfileDto,
     anon_learner_id: Option<&str>,
     req_locale: Option<&str>,
     ctx: &ClientContext,
+    pending_bind: Option<PendingOAuthBind>,
 ) -> Result<Response, ApiError> {
     let anomaly = state
         .repo
@@ -432,20 +448,28 @@ async fn complete_password_login_or_challenge(
 
     let mut trust_device = true;
     if let Some(anomaly_reason) = anomaly {
-        let (smtp_cfg, smtp_pw) = {
+        let (smtp_cfg, smtp_pw, cf_token) = {
             let secrets = state.runtime_secrets.read().await;
-            (secrets.smtp.clone(), secrets.smtp_password.clone())
+            (
+                secrets.smtp.clone(),
+                secrets.smtp_password.clone(),
+                secrets.cloudflare_api_token.clone(),
+            )
         };
         let clean_email = user.email.trim();
         let email_deliverable = is_deliverable_email(clean_email);
+        let creds = MailCredentials {
+            smtp_password: &smtp_pw,
+            cloudflare_api_token: &cf_token,
+        };
 
-        if is_smtp_ready(&smtp_cfg) && email_deliverable {
+        if is_mail_ready(&smtp_cfg, &creds) && email_deliverable {
             let settings = state
                 .repo
                 .get_site_settings(&state.default_settings)
                 .await
                 .unwrap_or_else(|_| state.default_settings.clone());
-            let origin = detect_external_origin(headers);
+            let origin = detect_external_origin(state, headers);
             let target_locale =
                 resolve_request_locale(req_locale, headers, &settings.default_locale);
 
@@ -463,15 +487,28 @@ async fn complete_password_login_or_challenge(
                 .await
                 .map_err(repo_err)?;
 
-            if let Err(err) = send_login_anomaly_otp_email(
-                &smtp_cfg,
-                &smtp_pw,
-                MailBrandContext {
+            let dedup_key = format!(
+                "login_anomaly:{}:{}:{}",
+                user.id, ctx.ip_address, ctx.device_fingerprint
+            );
+            let mail_ctx = MailSendContext {
+                guard: &state.mail_guard,
+                http_client: &state.http_client,
+                smtp: &smtp_cfg,
+                creds,
+                brand: MailBrandContext {
                     site_name: &settings.site_name,
                     logo_url: &settings.logo_url,
                     origin: &origin,
                     locale: target_locale,
                 },
+                dedup_key: Some(&dedup_key),
+                cooldown_secs: 15,
+                allow_disabled_draft: false,
+            };
+
+            if let Err(err) = send_login_anomaly_otp_email(
+                &mail_ctx,
                 &user.display_name,
                 &ctx.ip_address,
                 &ctx.device_label,
@@ -482,11 +519,19 @@ async fn complete_password_login_or_challenge(
             )
             .await
             {
-                let _ = state.repo.delete_login_otp_challenge(challenge_id).await;
-                return Err(ApiError::new(
-                    ErrorCode::SmtpSendFailed,
-                    format!("Failed to send unusual sign-in verification email: {err}"),
-                ));
+                if !err.is_ambiguous_outcome() {
+                    let _ = state.repo.delete_login_otp_challenge(challenge_id).await;
+                }
+                return Err(err.to_api_error("Failed to send unusual sign-in verification email"));
+            }
+
+            if let Some(bind) = pending_bind {
+                let now_ts = Utc::now().timestamp();
+                let mut binds = state.pending_oauth_binds.lock().await;
+                enforce_map_capacity(&mut binds, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+                    v.expires_at <= now_ts
+                });
+                binds.insert(challenge_id, bind);
             }
 
             return Ok(Json(serde_json::json!({
@@ -518,6 +563,14 @@ async fn complete_password_login_or_challenge(
         }
     }
 
+    if let Some(bind) = pending_bind {
+        user = state
+            .repo
+            .bind_oauth_to_user(bind.user_id, &bind.provider, &bind.subject, &bind.avatar_url)
+            .await
+            .map_err(|e| repo_err_or(e, ErrorCode::Conflict))?;
+    }
+
     let session =
         finalize_login_session(state, user, anon_learner_id, ctx, trust_device).await?;
     Ok(Json(serde_json::json!({
@@ -529,6 +582,26 @@ async fn complete_password_login_or_challenge(
     .into_response())
 }
 
+async fn complete_password_login_or_challenge(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: UserProfileDto,
+    anon_learner_id: Option<&str>,
+    req_locale: Option<&str>,
+    ctx: &ClientContext,
+) -> Result<Response, ApiError> {
+    complete_password_login_or_challenge_with_bind(
+        state,
+        headers,
+        user,
+        anon_learner_id,
+        req_locale,
+        ctx,
+        None,
+    )
+    .await
+}
+
 pub async fn auth_login_handler(
     State(state): State<AppState>,
     extensions: Extensions,
@@ -536,9 +609,18 @@ pub async fn auth_login_handler(
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:login:{}", ctx.ip_address),
+        30,
+        60,
+        "Too many sign-in attempts. Please wait a moment and try again.",
+    )
+    .await?;
     match state
         .repo
         .authenticate_password(&body.identifier, &body.password)
@@ -595,11 +677,32 @@ pub async fn auth_login_verify_otp_handler(
             "Email verification code is required.",
         ));
     }
-    let (user, ip_address, user_agent, device_label, device_fingerprint) = state
+    let (mut user, ip_address, user_agent, device_label, device_fingerprint) = state
         .repo
         .verify_login_otp_challenge(body.challenge_id, clean_code)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?;
+
+    state.mail_guard.clear_recent_dedup_key(&format!(
+        "login_anomaly:{}:{}:{}",
+        user.id, ip_address, device_fingerprint
+    ));
+
+    let pending_bind = {
+        let now_ts = Utc::now().timestamp();
+        let mut binds = state.pending_oauth_binds.lock().await;
+        binds.retain(|_, v| v.expires_at > now_ts);
+        binds.remove(&body.challenge_id)
+    };
+    if let Some(bind) = pending_bind {
+        if bind.user_id == user.id {
+            user = state
+                .repo
+                .bind_oauth_to_user(bind.user_id, &bind.provider, &bind.subject, &bind.avatar_url)
+                .await
+                .map_err(|e| repo_err_or(e, ErrorCode::Conflict))?;
+        }
+    }
 
     let verified_ctx = ClientContext {
         ip_address,
@@ -624,11 +727,19 @@ pub async fn auth_login_resend_otp_handler(
     headers: HeaderMap,
     Json(body): Json<LoginResendOtpRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
-    if !is_smtp_ready(&smtp_cfg) {
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if !is_mail_ready(&smtp_cfg, &creds) {
         return Err(ApiError::new(
             ErrorCode::SmtpNotConfigured,
             "Email service is not configured on this site. Please contact an administrator.",
@@ -645,19 +756,29 @@ pub async fn auth_login_resend_otp_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
-    send_login_anomaly_otp_email(
-        &smtp_cfg,
-        &smtp_pw,
-        MailBrandContext {
+    let dedup_key = format!("login_anomaly_resend:{}", body.challenge_id);
+    let mail_ctx = MailSendContext {
+        guard: &state.mail_guard,
+        http_client: &state.http_client,
+        smtp: &smtp_cfg,
+        creds,
+        brand: MailBrandContext {
             site_name: &settings.site_name,
             logo_url: &settings.logo_url,
             origin: &origin,
             locale: target_locale,
         },
+        dedup_key: Some(&dedup_key),
+        cooldown_secs: 60,
+        allow_disabled_draft: false,
+    };
+
+    send_login_anomaly_otp_email(
+        &mail_ctx,
         &user.display_name,
         &ip_address,
         &device_label,
@@ -667,12 +788,7 @@ pub async fn auth_login_resend_otp_handler(
         &user.email,
     )
     .await
-    .map_err(|e| {
-        ApiError::new(
-            ErrorCode::SmtpSendFailed,
-            format!("Failed to resend unusual sign-in verification email: {e}"),
-        )
-    })?;
+    .map_err(|e| e.to_api_error("Failed to resend unusual sign-in verification email"))?;
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -699,11 +815,19 @@ pub async fn auth_send_register_code_handler(
     }
 
     let clean_email = validate_email(&body.email)?;
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
-    if !is_smtp_ready(&smtp_cfg) {
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if !is_mail_ready(&smtp_cfg, &creds) {
         return Err(ApiError::new(
             ErrorCode::SmtpNotConfigured,
             "Email service is not configured on this site. Please contact an administrator.",
@@ -716,33 +840,36 @@ pub async fn auth_send_register_code_handler(
         .await
         .map_err(repo_err)?;
 
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
-    if let Err(err) = send_registration_code_email(
-        &smtp_cfg,
-        &smtp_pw,
-        MailBrandContext {
+    let dedup_key = format!("register_code:{clean_email}");
+    let mail_ctx = MailSendContext {
+        guard: &state.mail_guard,
+        http_client: &state.http_client,
+        smtp: &smtp_cfg,
+        creds,
+        brand: MailBrandContext {
             site_name: &settings.site_name,
             logo_url: &settings.logo_url,
             origin: &origin,
             locale: target_locale,
         },
-        &clean_email,
-        &raw_code,
-        10,
-    )
-    .await
-    {
-        let _ = state
-            .repo
-            .consume_registration_verification_code(code_id)
-            .await;
-        return Err(ApiError::new(
-            ErrorCode::SmtpSendFailed,
-            format!("Failed to send registration verification email: {err}"),
-        ));
+        dedup_key: Some(&dedup_key),
+        cooldown_secs: 60,
+        allow_disabled_draft: false,
+    };
+
+    if let Err(err) = send_registration_code_email(&mail_ctx, &clean_email, &raw_code, 10).await {
+        // Keep verification code valid on ambiguous timeout so a delayed email can still be verified
+        if !err.is_ambiguous_outcome() {
+            let _ = state
+                .repo
+                .consume_registration_verification_code(code_id)
+                .await;
+        }
+        return Err(err.to_api_error("Failed to send registration verification email"));
     }
 
     Ok(Json(serde_json::json!({
@@ -791,6 +918,19 @@ pub async fn auth_register_handler(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ctx = extract_client_context(
+        &state,
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:register:{}", ctx.ip_address),
+        30,
+        60,
+        "Too many registration attempts. Please wait a moment and try again.",
+    )
+    .await?;
     let settings = state
         .repo
         .get_site_settings(&state.default_settings)
@@ -843,10 +983,6 @@ pub async fn auth_register_handler(
         .consume_registration_verification_code(verified_code_id)
         .await;
 
-    let ctx = extract_client_context(
-        &headers,
-        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
-    );
     let session = finalize_login_session(
         &state,
         created,
@@ -874,15 +1010,37 @@ pub async fn update_my_profile_handler(
 
 pub async fn forgot_password_handler(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ip = extract_client_ip(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+        state.trust_proxy_headers,
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:forgot:{ip}"),
+        30,
+        60,
+        "Too many password reset requests. Please wait a moment and try again.",
+    )
+    .await?;
     let clean_email = validate_email(&body.email)?;
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
-    if !is_smtp_ready(&smtp_cfg) {
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if !is_mail_ready(&smtp_cfg, &creds) {
         return Err(ApiError::new(
             ErrorCode::SmtpNotConfigured,
             "Email service is not configured on this site. Please contact an administrator.",
@@ -892,6 +1050,7 @@ pub async fn forgot_password_handler(
     let email_key = clean_email.to_ascii_lowercase();
     let now = Utc::now();
     {
+        // Reserve cooldown slot atomically BEFORE awaiting slow mail servers (eliminates TOCTOU double-send)
         let mut cooldowns = state.forgot_password_cooldowns.lock().await;
         cooldowns.retain(|_, ts| (now - *ts).num_seconds() < 300);
         if let Some(last_sent) = cooldowns.get(&email_key) {
@@ -907,6 +1066,10 @@ pub async fn forgot_password_handler(
                 .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
             }
         }
+        enforce_map_capacity(&mut cooldowns, EPHEMERAL_MAP_MAX_ENTRIES, |ts| {
+            (now - *ts).num_seconds() >= 300
+        });
+        cooldowns.insert(email_key.clone(), now);
     }
 
     let settings = state
@@ -914,7 +1077,7 @@ pub async fn forgot_password_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
@@ -928,32 +1091,44 @@ pub async fn forgot_password_handler(
             "{origin}/{target_locale}/auth/reset-password?reset_token={}",
             percent_encode_component(&raw_token)
         );
-        send_password_reset_email(
-            &smtp_cfg,
-            &smtp_pw,
-            MailBrandContext {
+        let dedup_key = format!("reset:{email_key}");
+        let mail_ctx = MailSendContext {
+            guard: &state.mail_guard,
+            http_client: &state.http_client,
+            smtp: &smtp_cfg,
+            creds,
+            brand: MailBrandContext {
                 site_name: &settings.site_name,
                 logo_url: &settings.logo_url,
                 origin: &origin,
                 locale: target_locale,
             },
+            dedup_key: Some(&dedup_key),
+            cooldown_secs: 60,
+            allow_disabled_draft: false,
+        };
+        if let Err(e) = send_password_reset_email(
+            &mail_ctx,
             &user.display_name,
             &raw_otp,
             &action_url,
             &user.email,
         )
         .await
-        .map_err(|e| {
-            ApiError::new(
-                ErrorCode::SmtpSendFailed,
-                format!("Failed to send password reset email: {e}"),
-            )
-        })?;
-    }
-
-    {
-        let mut cooldowns = state.forgot_password_cooldowns.lock().await;
-        cooldowns.insert(email_key, now);
+        {
+            if !e.is_ambiguous_outcome()
+                && !matches!(
+                    e,
+                    MailSendError::InFlightDuplicate | MailSendError::CooldownDuplicate { .. }
+                )
+            {
+                let mut cooldowns = state.forgot_password_cooldowns.lock().await;
+                if cooldowns.get(&email_key) == Some(&now) {
+                    cooldowns.remove(&email_key);
+                }
+            }
+            return Err(e.to_api_error("Failed to send password reset email"));
+        }
     }
 
     Ok(Json(serde_json::json!({
@@ -964,8 +1139,23 @@ pub async fn forgot_password_handler(
 
 pub async fn verify_reset_otp_handler(
     State(state): State<AppState>,
+    extensions: Extensions,
+    headers: HeaderMap,
     Json(body): Json<VerifyResetOtpRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ip = extract_client_ip(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+        state.trust_proxy_headers,
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:verify_reset:{ip}"),
+        30,
+        60,
+        "Too many verification attempts. Please wait a moment and try again.",
+    )
+    .await?;
     let clean_email = validate_email(&body.email)?;
     let clean_code = body.otp_code.trim();
     if clean_code.len() < 6 {
@@ -991,6 +1181,19 @@ pub async fn reset_password_handler(
     headers: HeaderMap,
     Json(body): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ctx = extract_client_context(
+        &state,
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:reset:{}", ctx.ip_address),
+        30,
+        60,
+        "Too many password reset attempts. Please wait a moment and try again.",
+    )
+    .await?;
     validate_password(&body.new_password)?;
     let user = if !body.otp_code.trim().is_empty() {
         let clean_email = validate_email(&body.email)?;
@@ -1011,10 +1214,6 @@ pub async fn reset_password_handler(
             "Please provide either a reset verification code or reset link token.",
         ));
     };
-    let ctx = extract_client_context(
-        &headers,
-        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
-    );
     let session =
         finalize_login_session(&state, user, body.anonymous_learner_id.as_deref(), &ctx, true)
             .await?;
@@ -1081,6 +1280,12 @@ pub async fn change_password_handler(
         .change_user_password(user.id, &body.current_password, &body.new_password)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::InvalidCurrentPassword))?;
+    if let Some(current_token) = extract_bearer_token(&headers) {
+        let _ = state
+            .repo
+            .revoke_other_user_sessions(user.id, &current_token)
+            .await;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1110,11 +1315,19 @@ pub async fn send_email_change_code_handler(
         ));
     }
 
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
-    if !is_smtp_ready(&smtp_cfg) {
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if !is_mail_ready(&smtp_cfg, &creds) {
         return Err(ApiError::new(
             ErrorCode::SmtpNotConfigured,
             "Email service is not configured on this site. Please contact an administrator.",
@@ -1122,7 +1335,9 @@ pub async fn send_email_change_code_handler(
     }
 
     let now = Utc::now();
+    let (raw_code, code_hash) = generate_email_verification_code(&clean_email);
     {
+        // Atomically reserve cooldown & pending OTP BEFORE awaiting slow mail servers (eliminates TOCTOU double-send)
         let mut map = state.email_change_otps.lock().await;
         map.retain(|_, v| v.expires_at > now);
         if let Some(existing) = map.get(&user.id) {
@@ -1138,6 +1353,17 @@ pub async fn send_email_change_code_handler(
                 .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
             }
         }
+        enforce_map_capacity(&mut map, EPHEMERAL_MAP_MAX_ENTRIES, |v| v.expires_at <= now);
+        map.insert(
+            user.id,
+            PendingEmailChangeOtp {
+                new_email: clean_email.clone(),
+                code_hash: code_hash.clone(),
+                attempts: 0,
+                created_at: now,
+                expires_at: now + chrono::Duration::minutes(10),
+            },
+        );
     }
 
     let settings = state
@@ -1145,45 +1371,39 @@ pub async fn send_email_change_code_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
-    let (raw_code, code_hash) = generate_email_verification_code(&clean_email);
-    send_email_change_code_email(
-        &smtp_cfg,
-        &smtp_pw,
-        MailBrandContext {
+    let dedup_key = format!("email_change:{}:{clean_email}", user.id);
+    let mail_ctx = MailSendContext {
+        guard: &state.mail_guard,
+        http_client: &state.http_client,
+        smtp: &smtp_cfg,
+        creds,
+        brand: MailBrandContext {
             site_name: &settings.site_name,
             logo_url: &settings.logo_url,
             origin: &origin,
             locale: target_locale,
         },
-        &user.display_name,
-        &clean_email,
-        &raw_code,
-        10,
-    )
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            ErrorCode::SmtpSendFailed,
-            format!("Failed to send email change verification code: {e}"),
-        )
-    })?;
+        dedup_key: Some(&dedup_key),
+        cooldown_secs: 60,
+        allow_disabled_draft: false,
+    };
 
+    if let Err(e) =
+        send_email_change_code_email(&mail_ctx, &user.display_name, &clean_email, &raw_code, 10)
+            .await
     {
-        let mut map = state.email_change_otps.lock().await;
-        map.insert(
-            user.id,
-            PendingEmailChangeOtp {
-                new_email: clean_email,
-                code_hash,
-                attempts: 0,
-                created_at: now,
-                expires_at: now + chrono::Duration::minutes(10),
-            },
-        );
+        // Only roll back pending OTP on definitive pre-send rejection (preserve on ambiguous timeout)
+        if !e.is_ambiguous_outcome() {
+            let mut map = state.email_change_otps.lock().await;
+            if map.get(&user.id).is_some_and(|v| v.created_at == now) {
+                map.remove(&user.id);
+            }
+        }
+        return Err(e.to_api_error("Failed to send email change verification code"));
     }
 
     Ok(Json(serde_json::json!({
@@ -1253,19 +1473,6 @@ pub async fn verify_email_change_handler(
     Ok(Json(updated))
 }
 
-fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw_cookies = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw_cookies.split(';') {
-        let trimmed = part.trim();
-        if let Some((k, v)) = trimmed.split_once('=') {
-            if k.trim() == name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
 fn build_state_cookie(value: &str, max_age_secs: i64, is_https: bool) -> String {
     let secure_attr = if is_https { "; Secure" } else { "" };
     format!(
@@ -1296,6 +1503,26 @@ fn sanitize_suggested_username(raw: &str) -> String {
     }
 }
 
+pub async fn oauth_create_bind_ticket_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_authenticated_user(&state, &headers).await?;
+    let (ticket, _, _) = generate_oauth_flow_tokens();
+    let now = Utc::now().timestamp();
+    {
+        let mut tickets = state.bind_tickets.lock().await;
+        enforce_map_capacity(&mut tickets, EPHEMERAL_MAP_MAX_ENTRIES, |(_, exp)| {
+            *exp <= now
+        });
+        tickets.insert(ticket.clone(), (user.id, now + 60));
+    }
+    let mut resp = Json(serde_json::json!({ "bind_ticket": ticket })).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(resp)
+}
+
 pub async fn oauth_authorize_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1321,24 +1548,40 @@ pub async fn oauth_authorize_handler(
         ));
     }
 
+    let now = Utc::now().timestamp();
     let mut bind_user_id = None;
-    if let Some(bt) = q.bind_token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if let Ok(Some(u)) = state.repo.get_user_by_session(bt).await {
-            bind_user_id = Some(u.id);
-        }
+    if let Some(bt) = q
+        .bind_ticket
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let entry = {
+            let mut tickets = state.bind_tickets.lock().await;
+            tickets.retain(|_, (_, exp)| *exp > now);
+            tickets.remove(bt)
+        };
+        let Some((uid, _exp)) = entry.filter(|(_, exp)| *exp > now) else {
+            return Err(ApiError::new(
+                ErrorCode::OAuthTicketInvalid,
+                "OAuth bind ticket is invalid or has expired.",
+            ));
+        };
+        bind_user_id = Some(uid);
     }
 
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let is_https = origin.starts_with("https://");
     let redirect_uri = format!("{origin}/api/v1/auth/oauth/callback");
     let return_to = sanitize_internal_return_path(q.return_to.as_deref(), &settings.default_locale);
 
     let (oauth_state, code_verifier, code_challenge) = generate_oauth_flow_tokens();
-    let now = Utc::now().timestamp();
 
     {
         let mut pending = state.oauth_pending.lock().await;
-        pending.retain(|_, v| v.expires_at > now);
+        enforce_map_capacity(&mut pending, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+            v.expires_at <= now
+        });
         pending.insert(
             oauth_state.clone(),
             PendingOAuthAuthorization {
@@ -1389,7 +1632,7 @@ pub async fn oauth_callback_handler(
     headers: HeaderMap,
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Response {
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     let is_https = origin.starts_with("https://");
     let clear_cookie = build_state_cookie("", 0, is_https);
 
@@ -1524,8 +1767,13 @@ pub async fn oauth_callback_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let mut email_is_verified = profile_val
+        .get("email_verified")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && validate_and_normalize_email(&email).is_some();
 
-    if email.is_empty() && flow.userinfo_url.contains("api.github.com/user") {
+    if flow.userinfo_url.contains("api.github.com/user") && !email_is_verified {
         if let Ok(em_resp) = state
             .http_client
             .get("https://api.github.com/user/emails")
@@ -1537,15 +1785,30 @@ pub async fn oauth_callback_handler(
             .await
         {
             if let Ok(arr) = em_resp.json::<Vec<serde_json::Value>>().await {
-                if let Some(primary) = arr.iter().find(|item| {
+                let norm_public = validate_and_normalize_email(&email);
+                let matching_verified = norm_public.as_ref().and_then(|target| {
+                    arr.iter().find(|item| {
+                        item.get("verified").and_then(|v| v.as_bool()).unwrap_or(false)
+                            && item
+                                .get("email")
+                                .and_then(|v| v.as_str())
+                                .and_then(validate_and_normalize_email)
+                                .is_some_and(|e| e.eq_ignore_ascii_case(target))
+                    })
+                });
+                let primary_verified = arr.iter().find(|item| {
                     item.get("primary").and_then(|v| v.as_bool()).unwrap_or(false)
-                        && item
-                            .get("verified")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                }) {
-                    if let Some(addr) = primary.get("email").and_then(|v| v.as_str()) {
+                        && item.get("verified").and_then(|v| v.as_bool()).unwrap_or(false)
+                });
+                if matching_verified.is_some() {
+                    email_is_verified = true;
+                } else if email.is_empty() {
+                    if let Some(addr) = primary_verified
+                        .and_then(|item| item.get("email"))
+                        .and_then(|v| v.as_str())
+                    {
                         email = addr.to_string();
+                        email_is_verified = validate_and_normalize_email(&email).is_some();
                     }
                 }
             }
@@ -1569,18 +1832,42 @@ pub async fn oauth_callback_handler(
         flow.provider_id.trim().to_ascii_lowercase()
     };
 
-    // Case 1: Logged-in user initiated explicit account binding
+    // Case 1: Logged-in user initiated explicit account binding -> exchange via short-lived POST ticket so device fingerprint & anomaly OTP protect binding
     if let Some(target_uid) = flow.bind_user_id {
-        match state
-            .repo
-            .bind_oauth_to_user(target_uid, &provider_key, &subject, avatar_url)
-            .await
-        {
-            Ok(_) => return redirect_with_param(&flow.return_to, "oauth_bound", "1"),
+        let users = match state.repo.admin_list_users().await {
+            Ok(list) => list,
             Err(_) => {
-                return redirect_with_param(&flow.return_to, "oauth_error", "account_already_bound")
+                return redirect_with_param(&flow.return_to, "oauth_error", "account_lookup_failed")
             }
+        };
+        let Some(target_user) = users.into_iter().find(|u| u.id == target_uid) else {
+            return redirect_with_param(&flow.return_to, "oauth_error", "account_lookup_failed");
+        };
+        if target_user.is_banned {
+            return redirect_with_param(&flow.return_to, "oauth_error", "account_banned");
         }
+        let (one_time_ticket, _, _) = generate_oauth_flow_tokens();
+        {
+            let mut tickets = state.oauth_tickets.lock().await;
+            enforce_map_capacity(&mut tickets, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+                v.expires_at <= now
+            });
+            tickets.insert(
+                one_time_ticket.clone(),
+                OneTimeOAuthTicket {
+                    user: target_user,
+                    pending_bind: Some(PendingOAuthBind {
+                        user_id: target_uid,
+                        provider: provider_key,
+                        subject,
+                        avatar_url: avatar_url.trim().to_string(),
+                        expires_at: now + 600,
+                    }),
+                    expires_at: now + 60,
+                },
+            );
+        }
+        return redirect_with_param(&flow.return_to, "oauth_ticket", &one_time_ticket);
     }
 
     // Case 2: Existing bound OAuth account -> sign in immediately
@@ -1596,11 +1883,14 @@ pub async fn oauth_callback_handler(
             let (one_time_ticket, _, _) = generate_oauth_flow_tokens();
             {
                 let mut tickets = state.oauth_tickets.lock().await;
-                tickets.retain(|_, v| v.expires_at > now);
+                enforce_map_capacity(&mut tickets, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+                    v.expires_at <= now
+                });
                 tickets.insert(
                     one_time_ticket.clone(),
                     OneTimeOAuthTicket {
                         user,
+                        pending_bind: None,
                         expires_at: now + 60,
                     },
                 );
@@ -1615,9 +1905,17 @@ pub async fn oauth_callback_handler(
     let (onboarding_token, _, _) = generate_oauth_flow_tokens();
     let suggested_username = sanitize_suggested_username(username_hint);
     let onboarding_display_name = display_name.trim().to_string();
+    let normalized_email = validate_and_normalize_email(&email).unwrap_or_default();
+    let verified_email = if email_is_verified && !normalized_email.is_empty() {
+        Some(normalized_email.clone())
+    } else {
+        None
+    };
     {
         let mut onboardings = state.oauth_onboardings.lock().await;
-        onboardings.retain(|_, v| v.expires_at > now);
+        enforce_map_capacity(&mut onboardings, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+            v.expires_at <= now
+        });
         onboardings.insert(
             onboarding_token.clone(),
             PendingOAuthOnboarding {
@@ -1626,7 +1924,8 @@ pub async fn oauth_callback_handler(
                 subject,
                 suggested_username,
                 display_name: onboarding_display_name,
-                email: validate_and_normalize_email(&email).unwrap_or_default(),
+                email: normalized_email,
+                verified_email,
                 oauth_avatar_url: avatar_url.trim().to_string(),
                 expires_at: now + 900,
             },
@@ -1658,6 +1957,14 @@ pub async fn oauth_get_onboarding_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
+    let smtp_enabled = {
+        let secrets = state.runtime_secrets.read().await;
+        let creds = MailCredentials {
+            smtp_password: &secrets.smtp_password,
+            cloudflare_api_token: &secrets.cloudflare_api_token,
+        };
+        is_mail_ready(&secrets.smtp, &creds)
+    };
     let gravatar_preview_url = if info.email.is_empty() {
         String::new()
     } else {
@@ -1670,6 +1977,8 @@ pub async fn oauth_get_onboarding_handler(
         suggested_username: info.suggested_username,
         display_name: info.display_name,
         email: info.email,
+        email_verified: info.verified_email.is_some(),
+        smtp_enabled,
         oauth_avatar_url: info.oauth_avatar_url,
         gravatar_preview_url,
         allow_registration: settings.allow_registration,
@@ -1711,6 +2020,35 @@ pub async fn oauth_complete_registration_handler(
         ));
     };
 
+    let smtp_ready = {
+        let secrets = state.runtime_secrets.read().await;
+        let creds = MailCredentials {
+            smtp_password: &secrets.smtp_password,
+            cloudflare_api_token: &secrets.cloudflare_api_token,
+        };
+        is_mail_ready(&secrets.smtp, &creds)
+    };
+    let provider_verified_match = onboarding
+        .verified_email
+        .as_deref()
+        .is_some_and(|ve| ve.eq_ignore_ascii_case(&clean_email));
+    let mut verified_code_id: Option<Uuid> = None;
+    if smtp_ready && !provider_verified_match {
+        let clean_code = body.verification_code.trim();
+        if clean_code.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::VerificationCodeRequired,
+                "Email verification code is required.",
+            ));
+        }
+        let cid = state
+            .repo
+            .verify_registration_verification_code(&clean_email, clean_code)
+            .await
+            .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?;
+        verified_code_id = Some(cid);
+    }
+
     let chosen_role = match body.role {
         Some(UserRole::Author) if settings.allow_author_registration => UserRole::Author,
         _ => UserRole::Reader,
@@ -1732,12 +2070,17 @@ pub async fn oauth_complete_registration_handler(
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::Conflict))?;
 
+    if let Some(cid) = verified_code_id {
+        let _ = state.repo.consume_registration_verification_code(cid).await;
+    }
+
     {
         let mut onboardings = state.oauth_onboardings.lock().await;
         onboardings.remove(body.onboarding_token.trim());
     }
 
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
@@ -1753,6 +2096,20 @@ pub async fn oauth_bind_existing_handler(
     headers: HeaderMap,
     Json(body): Json<BindExistingOAuthRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ctx = extract_client_context(
+        &state,
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:oauth_bind:{}", ctx.ip_address),
+        30,
+        60,
+        "Too many binding attempts. Please wait a moment and try again.",
+    )
+    .await?;
+
     let now = Utc::now().timestamp();
     let info = {
         let mut onboardings = state.oauth_onboardings.lock().await;
@@ -1778,33 +2135,26 @@ pub async fn oauth_bind_existing_handler(
         ));
     };
 
-    let bound_user = state
-        .repo
-        .bind_oauth_to_user(
-            local_user.id,
-            &onboarding.provider,
-            &onboarding.subject,
-            &onboarding.oauth_avatar_url,
-        )
-        .await
-        .map_err(|e| repo_err_or(e, ErrorCode::Conflict))?;
-
     {
         let mut onboardings = state.oauth_onboardings.lock().await;
         onboardings.remove(body.onboarding_token.trim());
     }
 
-    let ctx = extract_client_context(
-        &headers,
-        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
-    );
-    complete_password_login_or_challenge(
+    let pending_bind = PendingOAuthBind {
+        user_id: local_user.id,
+        provider: onboarding.provider,
+        subject: onboarding.subject,
+        avatar_url: onboarding.oauth_avatar_url,
+        expires_at: now + 600,
+    };
+    complete_password_login_or_challenge_with_bind(
         &state,
         &headers,
-        bound_user,
+        local_user,
         body.anonymous_learner_id.as_deref(),
         body.locale.as_deref(),
         &ctx,
+        Some(pending_bind),
     )
     .await
 }
@@ -1829,16 +2179,18 @@ pub async fn oauth_exchange_handler(
     };
 
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
-    let mut resp = complete_password_login_or_challenge(
+    let mut resp = complete_password_login_or_challenge_with_bind(
         &state,
         &headers,
         valid.user,
         body.anonymous_learner_id.as_deref(),
         body.locale.as_deref(),
         &ctx,
+        valid.pending_bind,
     )
     .await?;
     resp.headers_mut()
@@ -1852,6 +2204,32 @@ pub async fn auth_sso_verify_handler(
     headers: HeaderMap,
     Json(body): Json<SsoVerifyRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let ctx = extract_client_context(
+        &state,
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:sso:{}", ctx.ip_address),
+        30,
+        60,
+        "Too many SSO verification attempts. Please wait a moment and try again.",
+    )
+    .await?;
+
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.sso_enabled && !state.dev_sso_simulator {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "External blog SSO is disabled on this site.",
+        ));
+    }
+
     let claims = verify_blog_sso_token(&body.sso_token, &state.blog_sso_secret).map_err(|e| {
         ApiError::new(
             ErrorCode::SsoInvalidSignature,
@@ -1859,15 +2237,46 @@ pub async fn auth_sso_verify_handler(
         )
     })?;
 
+    let expected_origin_raw = if !settings.blog_origin_url.trim().is_empty() {
+        settings.blog_origin_url.as_str()
+    } else {
+        state.blog_origin_url.as_str()
+    };
+    if let Some(expected_norm) = normalize_origin_url(expected_origin_raw) {
+        let actual_norm = normalize_origin_url(&claims.blog_origin);
+        if actual_norm.as_deref() != Some(expected_norm.as_str()) {
+            return Err(ApiError::new(
+                ErrorCode::SsoInvalidSignature,
+                "SSO token blog origin does not match configured site.",
+            ));
+        }
+    }
+
+    let clean_jti = claims.jti.trim();
+    if clean_jti.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::SsoInvalidSignature,
+            "SSO token is missing a unique jti claim.",
+        ));
+    }
+    {
+        let now = Utc::now().timestamp();
+        let mut used = state.sso_used_jtis.lock().await;
+        enforce_map_capacity(&mut used, EPHEMERAL_MAP_MAX_ENTRIES, |exp| *exp < now);
+        if used.get(clean_jti).is_some_and(|exp| *exp >= now) {
+            return Err(ApiError::new(
+                ErrorCode::SsoInvalidSignature,
+                "SSO token has already been used.",
+            ));
+        }
+        used.insert(clean_jti.to_string(), claims.exp.saturating_add(60));
+    }
+
     let user = state
         .repo
         .upsert_blog_user(&claims)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::Forbidden))?;
-    let ctx = extract_client_context(
-        &headers,
-        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
-    );
     complete_password_login_or_challenge(
         &state,
         &headers,
@@ -1890,6 +2299,7 @@ pub async fn auth_dev_sso_ticket_handler(
         ));
     }
     let now = Utc::now().timestamp();
+    let jti = format!("dev-{}", Uuid::new_v4().simple());
     let claims = match body.preset.as_str() {
         "admin" | "sylvia" => BlogSsoClaims {
             wp_user_id: 1,
@@ -1899,6 +2309,7 @@ pub async fn auth_dev_sso_ticket_handler(
             avatar_url: String::new(),
             wp_roles: vec!["administrator".to_string()],
             blog_origin: state.blog_origin_url.clone(),
+            jti,
             iat: now,
             exp: now + 300,
         },
@@ -1910,6 +2321,7 @@ pub async fn auth_dev_sso_ticket_handler(
             avatar_url: String::new(),
             wp_roles: vec!["author".to_string()],
             blog_origin: state.blog_origin_url.clone(),
+            jti,
             iat: now,
             exp: now + 300,
         },
@@ -1921,6 +2333,7 @@ pub async fn auth_dev_sso_ticket_handler(
             avatar_url: String::new(),
             wp_roles: vec!["subscriber".to_string()],
             blog_origin: state.blog_origin_url.clone(),
+            jti,
             iat: now,
             exp: now + 300,
         },
@@ -1937,7 +2350,16 @@ pub async fn auth_logout_handler(
     if let Some(token) = extract_bearer_token(&headers) {
         state.repo.delete_session(&token).await.map_err(repo_err)?;
     }
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let is_https = detect_external_origin(&state, &headers).starts_with("https://");
+    let secure_attr = if is_https { "; Secure" } else { "" };
+    let expired_guest_cookie = format!(
+        "{GUEST_COOKIE_NAME}=; Path=/api/v1; HttpOnly; SameSite=Lax; Max-Age=0{secure_attr}"
+    );
+    let mut resp = Json(serde_json::json!({ "ok": true })).into_response();
+    if let Ok(hv) = HeaderValue::from_str(&expired_guest_cookie) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    Ok(resp)
 }
 
 // ============================================================================
@@ -2240,7 +2662,7 @@ pub async fn passkey_list_handler(
         .get_site_settings(&state.default_settings)
         .await
         .unwrap_or_else(|_| state.default_settings.clone());
-    let (rp_id, _) = resolve_webauthn_rp_and_origins(&headers);
+    let (rp_id, _) = resolve_webauthn_rp_and_origins(&state, &headers);
     let passkeys = state
         .repo
         .list_user_passkeys(user.id)
@@ -2264,7 +2686,7 @@ pub async fn passkey_register_options_handler(
     let user = require_authenticated_user(&state, &headers).await?;
     let is_promotion = body.map(|b| b.0.promotion).unwrap_or(false);
 
-    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&headers);
+    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&state, &headers);
     let existing = state
         .repo
         .list_user_passkeys(user.id)
@@ -2276,7 +2698,9 @@ pub async fn passkey_register_options_handler(
 
     {
         let mut ceremonies = state.passkey_ceremonies.lock().await;
-        ceremonies.retain(|_, c| c.expires_at > now);
+        enforce_map_capacity(&mut ceremonies, EPHEMERAL_MAP_MAX_ENTRIES, |c| {
+            c.expires_at <= now
+        });
         ceremonies.insert(
             ceremony_id,
             PendingPasskeyCeremony {
@@ -2388,6 +2812,7 @@ pub async fn passkey_register_verify_handler(
     }
 
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );
@@ -2474,14 +2899,16 @@ pub async fn passkey_login_options_handler(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let _settings = ensure_passkeys_enabled(&state).await?;
-    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&headers);
+    let (rp_id, allowed_origins) = resolve_webauthn_rp_and_origins(&state, &headers);
     let challenge = generate_webauthn_challenge();
     let ceremony_id = Uuid::new_v4();
     let now = Utc::now();
 
     {
         let mut ceremonies = state.passkey_ceremonies.lock().await;
-        ceremonies.retain(|_, c| c.expires_at > now);
+        enforce_map_capacity(&mut ceremonies, EPHEMERAL_MAP_MAX_ENTRIES, |c| {
+            c.expires_at <= now
+        });
         ceremonies.insert(
             ceremony_id,
             PendingPasskeyCeremony {
@@ -2570,6 +2997,7 @@ pub async fn passkey_login_verify_handler(
         .await;
 
     let ctx = extract_client_context(
+        &state,
         &headers,
         extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
     );

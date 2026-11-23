@@ -1,32 +1,74 @@
 use crate::{
     error::ApiError,
-    mailer::{is_smtp_ready, send_collaborator_invite_email, MailBrandContext},
+    mailer::{
+        is_mail_ready, send_collaborator_invite_email, MailBrandContext, MailCredentials,
+        MailSendContext,
+    },
     state::{
-        check_invite_rate_limit, detect_external_origin, extract_bearer_token, internal_err,
-        optional_authenticated_user, repo_err, repo_err_or, require_admin,
+        check_invite_rate_limit, close_collab_room, detect_external_origin, emit_collab_event,
+        evict_collab_user_from_room, extract_bearer_token, internal_err,
+        optional_authenticated_user, remove_collab_presence, repo_err, repo_err_or, require_admin,
         require_authenticated_user, require_author_or_admin, require_studio_access,
-        resolve_request_locale, AppState,
+        resolve_request_locale, sanitize_collab_tab_id, snapshot_and_subscribe_collab_events,
+        upsert_collab_presence, AppState, CollabControlSignal,
     },
 };
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use icehandnote_core::{
     auth::{
-        format_step_markdown_file, normalize_collaborator_role, normalize_locale_scope,
-        percent_encode_component, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        SaveStudioStepInput, UserProfileDto,
+        build_revision_diff, format_step_markdown_file, normalize_collaborator_role,
+        normalize_locale_scope, percent_encode_component, CollaboratorInviteDto,
+        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, UserProfileDto,
     },
     compile_notebook_markdown,
     error::ErrorCode,
 };
 use icehandnote_db::TutorialRepository;
 use serde::{Deserialize, Serialize};
-use std::env;
+use std::{convert::Infallible, env, time::Duration};
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
+
+fn extract_tab_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-client-tab-id")
+        .and_then(|v| v.to_str().ok())
+        .map(sanitize_collab_tab_id)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+async fn resolve_step_collab_room(
+    state: &AppState,
+    viewer: &UserProfileDto,
+    track: &str,
+    chapter: &str,
+    step: &str,
+) -> Result<Uuid, ApiError> {
+    let resolved = state
+        .repo
+        .resolve_step_collab_access(viewer, track.trim(), chapter.trim(), step.trim())
+        .await
+        .map_err(repo_err)?;
+    match resolved {
+        None => Err(ApiError::new(
+            ErrorCode::StepNotFound,
+            "Article not found or unavailable.",
+        )),
+        Some((_step_id, role, _)) if role == "none" => Err(ApiError::new(
+            ErrorCode::StepEditForbidden,
+            "You do not have permission to collaborate on this article.",
+        )),
+        Some((step_id, _, _)) => Ok(step_id),
+    }
+}
 
 fn extract_if_match(headers: &HeaderMap) -> Option<String> {
     headers
@@ -179,6 +221,34 @@ pub async fn studio_save_step_handler(
         .studio_save_step(&author, input, &state.content_dir, true)
         .await
         .map_err(repo_err)?;
+    let tab_id = extract_tab_id(&headers);
+    if let Ok(step_id) = resolve_step_collab_room(
+        &state,
+        &author,
+        &saved.track_slug,
+        &saved.chapter_slug,
+        &saved.step_slug,
+    )
+    .await
+    {
+        emit_collab_event(
+            &state,
+            step_id,
+            "revision_saved",
+            &serde_json::json!({
+                "track_slug": saved.track_slug,
+                "chapter_slug": saved.chapter_slug,
+                "step_slug": saved.step_slug,
+                "locale": saved.locale,
+                "edit_seq": saved.edit_seq,
+                "etag": saved.etag,
+                "author_user_id": author.id,
+                "author_name": author.display_name,
+                "tab_id": tab_id,
+            }),
+        )
+        .await;
+    }
     let mut resp_headers = HeaderMap::new();
     if !saved.etag.is_empty() {
         if let Ok(hv) = HeaderValue::from_str(&saved.etag) {
@@ -194,11 +264,19 @@ pub async fn studio_delete_step_handler(
     AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let actor = require_author_or_admin(&state, &headers).await?;
+    let room_step_id = resolve_step_collab_room(&state, &actor, &track, &chapter, &step)
+        .await
+        .ok();
     let deleted = state
         .repo
         .studio_delete_step(&actor, &track, &chapter, &step, &state.content_dir)
         .await
         .map_err(repo_err)?;
+    if deleted {
+        if let Some(step_id) = room_step_id {
+            close_collab_room(&state, step_id).await;
+        }
+    }
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
@@ -330,29 +408,46 @@ pub async fn create_collaborator_invite_handler(
         .unwrap_or_else(|_| state.default_settings.clone());
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
-    let origin = detect_external_origin(&headers);
+    let origin = detect_external_origin(&state, &headers);
     // RFC 9700 §4.3.2: Pass sensitive single-use invite token in URL Fragment (never query string / server logs / Referer)
     let invite_url = format!(
         "{origin}/{target_locale}/invite#token={}",
         percent_encode_component(&raw_token)
     );
 
-    let (smtp_cfg, smtp_pw) = {
+    let (smtp_cfg, smtp_pw, cf_token) = {
         let secrets = state.runtime_secrets.read().await;
-        (secrets.smtp.clone(), secrets.smtp_password.clone())
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
     };
     let mut email_sent = false;
     let mut email_error = None;
-    if is_smtp_ready(&smtp_cfg) {
-        match send_collaborator_invite_email(
-            &smtp_cfg,
-            &smtp_pw,
-            MailBrandContext {
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if is_mail_ready(&smtp_cfg, &creds) {
+        let dedup_key = format!("invite:{track}:{chapter}:{step}:{}", invite.email);
+        let ctx = MailSendContext {
+            guard: &state.mail_guard,
+            http_client: &state.http_client,
+            smtp: &smtp_cfg,
+            creds,
+            brand: MailBrandContext {
                 site_name: &settings.site_name,
                 logo_url: &settings.logo_url,
                 origin: &origin,
                 locale: target_locale,
             },
+            dedup_key: Some(&dedup_key),
+            cooldown_secs: 15,
+            allow_disabled_draft: false,
+        };
+        match send_collaborator_invite_email(
+            &ctx,
             &actor.display_name,
             &article_title,
             &invite_url,
@@ -374,6 +469,20 @@ pub async fn create_collaborator_invite_handler(
         email_sent,
         email_error,
     };
+
+    if let Ok(step_id) = resolve_step_collab_room(&state, &actor, &track, &chapter, &step).await {
+        emit_collab_event(
+            &state,
+            step_id,
+            "acl_changed",
+            &serde_json::json!({
+                "actor_user_id": actor.id,
+                "actor_name": actor.display_name,
+                "action": "invite_created",
+            }),
+        )
+        .await;
+    }
 
     if let Some(cache_key) = idem_key {
         if let Ok(val) = serde_json::to_value(&payload) {
@@ -431,6 +540,22 @@ pub async fn accept_collaborator_invite_handler(
         None
     };
 
+    if let Ok(step_id) =
+        resolve_step_collab_room(&state, &user, &track_slug, &chapter_slug, &step_slug).await
+    {
+        emit_collab_event(
+            &state,
+            step_id,
+            "acl_changed",
+            &serde_json::json!({
+                "actor_user_id": user.id,
+                "actor_name": user.display_name,
+                "action": "invite_accepted",
+            }),
+        )
+        .await;
+    }
+
     Ok(Json(AcceptInviteResponse {
         ok: true,
         track_slug,
@@ -446,11 +571,30 @@ pub async fn remove_step_collaborator_handler(
     AxumPath((track, chapter, step, user_id)): AxumPath<(String, String, String, Uuid)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let actor = require_author_or_admin(&state, &headers).await?;
+    let room_step_id = resolve_step_collab_room(&state, &actor, &track, &chapter, &step)
+        .await
+        .ok();
     let removed = state
         .repo
         .remove_step_collaborator(&actor, &track, &chapter, &step, user_id)
         .await
         .map_err(repo_err)?;
+    if removed {
+        if let Some(step_id) = room_step_id {
+            evict_collab_user_from_room(&state, step_id, user_id).await;
+            emit_collab_event(
+                &state,
+                step_id,
+                "acl_changed",
+                &serde_json::json!({
+                    "actor_user_id": actor.id,
+                    "actor_name": actor.display_name,
+                    "action": "collaborator_removed",
+                }),
+            )
+            .await;
+        }
+    }
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -474,6 +618,22 @@ pub async fn update_step_collaborator_role_handler(
         )
         .await
         .map_err(repo_err)?;
+    if updated {
+        if let Ok(step_id) = resolve_step_collab_room(&state, &actor, &track, &chapter, &step).await
+        {
+            emit_collab_event(
+                &state,
+                step_id,
+                "acl_changed",
+                &serde_json::json!({
+                    "actor_user_id": actor.id,
+                    "actor_name": actor.display_name,
+                    "action": "role_updated",
+                }),
+            )
+            .await;
+        }
+    }
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
@@ -483,11 +643,30 @@ pub async fn leave_step_collaboration_handler(
     AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let user = require_authenticated_user(&state, &headers).await?;
+    let room_step_id = resolve_step_collab_room(&state, &user, &track, &chapter, &step)
+        .await
+        .ok();
     let left = state
         .repo
         .leave_step_collaboration(&user, &track, &chapter, &step)
         .await
         .map_err(repo_err)?;
+    if left {
+        if let Some(step_id) = room_step_id {
+            evict_collab_user_from_room(&state, step_id, user.id).await;
+            emit_collab_event(
+                &state,
+                step_id,
+                "acl_changed",
+                &serde_json::json!({
+                    "actor_user_id": user.id,
+                    "actor_name": user.display_name,
+                    "action": "collaborator_left",
+                }),
+            )
+            .await;
+        }
+    }
     let refreshed_user = if let Some(tok) = extract_bearer_token(&headers) {
         state.repo.get_user_by_session(&tok).await.ok().flatten()
     } else {
@@ -508,6 +687,22 @@ pub async fn transfer_step_ownership_handler(
         .transfer_step_ownership(&actor, &track, &chapter, &step, body.target_user_id)
         .await
         .map_err(repo_err)?;
+    if transferred {
+        if let Ok(step_id) = resolve_step_collab_room(&state, &actor, &track, &chapter, &step).await
+        {
+            emit_collab_event(
+                &state,
+                step_id,
+                "acl_changed",
+                &serde_json::json!({
+                    "actor_user_id": actor.id,
+                    "actor_name": actor.display_name,
+                    "action": "owner_transferred",
+                }),
+            )
+            .await;
+        }
+    }
     Ok(Json(serde_json::json!({ "transferred": transferred })))
 }
 
@@ -546,6 +741,33 @@ pub async fn restore_step_revision_handler(
         )
         .await
         .map_err(repo_err)?;
+    if let Ok(step_id) = resolve_step_collab_room(
+        &state,
+        &actor,
+        &saved.track_slug,
+        &saved.chapter_slug,
+        &saved.step_slug,
+    )
+    .await
+    {
+        emit_collab_event(
+            &state,
+            step_id,
+            "revision_saved",
+            &serde_json::json!({
+                "track_slug": saved.track_slug,
+                "chapter_slug": saved.chapter_slug,
+                "step_slug": saved.step_slug,
+                "locale": saved.locale,
+                "edit_seq": saved.edit_seq,
+                "etag": saved.etag,
+                "author_user_id": actor.id,
+                "author_name": actor.display_name,
+                "tab_id": extract_tab_id(&headers),
+            }),
+        )
+        .await;
+    }
     let mut resp_headers = HeaderMap::new();
     if !saved.etag.is_empty() {
         if let Ok(hv) = HeaderValue::from_str(&saved.etag) {
@@ -553,6 +775,193 @@ pub async fn restore_step_revision_handler(
         }
     }
     Ok((StatusCode::OK, resp_headers, Json(saved)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RevisionDiffQuery {
+    #[serde(default)]
+    pub against: Option<Uuid>,
+}
+
+pub async fn diff_step_revision_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step, locale, rev_id)): AxumPath<(String, String, String, String, Uuid)>,
+    Query(query): Query<RevisionDiffQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let viewer = require_studio_access(&state, &headers).await?;
+    let mut revisions = state
+        .repo
+        .list_step_revisions(&viewer, &track, &chapter, &step, &locale)
+        .await
+        .map_err(repo_err)?;
+    revisions.sort_by_key(|r| r.edit_seq);
+
+    let Some(target) = revisions.iter().find(|r| r.id == rev_id) else {
+        return Err(ApiError::new(
+            ErrorCode::RevisionNotFound,
+            "Target revision snapshot not found.",
+        ));
+    };
+
+    let base = match query.against {
+        Some(base_id) => Some(revisions.iter().find(|r| r.id == base_id).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::RevisionNotFound,
+                "Baseline revision snapshot not found.",
+            )
+        })?),
+        None => revisions
+            .iter()
+            .rev()
+            .find(|r| r.edit_seq < target.edit_seq),
+    };
+
+    Ok(Json(build_revision_diff(base, target)))
+}
+
+#[derive(Deserialize)]
+pub struct StepPresenceBody {
+    #[serde(default)]
+    pub locale: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub tab_id: String,
+}
+
+#[derive(Deserialize, Default)]
+pub struct PresenceDeleteQuery {
+    #[serde(default)]
+    pub tab_id: Option<String>,
+}
+
+pub async fn upsert_step_presence_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+    Json(body): Json<StepPresenceBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_studio_access(&state, &headers).await?;
+    let step_id = resolve_step_collab_room(&state, &user, &track, &chapter, &step).await?;
+    let tab_id = if !body.tab_id.trim().is_empty() {
+        sanitize_collab_tab_id(&body.tab_id)
+    } else {
+        extract_tab_id(&headers)
+    };
+    let members = upsert_collab_presence(
+        &state,
+        step_id,
+        &user,
+        &body.locale,
+        &body.state,
+        &tab_id,
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "members": members })))
+}
+
+pub async fn delete_step_presence_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+    Query(query): Query<PresenceDeleteQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = require_studio_access(&state, &headers).await?;
+    let step_id = resolve_step_collab_room(&state, &user, &track, &chapter, &step).await?;
+    let tab_id = query
+        .tab_id
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            headers
+                .get("x-client-tab-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        });
+    let members = remove_collab_presence(&state, step_id, user.id, tab_id.as_deref()).await;
+    Ok(Json(serde_json::json!({ "ok": true, "members": members })))
+}
+
+pub async fn step_events_sse_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((track, chapter, step)): AxumPath<(String, String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let user = require_studio_access(&state, &headers).await?;
+    let step_id = resolve_step_collab_room(&state, &user, &track, &chapter, &step).await?;
+
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
+    let (initial_members, replay_events, mut live_rx, mut ctrl_rx) =
+        snapshot_and_subscribe_collab_events(&state, step_id, last_event_id).await;
+
+    let (sse_tx, sse_rx) =
+        tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(64);
+
+    let initial_presence = SseEvent::default()
+        .event("presence")
+        .data(serde_json::json!({ "members": initial_members }).to_string());
+    let _ = sse_tx.try_send(Ok(initial_presence));
+
+    for evt in replay_events {
+        let item = SseEvent::default()
+            .id(evt.id.to_string())
+            .event(evt.event_name)
+            .data(evt.data_json);
+        if sse_tx.try_send(Ok(item)).is_err() {
+            break;
+        }
+    }
+
+    let current_user_id = user.id;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                maybe_evt = live_rx.recv() => {
+                    let Some(evt) = maybe_evt else {
+                        break;
+                    };
+                    let item = SseEvent::default()
+                        .id(evt.id.to_string())
+                        .event(evt.event_name)
+                        .data(evt.data_json);
+                    if sse_tx.send(Ok(item)).await.is_err() {
+                        break;
+                    }
+                }
+                ctrl_res = ctrl_rx.recv() => {
+                    match ctrl_res {
+                        Ok(CollabControlSignal::CloseRoom) => break,
+                        Ok(CollabControlSignal::RevokeUser(uid)) if uid == current_user_id => break,
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(sse_rx);
+    let sse = Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(20))
+            .text("ping"),
+    );
+
+    let mut resp = sse.into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(resp)
 }
 
 pub async fn list_step_audit_logs_handler(
@@ -569,9 +978,9 @@ pub async fn list_step_audit_logs_handler(
     Ok(Json(logs))
 }
 
-pub(crate) fn parse_semver_key(
-    raw: &str,
-) -> Option<(u64, u64, u64, bool, Vec<(bool, u64, String)>)> {
+pub(crate) type SemverKey = (u64, u64, u64, bool, Vec<(bool, u64, String)>);
+
+pub(crate) fn parse_semver_key(raw: &str) -> Option<SemverKey> {
     let trimmed = raw.trim().trim_start_matches(['v', 'V']);
     let without_build = trimmed.split('+').next().unwrap_or(trimmed);
     let (core, pre_opt) = match without_build.split_once('-') {
@@ -646,8 +1055,17 @@ async fn fetch_latest_ghcr_digest(client: &reqwest::Client, repo: &str) -> Optio
 pub async fn studio_update_check_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let _user = require_author_or_admin(&state, &headers).await?;
+
+    {
+        let guard = state.update_check_cache.lock().await;
+        if let Some((cached_at, ref cached_val)) = *guard {
+            if cached_at.elapsed() < Duration::from_secs(900) {
+                return Ok(Json(cached_val.clone()).into_response());
+            }
+        }
+    }
 
     let raw_pkg_ver = env!("CARGO_PKG_VERSION");
     let current_digest = env::var("IMAGE_DIGEST")
@@ -686,7 +1104,7 @@ pub async fn studio_update_check_handler(
             )
         })?;
 
-    if release_resp.status().is_success() {
+    let payload = if release_resp.status().is_success() {
         let releases: Vec<serde_json::Value> = release_resp.json().await.map_err(internal_err)?;
         let current_is_prerelease = raw_pkg_ver.contains('-');
         let chosen = releases
@@ -721,24 +1139,32 @@ pub async fn studio_update_check_handler(
 
             if !tag_name.is_empty() {
                 let has_update = is_newer_semver(&tag_name, raw_pkg_ver) || current_digest.is_some();
-                return Ok(Json(UpdateCheckResponse {
-                    current_version,
+                Some(UpdateCheckResponse {
+                    current_version: current_version.clone(),
                     latest_version: tag_name,
                     channel: "release",
                     has_update,
                     release_url: html_url,
                     published_at,
-                }));
+                })
+            } else {
+                None
             }
+        } else {
+            None
         }
-    } else if release_resp.status() != StatusCode::NOT_FOUND {
+    } else if release_resp.status() == StatusCode::NOT_FOUND {
+        None
+    } else {
         return Err(ApiError::new(
             ErrorCode::UpstreamError,
             format!("Upstream returned HTTP {}.", release_resp.status()),
         ));
-    }
+    };
 
-    if let Some(digest) = fetch_latest_ghcr_digest(&state.http_client, &repo).await {
+    let final_payload = if let Some(resp) = payload {
+        resp
+    } else if let Some(digest) = fetch_latest_ghcr_digest(&state.http_client, &repo).await {
         let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
         let short = &hex[..hex.len().min(12)];
         let latest_version = format!("sha256-{short}");
@@ -747,22 +1173,29 @@ pub async fn studio_update_check_handler(
             .map(|cur| cur != digest && cur != latest_version)
             .unwrap_or(false);
 
-        return Ok(Json(UpdateCheckResponse {
+        UpdateCheckResponse {
             current_version,
             latest_version,
             channel: "ghcr",
             has_update,
             release_url: format!("https://github.com/{repo}/pkgs/container/{pkg_name}"),
             published_at: None,
-        }));
-    }
+        }
+    } else {
+        UpdateCheckResponse {
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            channel: "source",
+            has_update: false,
+            release_url: format!("https://github.com/{repo}/releases"),
+            published_at: None,
+        }
+    };
 
-    Ok(Json(UpdateCheckResponse {
-        current_version: current_version.clone(),
-        latest_version: current_version,
-        channel: "source",
-        has_update: false,
-        release_url: format!("https://github.com/{repo}/releases"),
-        published_at: None,
-    }))
+    if let Ok(json_val) = serde_json::to_value(&final_payload) {
+        let mut guard = state.update_check_cache.lock().await;
+        *guard = Some((std::time::Instant::now(), json_val.clone()));
+        return Ok(Json(json_val).into_response());
+    }
+    Ok(Json(final_payload).into_response())
 }

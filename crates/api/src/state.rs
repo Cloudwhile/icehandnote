@@ -19,7 +19,7 @@ use icehandnote_core::{
 use icehandnote_db::{content_loader::ContentBundle, TutorialRepository};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -29,6 +29,10 @@ use uuid::Uuid;
 pub type PendingMap = HashMap<String, PendingOAuthAuthorization>;
 pub type TicketMap = HashMap<String, OneTimeOAuthTicket>;
 pub type OnboardingMap = HashMap<String, PendingOAuthOnboarding>;
+pub type BindTicketMap = HashMap<String, (Uuid, i64)>;
+pub type PendingOAuthBindMap = HashMap<Uuid, PendingOAuthBind>;
+pub type SsoUsedJtiMap = HashMap<String, i64>;
+pub type AuthRateLimitMap = HashMap<String, Vec<chrono::DateTime<chrono::Utc>>>;
 pub type CooldownMap = HashMap<String, chrono::DateTime<chrono::Utc>>;
 pub type EmailChangeOtpMap = HashMap<Uuid, PendingEmailChangeOtp>;
 pub type PasskeyCeremonyMap = HashMap<Uuid, PendingPasskeyCeremony>;
@@ -36,6 +40,64 @@ pub type NoteIdempotencyMap = HashMap<String, (UserMarginNoteDto, chrono::DateTi
 pub type NoteRateLimitMap = HashMap<String, Vec<chrono::DateTime<chrono::Utc>>>;
 pub type InviteIdempotencyMap = HashMap<String, (serde_json::Value, chrono::DateTime<chrono::Utc>)>;
 pub type InviteRateLimitMap = HashMap<Uuid, Vec<chrono::DateTime<chrono::Utc>>>;
+pub type CollabHubMap = HashMap<Uuid, CollabRoomState>;
+
+pub const COLLAB_PRESENCE_TTL_SECONDS: i64 = 45;
+const COLLAB_BACKLOG_LIMIT: usize = 50;
+pub const EPHEMERAL_MAP_MAX_ENTRIES: usize = 4096;
+
+#[derive(Debug, Clone)]
+pub enum CollabControlSignal {
+    RevokeUser(Uuid),
+    CloseRoom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceMemberDto {
+    pub user_id: Uuid,
+    pub display_name: String,
+    pub username: String,
+    #[serde(default)]
+    pub avatar_url: String,
+    pub locale: String,
+    pub state: String,
+    pub tab_id: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredCollabEvent {
+    pub id: u64,
+    pub event_name: String,
+    pub data_json: String,
+}
+
+pub struct CollabRoomState {
+    pub next_event_seq: u64,
+    pub backlog: VecDeque<StoredCollabEvent>,
+    pub subscribers: Vec<tokio::sync::mpsc::Sender<StoredCollabEvent>>,
+    pub presence: HashMap<String, PresenceMemberDto>,
+    pub ctrl_tx: tokio::sync::broadcast::Sender<CollabControlSignal>,
+}
+
+impl Default for CollabRoomState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CollabRoomState {
+    pub fn new() -> Self {
+        let (ctrl_tx, _) = tokio::sync::broadcast::channel(16);
+        Self {
+            next_event_seq: 0,
+            backlog: VecDeque::with_capacity(32),
+            subscribers: Vec::new(),
+            presence: HashMap::new(),
+            ctrl_tx,
+        }
+    }
+}
 
 pub const GUEST_COOKIE_NAME: &str = "ihn_guest";
 
@@ -59,6 +121,15 @@ pub struct PendingEmailChangeOtp {
 }
 
 #[derive(Clone)]
+pub struct PendingOAuthBind {
+    pub user_id: Uuid,
+    pub provider: String,
+    pub subject: String,
+    pub avatar_url: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub repo: Arc<DynamicRepository>,
     pub content_dir: PathBuf,
@@ -69,6 +140,10 @@ pub struct AppState {
     pub oauth_pending: Arc<tokio::sync::Mutex<PendingMap>>,
     pub oauth_tickets: Arc<tokio::sync::Mutex<TicketMap>>,
     pub oauth_onboardings: Arc<tokio::sync::Mutex<OnboardingMap>>,
+    pub bind_tickets: Arc<tokio::sync::Mutex<BindTicketMap>>,
+    pub pending_oauth_binds: Arc<tokio::sync::Mutex<PendingOAuthBindMap>>,
+    pub sso_used_jtis: Arc<tokio::sync::Mutex<SsoUsedJtiMap>>,
+    pub auth_rate_limits: Arc<tokio::sync::Mutex<AuthRateLimitMap>>,
     pub forgot_password_cooldowns: Arc<tokio::sync::Mutex<CooldownMap>>,
     pub email_change_otps: Arc<tokio::sync::Mutex<EmailChangeOtpMap>>,
     pub passkey_ceremonies: Arc<tokio::sync::Mutex<PasskeyCeremonyMap>>,
@@ -76,6 +151,11 @@ pub struct AppState {
     pub note_rate_limits: Arc<tokio::sync::Mutex<NoteRateLimitMap>>,
     pub invite_idempotency: Arc<tokio::sync::Mutex<InviteIdempotencyMap>>,
     pub invite_rate_limits: Arc<tokio::sync::Mutex<InviteRateLimitMap>>,
+    pub collab_hub: Arc<tokio::sync::Mutex<CollabHubMap>>,
+    pub mail_guard: Arc<crate::mailer::MailDeliveryGuard>,
+    pub update_check_cache: Arc<tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>>,
+    pub public_origin: Option<String>,
+    pub trust_proxy_headers: bool,
     pub guest_cookie_secret: String,
     pub blog_sso_secret: String,
     pub blog_origin_url: String,
@@ -109,6 +189,7 @@ pub struct PendingOAuthAuthorization {
 #[derive(Clone)]
 pub struct OneTimeOAuthTicket {
     pub user: UserProfileDto,
+    pub pending_bind: Option<PendingOAuthBind>,
     pub expires_at: i64,
 }
 
@@ -120,6 +201,7 @@ pub struct PendingOAuthOnboarding {
     pub suggested_username: String,
     pub display_name: String,
     pub email: String,
+    pub verified_email: Option<String>,
     pub oauth_avatar_url: String,
     pub expires_at: i64,
 }
@@ -139,6 +221,8 @@ pub struct RuntimeSecretsConfig {
     pub oauth_client_secrets: HashMap<String, String>,
     #[serde(default)]
     pub smtp_password: String,
+    #[serde(default)]
+    pub cloudflare_api_token: String,
     #[serde(default)]
     pub smtp: SmtpSettingsDto,
     /// HMAC-SHA256 signing key for HttpOnly anonymous guest learner cookies (`ihn_guest`).
@@ -255,6 +339,30 @@ impl RuntimeSecretsConfig {
                 cfg.smtp.from_name = fn_env.trim().to_string();
             }
         }
+        if cfg.smtp.cloudflare_account_id.is_empty() {
+            if let Ok(acc_id) = std::env::var("CLOUDFLARE_ACCOUNT_ID") {
+                if !acc_id.trim().is_empty() {
+                    cfg.smtp.cloudflare_account_id = acc_id.trim().to_string();
+                }
+            }
+        }
+        if cfg.cloudflare_api_token.is_empty() {
+            if let Ok(cf_tok) = std::env::var("CLOUDFLARE_EMAIL_API_TOKEN") {
+                if !cf_tok.trim().is_empty() {
+                    cfg.cloudflare_api_token = cf_tok.trim().to_string();
+                }
+            }
+        }
+        // Only auto-activate Cloudflare API from env when SMTP is not already configured (strict mutual exclusivity)
+        if !cfg.smtp.enabled
+            && cfg.smtp.host.trim().is_empty()
+            && !cfg.smtp.cloudflare_account_id.trim().is_empty()
+            && !cfg.cloudflare_api_token.trim().is_empty()
+        {
+            cfg.smtp.provider = "cloudflare_api".to_string();
+            cfg.smtp.enabled = true;
+        }
+        cfg.smtp = cfg.smtp.sanitize();
         let has_env_db_url = std::env::var("DATABASE_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -870,6 +978,18 @@ impl TutorialRepository for DynamicRepository {
             .await
     }
 
+    async fn resolve_step_collab_access(
+        &self,
+        viewer: &UserProfileDto,
+        track_slug: &str,
+        chapter_slug: &str,
+        step_slug: &str,
+    ) -> anyhow::Result<Option<(Uuid, String, Vec<String>)>> {
+        self.current()
+            .resolve_step_collab_access(viewer, track_slug, chapter_slug, step_slug)
+            .await
+    }
+
     async fn studio_save_step(
         &self,
         author: &UserProfileDto,
@@ -1203,7 +1323,11 @@ impl TutorialRepository for DynamicRepository {
 }
 
 pub fn internal_err<E: std::fmt::Display>(err: E) -> ApiError {
-    ApiError::new(ErrorCode::InternalError, err.to_string())
+    tracing::error!("internal error: {err}");
+    ApiError::new(
+        ErrorCode::InternalError,
+        "An unexpected internal error occurred.",
+    )
 }
 
 pub fn repo_err(err: anyhow::Error) -> ApiError {
@@ -1212,6 +1336,59 @@ pub fn repo_err(err: anyhow::Error) -> ApiError {
 
 pub fn repo_err_or(err: anyhow::Error, fallback: ErrorCode) -> ApiError {
     ApiError::from_anyhow_with_fallback(err, fallback)
+}
+
+pub fn enforce_map_capacity<K, V, F>(map: &mut HashMap<K, V>, max_entries: usize, is_expired: F)
+where
+    K: Eq + std::hash::Hash + Clone,
+    F: Fn(&V) -> bool,
+{
+    if map.len() < max_entries {
+        return;
+    }
+    map.retain(|_, v| !is_expired(v));
+    if map.len() >= max_entries {
+        let drop_count = map.len() - max_entries + 1;
+        let victims: Vec<K> = map.keys().take(drop_count).cloned().collect();
+        for k in victims {
+            map.remove(&k);
+        }
+    }
+}
+
+pub async fn check_sliding_rate_limit(
+    state: &AppState,
+    key: &str,
+    max_hits: usize,
+    window_secs: i64,
+    detail: &str,
+) -> Result<(), ApiError> {
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::seconds(window_secs);
+    let mut map = state.auth_rate_limits.lock().await;
+    if map.len() >= EPHEMERAL_MAP_MAX_ENTRIES {
+        map.retain(|_, hits| {
+            hits.retain(|t| *t > cutoff);
+            !hits.is_empty()
+        });
+        if map.len() >= EPHEMERAL_MAP_MAX_ENTRIES {
+            let drop_count = map.len() - EPHEMERAL_MAP_MAX_ENTRIES + 1;
+            let victims: Vec<String> = map.keys().take(drop_count).cloned().collect();
+            for k in victims {
+                map.remove(&k);
+            }
+        }
+    }
+    let hits = map.entry(key.to_string()).or_default();
+    hits.retain(|t| *t > cutoff);
+    if hits.len() >= max_hits {
+        let oldest = hits.first().copied().unwrap_or(now);
+        let retry_after = (window_secs - (now - oldest).num_seconds()).max(1);
+        return Err(ApiError::new(ErrorCode::RateLimited, detail)
+            .with_meta(serde_json::json!({ "retry_after_secs": retry_after })));
+    }
+    hits.push(now);
+    Ok(())
 }
 
 pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -1256,6 +1433,7 @@ pub fn extract_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<St
 /// - Unauthenticated visitor -> verifies HMAC-signed `ihn_guest` HttpOnly cookie -> `Some("guest:<id>")`.
 /// - When `issue_guest_if_missing` is true and no valid cookie exists, mints a fresh signed cookie
 ///   and returns its `Set-Cookie` header value.
+///
 /// Never trusts client-supplied `learner_id` parameters.
 pub async fn resolve_me_owner(
     state: &AppState,
@@ -1270,7 +1448,7 @@ pub async fn resolve_me_owner(
             .map_err(repo_err)?;
         return match user {
             Some(u) => {
-                let ip = extract_client_ip(headers, None);
+                let ip = extract_client_ip(headers, None, state.trust_proxy_headers);
                 let _ = state.repo.touch_session(&token, &ip).await;
                 Ok((Some(format!("user:{}", u.id)), None))
             }
@@ -1295,7 +1473,7 @@ pub async fn resolve_me_owner(
     let guest_id = Uuid::new_v4().simple().to_string();
     let signed = sign_guest_learner_cookie(&guest_id, &state.guest_cookie_secret)
         .map_err(internal_err)?;
-    let is_https = detect_external_origin(headers).starts_with("https://");
+    let is_https = detect_external_origin(state, headers).starts_with("https://");
     let cookie_str = if is_https {
         format!(
             "{GUEST_COOKIE_NAME}={signed}; Path=/api/v1; HttpOnly; SameSite=Lax; Max-Age=31536000; Secure"
@@ -1356,35 +1534,41 @@ fn extract_forwarded_for_ip(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-pub fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>) -> String {
-    for single_hdr in [
-        "cf-connecting-ip",
-        "true-client-ip",
-        "eo-connecting-ip",
-        "ali-cdn-real-ip",
-    ] {
-        if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
-            if let Some(ip) = normalize_ip_candidate(val) {
-                return ip;
+pub fn extract_client_ip(
+    headers: &HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+    trust_proxy_headers: bool,
+) -> String {
+    if trust_proxy_headers {
+        for single_hdr in [
+            "cf-connecting-ip",
+            "true-client-ip",
+            "eo-connecting-ip",
+            "ali-cdn-real-ip",
+        ] {
+            if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
+                if let Some(ip) = normalize_ip_candidate(val) {
+                    return ip;
+                }
             }
         }
-    }
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        for candidate in xff.split(',') {
-            if let Some(ip) = normalize_ip_candidate(candidate) {
-                return ip;
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            for candidate in xff.split(',') {
+                if let Some(ip) = normalize_ip_candidate(candidate) {
+                    return ip;
+                }
             }
         }
-    }
-    for single_hdr in ["x-real-ip", "x-client-ip"] {
-        if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
-            if let Some(ip) = normalize_ip_candidate(val) {
-                return ip;
+        for single_hdr in ["x-real-ip", "x-client-ip"] {
+            if let Some(val) = headers.get(single_hdr).and_then(|v| v.to_str().ok()) {
+                if let Some(ip) = normalize_ip_candidate(val) {
+                    return ip;
+                }
             }
         }
-    }
-    if let Some(ip) = extract_forwarded_for_ip(headers) {
-        return ip;
+        if let Some(ip) = extract_forwarded_for_ip(headers) {
+            return ip;
+        }
     }
     if let Some(ip) = peer_ip {
         if let Some(norm) = normalize_ip_candidate(&ip.to_string()) {
@@ -1396,10 +1580,11 @@ pub fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<std::net::IpAddr>)
 }
 
 pub fn extract_client_context(
+    state: &AppState,
     headers: &HeaderMap,
     peer_ip: Option<std::net::IpAddr>,
 ) -> ClientContext {
-    let ip_address = extract_client_ip(headers, peer_ip);
+    let ip_address = extract_client_ip(headers, peer_ip, state.trust_proxy_headers);
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -1462,7 +1647,7 @@ pub async fn require_authenticated_user(
         .map_err(repo_err)?;
     match user {
         Some(u) => {
-            let ip = extract_client_ip(headers, None);
+            let ip = extract_client_ip(headers, None, state.trust_proxy_headers);
             let _ = state.repo.touch_session(&token, &ip).await;
             Ok(u)
         }
@@ -1537,6 +1722,213 @@ pub async fn require_author_or_admin(
     Ok(user)
 }
 
+pub fn sanitize_collab_tab_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(48)
+        .collect();
+    if cleaned.is_empty() {
+        "default".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn prune_and_collect_presence(
+    room: &mut CollabRoomState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PresenceMemberDto> {
+    let cutoff = now - chrono::Duration::seconds(COLLAB_PRESENCE_TTL_SECONDS);
+    room.presence.retain(|_, member| member.updated_at >= cutoff);
+    let mut members: Vec<PresenceMemberDto> = room.presence.values().cloned().collect();
+    members.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.user_id.cmp(&b.user_id))
+    });
+    members
+}
+
+fn emit_collab_event_in_room(
+    room: &mut CollabRoomState,
+    event_name: &str,
+    payload: &serde_json::Value,
+) {
+    room.next_event_seq = room.next_event_seq.saturating_add(1);
+    let evt = StoredCollabEvent {
+        id: room.next_event_seq,
+        event_name: event_name.to_string(),
+        data_json: payload.to_string(),
+    };
+    room.backlog.push_back(evt.clone());
+    while room.backlog.len() > COLLAB_BACKLOG_LIMIT {
+        room.backlog.pop_front();
+    }
+    room.subscribers.retain(|tx| {
+        !matches!(
+            tx.try_send(evt.clone()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        )
+    });
+}
+
+pub async fn emit_collab_event(
+    state: &AppState,
+    step_id: Uuid,
+    event_name: &str,
+    payload: &serde_json::Value,
+) {
+    let mut hub = state.collab_hub.lock().await;
+    if hub.len() > 512 {
+        hub.retain(|_, r| !r.subscribers.is_empty() || !r.presence.is_empty() || !r.backlog.is_empty());
+    }
+    let room = hub.entry(step_id).or_default();
+    emit_collab_event_in_room(room, event_name, payload);
+}
+
+pub async fn upsert_collab_presence(
+    state: &AppState,
+    step_id: Uuid,
+    user: &UserProfileDto,
+    locale: &str,
+    presence_state: &str,
+    tab_id: &str,
+) -> Vec<PresenceMemberDto> {
+    let clean_tab = sanitize_collab_tab_id(tab_id);
+    let clean_locale = normalize_supported_locale(Some(locale), "zh-CN").to_string();
+    let clean_state = if presence_state.trim() == "editing" {
+        "editing".to_string()
+    } else {
+        "viewing".to_string()
+    };
+    let now = chrono::Utc::now();
+    let presence_key = format!("{}:{clean_tab}", user.id);
+
+    let mut hub = state.collab_hub.lock().await;
+    let room = hub.entry(step_id).or_default();
+    room.presence.insert(
+        presence_key,
+        PresenceMemberDto {
+            user_id: user.id,
+            display_name: user.display_name.clone(),
+            username: user.username.clone(),
+            avatar_url: user.avatar_url.clone(),
+            locale: clean_locale,
+            state: clean_state,
+            tab_id: clean_tab,
+            updated_at: now,
+        },
+    );
+    let members = prune_and_collect_presence(room, now);
+    emit_collab_event_in_room(
+        room,
+        "presence",
+        &serde_json::json!({ "members": &members }),
+    );
+    members
+}
+
+pub async fn remove_collab_presence(
+    state: &AppState,
+    step_id: Uuid,
+    user_id: Uuid,
+    tab_id: Option<&str>,
+) -> Vec<PresenceMemberDto> {
+    let now = chrono::Utc::now();
+    let mut hub = state.collab_hub.lock().await;
+    let Some(room) = hub.get_mut(&step_id) else {
+        return Vec::new();
+    };
+    if let Some(raw_tab) = tab_id.filter(|s| !s.trim().is_empty()) {
+        let key = format!("{user_id}:{}", sanitize_collab_tab_id(raw_tab));
+        room.presence.remove(&key);
+    } else {
+        let prefix = format!("{user_id}:");
+        room.presence.retain(|k, _| !k.starts_with(&prefix));
+    }
+    let members = prune_and_collect_presence(room, now);
+    emit_collab_event_in_room(
+        room,
+        "presence",
+        &serde_json::json!({ "members": &members }),
+    );
+    members
+}
+
+pub async fn snapshot_and_subscribe_collab_events(
+    state: &AppState,
+    step_id: Uuid,
+    last_event_id: Option<u64>,
+) -> (
+    Vec<PresenceMemberDto>,
+    Vec<StoredCollabEvent>,
+    tokio::sync::mpsc::Receiver<StoredCollabEvent>,
+    tokio::sync::broadcast::Receiver<CollabControlSignal>,
+) {
+    let now = chrono::Utc::now();
+    let mut hub = state.collab_hub.lock().await;
+    let room = hub.entry(step_id).or_default();
+    let members = prune_and_collect_presence(room, now);
+    let replay = match last_event_id {
+        Some(since) => room
+            .backlog
+            .iter()
+            .filter(|evt| evt.id > since)
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    room.subscribers.push(tx);
+    let ctrl_rx = room.ctrl_tx.subscribe();
+    (members, replay, rx, ctrl_rx)
+}
+
+pub async fn evict_collab_user_from_room(state: &AppState, step_id: Uuid, user_id: Uuid) {
+    let now = chrono::Utc::now();
+    let mut hub = state.collab_hub.lock().await;
+    if let Some(room) = hub.get_mut(&step_id) {
+        let prefix = format!("{user_id}:");
+        room.presence.retain(|k, _| !k.starts_with(&prefix));
+        let members = prune_and_collect_presence(room, now);
+        emit_collab_event_in_room(
+            room,
+            "presence",
+            &serde_json::json!({ "members": &members }),
+        );
+        let _ = room.ctrl_tx.send(CollabControlSignal::RevokeUser(user_id));
+    }
+}
+
+pub async fn evict_collab_user_everywhere(state: &AppState, user_id: Uuid) {
+    let now = chrono::Utc::now();
+    let mut hub = state.collab_hub.lock().await;
+    let prefix = format!("{user_id}:");
+    for room in hub.values_mut() {
+        let had = room.presence.keys().any(|k| k.starts_with(&prefix));
+        if had {
+            room.presence.retain(|k, _| !k.starts_with(&prefix));
+            let members = prune_and_collect_presence(room, now);
+            emit_collab_event_in_room(
+                room,
+                "presence",
+                &serde_json::json!({ "members": &members }),
+            );
+        }
+        let _ = room.ctrl_tx.send(CollabControlSignal::RevokeUser(user_id));
+    }
+}
+
+pub async fn close_collab_room(state: &AppState, step_id: Uuid) {
+    let mut hub = state.collab_hub.lock().await;
+    if let Some(mut room) = hub.remove(&step_id) {
+        room.presence.clear();
+        let _ = room.ctrl_tx.send(CollabControlSignal::CloseRoom);
+    }
+}
+
 pub async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -1554,12 +1946,12 @@ pub async fn require_admin(
 pub async fn finalize_login_session(
     state: &AppState,
     user: UserProfileDto,
-    anon_learner_id: Option<&str>,
+    _anon_learner_id: Option<&str>,
     ctx: &ClientContext,
     trust_device: bool,
 ) -> Result<AuthSessionResponse, ApiError> {
     let learner_key = format!("user:{}", user.id);
-    // 1. Merge server-verified HttpOnly guest cookie notes/progress first
+    // Only merge server-verified HttpOnly guest cookie notes/progress (never untrusted client learner_id strings)
     if let Some(ref raw_cookie) = ctx.guest_cookie_raw {
         if let Some(guest_id) = verify_guest_learner_cookie(raw_cookie, &state.guest_cookie_secret)
         {
@@ -1567,17 +1959,6 @@ pub async fn finalize_login_session(
             state
                 .repo
                 .merge_anonymous_learner(&guest_owner, &learner_key)
-                .await
-                .map_err(repo_err)?;
-        }
-    }
-    // 2. Backwards-compatible merge for legacy anonymous learner_* IDs (never user:*)
-    if let Some(anon_id) = anon_learner_id {
-        let clean_anon = anon_id.trim();
-        if clean_anon.starts_with("learner_") {
-            state
-                .repo
-                .merge_anonymous_learner(clean_anon, &learner_key)
                 .await
                 .map_err(repo_err)?;
         }
@@ -1620,38 +2001,109 @@ pub async fn finalize_login_session(
     })
 }
 
-pub fn detect_external_origin(headers: &HeaderMap) -> String {
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .unwrap_or("127.0.0.1:3001");
+pub fn is_valid_authority(raw: &str) -> bool {
+    let s = raw.trim();
+    if s.is_empty() || s.len() > 255 {
+        return false;
+    }
+    if s.chars().any(|c| {
+        c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '@' | '?' | '#')
+    }) {
+        return false;
+    }
+    if let Some(after_open) = s.strip_prefix('[') {
+        let Some((ipv6_part, rest)) = after_open.split_once(']') else {
+            return false;
+        };
+        if ipv6_part.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        return if rest.is_empty() {
+            true
+        } else if let Some(port_str) = rest.strip_prefix(':') {
+            !port_str.is_empty() && port_str.parse::<u16>().is_ok_and(|p| p > 0)
+        } else {
+            false
+        };
+    }
 
-    let forwarded_proto = headers
-        .get("x-forwarded-proto")
-        .or_else(|| headers.get("x-forwarded-scheme"))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|p| p == "https" || p == "http");
+    let host_part = match s.split_once(':') {
+        Some((h, port_str)) => {
+            if port_str.is_empty() || !port_str.parse::<u16>().is_ok_and(|p| p > 0) {
+                return false;
+            }
+            h
+        }
+        None => s,
+    };
+    if host_part.is_empty() || host_part.len() > 253 {
+        return false;
+    }
+    if host_part.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    if host_part.starts_with('.') || host_part.ends_with('.') {
+        return false;
+    }
+    host_part.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
 
-    let cf_https = headers
-        .get("cf-visitor")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_ascii_lowercase().contains("\"https\""))
-        .unwrap_or(false);
+pub fn normalize_origin_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    let (scheme, after_scheme) = if lower.starts_with("https://") {
+        ("https", &trimmed["https://".len()..])
+    } else if lower.starts_with("http://") {
+        ("http", &trimmed["http://".len()..])
+    } else {
+        return None;
+    };
+    let authority_raw = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if !is_valid_authority(authority_raw) {
+        return None;
+    }
+    let normalized_auth = if scheme == "https" {
+        authority_raw.strip_suffix(":443").unwrap_or(authority_raw)
+    } else {
+        authority_raw.strip_suffix(":80").unwrap_or(authority_raw)
+    };
+    Some(format!("{scheme}://{}", normalized_auth.to_ascii_lowercase()))
+}
 
-    let rfc_forwarded_https = headers
-        .get(header::FORWARDED)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            let lower = s.to_ascii_lowercase();
-            lower.contains("proto=https") || lower.contains("proto=\"https\"")
-        })
-        .unwrap_or(false);
+pub fn detect_external_origin(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(ref configured) = state.public_origin {
+        return configured.clone();
+    }
+
+    let host = if state.trust_proxy_headers {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(str::trim)
+            .filter(|h| is_valid_authority(h))
+            .unwrap_or("127.0.0.1:3001")
+    } else {
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|h| is_valid_authority(h))
+            .unwrap_or("127.0.0.1:3001")
+    };
 
     let same_host_https_ref = [header::ORIGIN, header::REFERER]
         .into_iter()
@@ -1665,9 +2117,42 @@ pub fn detect_external_origin(headers: &HeaderMap) -> String {
             }
         });
 
-    let proto = if let Some(ref p) = forwarded_proto {
-        p.as_str()
-    } else if cf_https || rfc_forwarded_https || same_host_https_ref {
+    let proto = if state.trust_proxy_headers {
+        let forwarded_proto = headers
+            .get("x-forwarded-proto")
+            .or_else(|| headers.get("x-forwarded-scheme"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|p| p == "https" || p == "http");
+
+        let cf_https = headers
+            .get("cf-visitor")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_ascii_lowercase().contains("\"https\""))
+            .unwrap_or(false);
+
+        let rfc_forwarded_https = headers
+            .get(header::FORWARDED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("proto=https") || lower.contains("proto=\"https\"")
+            })
+            .unwrap_or(false);
+
+        if let Some(p) = forwarded_proto {
+            if p == "https" {
+                "https"
+            } else {
+                "http"
+            }
+        } else if cf_https || rfc_forwarded_https || same_host_https_ref {
+            "https"
+        } else {
+            "http"
+        }
+    } else if same_host_https_ref {
         "https"
     } else {
         "http"
@@ -1691,8 +2176,8 @@ fn strip_host_port(authority: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub fn resolve_webauthn_rp_and_origins(headers: &HeaderMap) -> (String, Vec<String>) {
-    let detected_origin = detect_external_origin(headers);
+pub fn resolve_webauthn_rp_and_origins(state: &AppState, headers: &HeaderMap) -> (String, Vec<String>) {
+    let detected_origin = detect_external_origin(state, headers);
     let authority = detected_origin
         .trim_start_matches("https://")
         .trim_start_matches("http://")

@@ -56,7 +56,11 @@ impl ApiError {
                 meta: domain.meta.clone(),
             };
         }
-        Self::new(ErrorCode::InternalError, err.to_string())
+        tracing::error!("internal error: {err:#}");
+        Self::new(
+            ErrorCode::InternalError,
+            "An unexpected internal error occurred.",
+        )
     }
 
     pub fn from_anyhow_with_fallback(err: anyhow::Error, fallback: ErrorCode) -> Self {
@@ -70,7 +74,12 @@ impl ApiError {
                 meta: domain.meta.clone(),
             };
         }
-        Self::new(fallback, err.to_string())
+        if fallback == ErrorCode::InternalError {
+            tracing::error!("internal error: {err:#}");
+            Self::new(fallback, "An unexpected internal error occurred.")
+        } else {
+            Self::new(fallback, err.to_string())
+        }
     }
 }
 

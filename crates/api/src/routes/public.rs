@@ -1,12 +1,13 @@
 use crate::{
     error::ApiError,
     state::{
-        check_note_write_rate_limit, detect_external_origin, repo_err, resolve_me_owner, AppState,
+        check_note_write_rate_limit, check_sliding_rate_limit, detect_external_origin,
+        extract_client_ip, repo_err, resolve_me_owner, AppState,
     },
 };
 use axum::{
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
+    http::{header, Extensions, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -19,6 +20,7 @@ use icehandnote_core::{
 use icehandnote_db::TutorialRepository;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 #[derive(Serialize)]
@@ -254,6 +256,17 @@ pub async fn toggle_progress_handler(
     headers: HeaderMap,
     Json(body): Json<ToggleProgressBody>,
 ) -> Result<Response, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_progress_tracking {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Progress tracking is disabled on this site.",
+        ));
+    }
     let (owner_opt, set_cookie) = resolve_me_owner(&state, &headers, true).await?;
     let owner = owner_opt.ok_or_else(|| {
         ApiError::new(ErrorCode::Unauthorized, "Unable to resolve learner session.")
@@ -299,6 +312,17 @@ pub async fn toggle_task_check_handler(
     headers: HeaderMap,
     Json(body): Json<ToggleTaskCheckBody>,
 ) -> Result<Response, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_progress_tracking {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Progress tracking is disabled on this site.",
+        ));
+    }
     let (owner_opt, set_cookie) = resolve_me_owner(&state, &headers, true).await?;
     let owner = owner_opt.ok_or_else(|| {
         ApiError::new(ErrorCode::Unauthorized, "Unable to resolve learner session.")
@@ -315,8 +339,39 @@ pub async fn toggle_task_check_handler(
 
 pub async fn like_step_handler(
     State(state): State<AppState>,
+    extensions: Extensions,
+    headers: HeaderMap,
     AxumPath(step_id): AxumPath<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_likes {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Article likes are disabled on this site.",
+        ));
+    }
+    let (owner_opt, _) = resolve_me_owner(&state, &headers, false).await?;
+    let actor_key = owner_opt.unwrap_or_else(|| {
+        let ip = extract_client_ip(
+            &headers,
+            extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+            state.trust_proxy_headers,
+        );
+        format!("ip:{ip}")
+    });
+    check_sliding_rate_limit(
+        &state,
+        &format!("like:{step_id}:{actor_key}"),
+        1,
+        60,
+        "You have already liked this article recently. Please try again later.",
+    )
+    .await?;
+
     let likes_count = state.repo.like_step(step_id).await.map_err(repo_err)?;
     Ok(Json(serde_json::json!({ "likes_count": likes_count })))
 }
@@ -388,6 +443,17 @@ pub async fn create_note_handler(
     headers: HeaderMap,
     Json(mut input): Json<CreateMarginNoteInput>,
 ) -> Result<Response, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_margin_notes {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Margin notes are disabled on this site.",
+        ));
+    }
     let (owner_opt, set_cookie) = resolve_me_owner(&state, &headers, true).await?;
     let owner = owner_opt.ok_or_else(|| {
         ApiError::new(ErrorCode::Unauthorized, "Unable to resolve learner session.")
@@ -462,6 +528,17 @@ pub async fn update_note_handler(
     AxumPath(note_id): AxumPath<Uuid>,
     body_bytes: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_margin_notes {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Margin notes are disabled on this site.",
+        ));
+    }
     let (owner_opt, _) = resolve_me_owner(&state, &headers, false).await?;
     let Some(owner) = owner_opt else {
         return Err(ApiError::new(
@@ -525,6 +602,17 @@ pub async fn delete_note_handler(
     headers: HeaderMap,
     AxumPath(note_id): AxumPath<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_margin_notes {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Margin notes are disabled on this site.",
+        ));
+    }
     let (owner_opt, _) = resolve_me_owner(&state, &headers, false).await?;
     let Some(owner) = owner_opt else {
         return Err(ApiError::new(
@@ -558,6 +646,17 @@ pub async fn restore_note_handler(
     headers: HeaderMap,
     AxumPath(note_id): AxumPath<Uuid>,
 ) -> Result<Response, ApiError> {
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .map_err(repo_err)?;
+    if !settings.enable_margin_notes {
+        return Err(ApiError::new(
+            ErrorCode::Forbidden,
+            "Margin notes are disabled on this site.",
+        ));
+    }
     let (owner_opt, _) = resolve_me_owner(&state, &headers, false).await?;
     let Some(owner) = owner_opt else {
         return Err(ApiError::new(
@@ -613,7 +712,7 @@ pub async fn export_notes_handler(
         .unwrap_or_else(|| "markdown".to_string());
 
     if format == "w3c-jsonld" || format == "jsonld" || format == "json" {
-        let origin = detect_external_origin(&headers);
+        let origin = detect_external_origin(&state, &headers);
         let payload = export_notes_as_w3c_jsonld(&notes, &origin);
         let body = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
         let mut resp = (StatusCode::OK, body).into_response();
