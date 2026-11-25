@@ -553,6 +553,10 @@ export interface ExtendedMessages {
     anomalyIpLabel: string;
     anomalyDeviceLabel: string;
     resetOtpHint: string;
+    resetValidatingLink: string;
+    resetLinkExpiredTitle: string;
+    resetLinkExpiredDesc: string;
+    resetLinkRequestNewBtn: string;
     haveResetCodeBtn: string;
     loginSubtitle: string;
     registerSubtitle: string;
@@ -746,6 +750,7 @@ export interface ExtendedMessages {
     smtpTestSentMsg: string;
     smtpTemplatesToggle: string;
     smtpRegisterCodeTab: string;
+    smtpLoginOtpTab: string;
     smtpLoginAnomalyTab: string;
     smtpInviteTab: string;
     smtpResetTab: string;
@@ -754,6 +759,8 @@ export interface ExtendedMessages {
     smtpBanTab: string;
     smtpRegisterSubjectLabel: string;
     smtpRegisterHtmlLabel: string;
+    smtpLoginOtpSubjectLabel: string;
+    smtpLoginOtpHtmlLabel: string;
     smtpLoginAnomalySubjectLabel: string;
     smtpLoginAnomalyHtmlLabel: string;
     smtpAutoLocalePlaceholder: string;

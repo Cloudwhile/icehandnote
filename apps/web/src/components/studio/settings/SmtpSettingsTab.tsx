@@ -46,6 +46,8 @@ export const DEFAULT_SMTP_STATE: SmtpSettingsDto = {
   email_footer_text: '',
   register_code_subject: '',
   register_code_html: '',
+  login_otp_subject: '',
+  login_otp_html: '',
   login_anomaly_subject: '',
   login_anomaly_html: '',
   invite_subject: '',
@@ -60,6 +62,7 @@ export const DEFAULT_SMTP_STATE: SmtpSettingsDto = {
 
 type MailTemplateKind =
   | 'register_code'
+  | 'login_otp'
   | 'login_anomaly'
   | 'email_change'
   | 'invite'
@@ -443,8 +446,10 @@ export function SmtpSettingsTab({
   const currentTplSubject =
     activeTemplateKind === 'register_code'
       ? smtpDraft.register_code_subject
-      : activeTemplateKind === 'login_anomaly'
-        ? smtpDraft.login_anomaly_subject
+      : activeTemplateKind === 'login_otp'
+        ? smtpDraft.login_otp_subject
+        : activeTemplateKind === 'login_anomaly'
+          ? smtpDraft.login_anomaly_subject
         : activeTemplateKind === 'email_change'
           ? ''
           : activeTemplateKind === 'invite'
@@ -458,8 +463,10 @@ export function SmtpSettingsTab({
   const currentTplHtml =
     activeTemplateKind === 'register_code'
       ? smtpDraft.register_code_html
-      : activeTemplateKind === 'login_anomaly'
-        ? smtpDraft.login_anomaly_html
+      : activeTemplateKind === 'login_otp'
+        ? smtpDraft.login_otp_html
+        : activeTemplateKind === 'login_anomaly'
+          ? smtpDraft.login_anomaly_html
         : activeTemplateKind === 'email_change'
           ? ''
           : activeTemplateKind === 'invite'
@@ -597,6 +604,11 @@ export function SmtpSettingsTab({
         return field === 'subject'
           ? { ...prev, register_code_subject: value }
           : { ...prev, register_code_html: value };
+      }
+      if (activeTemplateKind === 'login_otp') {
+        return field === 'subject'
+          ? { ...prev, login_otp_subject: value }
+          : { ...prev, login_otp_html: value };
       }
       if (activeTemplateKind === 'login_anomaly') {
         return field === 'subject'
@@ -1222,6 +1234,7 @@ export function SmtpSettingsTab({
                     onChange={setActiveTemplateKind}
                     items={[
                       { value: 'register_code', label: extSettings.smtpRegisterCodeTab },
+                      { value: 'login_otp', label: extSettings.smtpLoginOtpTab },
                       { value: 'login_anomaly', label: extSettings.smtpLoginAnomalyTab },
                       { value: 'email_change', label: extSettings.smtpEmailChangeTab },
                       { value: 'invite', label: extSettings.smtpInviteTab },
@@ -1262,8 +1275,10 @@ export function SmtpSettingsTab({
                       <label htmlFor="smtp-tpl-active-subj" className="ink-field-label">
                         {activeTemplateKind === 'register_code'
                           ? extSettings.smtpRegisterSubjectLabel
-                          : activeTemplateKind === 'login_anomaly'
-                            ? extSettings.smtpLoginAnomalySubjectLabel
+                          : activeTemplateKind === 'login_otp'
+                            ? extSettings.smtpLoginOtpSubjectLabel
+                            : activeTemplateKind === 'login_anomaly'
+                              ? extSettings.smtpLoginAnomalySubjectLabel
                             : activeTemplateKind === 'invite'
                               ? extSettings.smtpInviteSubjectLabel
                               : activeTemplateKind === 'reset'
@@ -1291,8 +1306,10 @@ export function SmtpSettingsTab({
                       <label htmlFor="smtp-tpl-active-html" className="ink-field-label">
                         {activeTemplateKind === 'register_code'
                           ? extSettings.smtpRegisterHtmlLabel
-                          : activeTemplateKind === 'login_anomaly'
-                            ? extSettings.smtpLoginAnomalyHtmlLabel
+                          : activeTemplateKind === 'login_otp'
+                            ? extSettings.smtpLoginOtpHtmlLabel
+                            : activeTemplateKind === 'login_anomaly'
+                              ? extSettings.smtpLoginAnomalyHtmlLabel
                             : activeTemplateKind === 'invite'
                               ? extSettings.smtpInviteHtmlLabel
                               : activeTemplateKind === 'reset'

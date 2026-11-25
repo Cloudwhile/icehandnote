@@ -549,13 +549,18 @@ export const api = {
     return res;
   },
 
-  verifyLoginOtp: async (challengeId: string, code: string) => {
+  verifyLoginOtp: async (
+    challengeId: string,
+    code: string,
+    locale?: LocaleCode,
+  ) => {
     const res = await fetchJson<AuthSessionResponse>('/api/v1/auth/login/verify-otp', {
       method: 'POST',
       body: JSON.stringify({
         challenge_id: challengeId,
         code,
         anonymous_learner_id: getAnonymousLearnerId(),
+        locale,
       }),
     });
     saveAuthSession(res);
@@ -630,16 +635,28 @@ export const api = {
     }),
 
   forgotPassword: (email: string, locale?: LocaleCode) =>
-    fetchJson<{ ok: boolean; cooldown_seconds?: number }>('/api/v1/auth/forgot-password', {
-      method: 'POST',
-      body: JSON.stringify({ email, locale }),
-    }),
+    fetchJson<{ ok: boolean; cooldown_seconds?: number; expires_in_seconds?: number }>(
+      '/api/v1/auth/forgot-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, locale }),
+      },
+    ),
+
+  validateResetToken: (token: string, signal?: AbortSignal) =>
+    fetchJson<{ valid: boolean; expires_in_seconds: number }>(
+      `/api/v1/auth/reset-password/validate?token=${encodeURIComponent(token)}`,
+      { signal },
+    ),
 
   verifyResetOtp: (email: string, otp_code: string) =>
-    fetchJson<{ ok: boolean; reset_token: string }>('/api/v1/auth/verify-reset-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email, otp_code }),
-    }),
+    fetchJson<{ ok: boolean; reset_token: string; expires_in_seconds?: number }>(
+      '/api/v1/auth/verify-reset-otp',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, otp_code }),
+      },
+    ),
 
   resetPassword: async (payload: {
     token?: string;
@@ -1292,6 +1309,7 @@ export const api = {
   adminPreviewSmtpTemplate: (payload: {
     template_kind:
       | 'register_code'
+      | 'login_otp'
       | 'login_anomaly'
       | 'email_change'
       | 'invite'

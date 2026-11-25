@@ -287,7 +287,7 @@ export function LoginFlowPanel({
     }
     setSubmitting(true);
     try {
-      const session = await api.verifyLoginOtp(loginChallenge.challenge_id, code);
+      const session = await api.verifyLoginOtp(loginChallenge.challenge_id, code, locale);
       onSuccess(session.user, extAuth.signedInWelcomeMsg(session.user.display_name));
     } catch (err) {
       toast.error(err);

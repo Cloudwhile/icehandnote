@@ -101,15 +101,15 @@ export function AuthFlowPage({
 
   const [hasLoginChallenge, setHasLoginChallenge] = useState(false);
   const [regStep, setRegStep] = useState<'details' | 'otp'>('details');
-  const [hasVerifiedResetToken, setHasVerifiedResetToken] = useState(
-    Boolean(resetTokenFromUrl),
-  );
+  const [hasVerifiedResetToken, setHasVerifiedResetToken] = useState(false);
+  const [resetLinkExpired, setResetLinkExpired] = useState(false);
   const [onboardingProviderName, setOnboardingProviderName] = useState('');
 
   useEffect(() => {
     setHasLoginChallenge(false);
     setRegStep('details');
-    setHasVerifiedResetToken(Boolean(resetTokenFromUrl));
+    setHasVerifiedResetToken(false);
+    setResetLinkExpired(false);
   }, [mode, resetTokenFromUrl]);
 
   // Redirect authenticated users away from plain login/register pages,
@@ -160,9 +160,11 @@ export function AuthFlowPage({
         : mode === 'forgot'
           ? extAuth.forgotPasswordTitle
           : mode === 'reset'
-            ? hasVerifiedResetToken
-              ? extAuth.resetPasswordTitle
-              : extAuth.authStepVerifyOtp
+            ? resetLinkExpired
+              ? extAuth.resetLinkExpiredTitle
+              : hasVerifiedResetToken
+                ? extAuth.resetPasswordTitle
+                : extAuth.authStepVerifyOtp
             : extAuth.onboardingTitle(onboardingProviderName || fallbackOAuthLabel);
 
   const pageSubtitle =
@@ -176,7 +178,7 @@ export function AuthFlowPage({
           : ''
         : mode === 'forgot'
           ? extAuth.forgotPasswordDesc
-          : mode === 'reset' && !hasVerifiedResetToken
+          : mode === 'reset' && !hasVerifiedResetToken && !resetLinkExpired
             ? extAuth.resetOtpHint
             : '';
 
@@ -282,6 +284,7 @@ export function AuthFlowPage({
                   resetTokenFromUrl={resetTokenFromUrl}
                   returnQuerySuffix={returnQuerySuffix}
                   onTokenVerifiedChange={setHasVerifiedResetToken}
+                  onLinkExpiredChange={setResetLinkExpired}
                   onFocusHeading={focusHeading}
                   onSuccess={handleSuccess}
                 />

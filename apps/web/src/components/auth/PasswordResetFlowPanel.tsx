@@ -29,6 +29,7 @@ export interface PasswordResetFlowPanelProps {
   resetTokenFromUrl: string;
   returnQuerySuffix: string;
   onTokenVerifiedChange: (verified: boolean) => void;
+  onLinkExpiredChange?: (expired: boolean) => void;
   onFocusHeading: () => void;
   onSuccess: (user: UserProfileDto, welcomeMessage: string) => void;
 }
@@ -40,6 +41,7 @@ export function PasswordResetFlowPanel({
   resetTokenFromUrl,
   returnQuerySuffix,
   onTokenVerifiedChange,
+  onLinkExpiredChange,
   onFocusHeading,
   onSuccess,
 }: PasswordResetFlowPanelProps) {
@@ -53,18 +55,27 @@ export function PasswordResetFlowPanel({
   const sendingResetRef = useRef(false);
   const onTokenVerifiedChangeRef = useRef(onTokenVerifiedChange);
   onTokenVerifiedChangeRef.current = onTokenVerifiedChange;
+  const onLinkExpiredChangeRef = useRef(onLinkExpiredChange);
+  onLinkExpiredChangeRef.current = onLinkExpiredChange;
 
   const [forgotEmail, setForgotEmail] = useState(resetEmailFromUrl);
   const [resetEmail, setResetEmail] = useState(resetEmailFromUrl);
   const [resetOtpCode, setResetOtpCode] = useState('');
   const [verifiedResetToken, setVerifiedResetToken] = useState('');
+  const [urlTokenValidated, setUrlTokenValidated] = useState(false);
+  const [validatingLink, setValidatingLink] = useState(
+    Boolean(mode === 'reset' && resetTokenFromUrl),
+  );
+  const [linkExpired, setLinkExpired] = useState(false);
+  const [expiresInSecs, setExpiresInSecs] = useState<number | null>(null);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [resending, setResending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
-  const effectiveResetToken = verifiedResetToken || resetTokenFromUrl;
+  const effectiveResetToken =
+    verifiedResetToken || (urlTokenValidated ? resetTokenFromUrl : '');
   const activeEmailSubject = mode === 'forgot' ? forgotEmail : resetEmail;
 
   const { cooldown, startCooldown, applyRateLimitError } = useOtpCooldown(
@@ -76,6 +87,10 @@ export function PasswordResetFlowPanel({
 
   useEffect(() => {
     setVerifiedResetToken('');
+    setUrlTokenValidated(false);
+    setLinkExpired(false);
+    setExpiresInSecs(null);
+    setValidatingLink(Boolean(mode === 'reset' && resetTokenFromUrl));
     if (mode === 'reset') {
       if (resetEmailFromUrl) setResetEmail(resetEmailFromUrl);
       setResetOtpCode('');
@@ -85,7 +100,75 @@ export function PasswordResetFlowPanel({
     if (mode === 'forgot' && resetEmailFromUrl) {
       setForgotEmail(resetEmailFromUrl);
     }
-  }, [mode, resetEmailFromUrl]);
+  }, [mode, resetEmailFromUrl, resetTokenFromUrl]);
+
+  useEffect(() => {
+    if (mode !== 'reset' || !resetTokenFromUrl) {
+      setValidatingLink(false);
+      setUrlTokenValidated(false);
+      return;
+    }
+    const controller = new AbortController();
+    setValidatingLink(true);
+    setUrlTokenValidated(false);
+    setLinkExpired(false);
+    api
+      .validateResetToken(resetTokenFromUrl, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        if (res.valid) {
+          setUrlTokenValidated(true);
+          setExpiresInSecs(res.expires_in_seconds > 0 ? res.expires_in_seconds : 900);
+          setLinkExpired(false);
+        } else {
+          setUrlTokenValidated(false);
+          setLinkExpired(true);
+        }
+      })
+      .catch((err) => {
+        if (
+          controller.signal.aborted ||
+          (err instanceof Error && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        const apiErr = err as { code?: string; status?: number } | null;
+        if (apiErr?.code === 'RESET_TOKEN_INVALID' || apiErr?.status === 400) {
+          setUrlTokenValidated(false);
+          setLinkExpired(true);
+        } else {
+          setUrlTokenValidated(false);
+          toast.error(err);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setValidatingLink(false);
+        }
+      });
+    return () => controller.abort();
+  }, [mode, resetTokenFromUrl]);
+
+  useEffect(() => {
+    onLinkExpiredChangeRef.current?.(linkExpired);
+  }, [linkExpired]);
+
+  const hasCountdown = expiresInSecs !== null && expiresInSecs > 0;
+  useEffect(() => {
+    if (!effectiveResetToken || linkExpired || !hasCountdown) return;
+    const timer = window.setInterval(() => {
+      setExpiresInSecs((prev) => {
+        if (prev === null || prev <= 1) {
+          setLinkExpired(true);
+          setVerifiedResetToken('');
+          setUrlTokenValidated(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [effectiveResetToken, linkExpired, hasCountdown]);
 
   useEffect(() => {
     onTokenVerifiedChangeRef.current(Boolean(effectiveResetToken));
@@ -177,6 +260,12 @@ export function PasswordResetFlowPanel({
     try {
       const res = await api.verifyResetOtp(cleanEmail, cleanCode);
       setVerifiedResetToken(res.reset_token);
+      setLinkExpired(false);
+      setExpiresInSecs(
+        typeof res.expires_in_seconds === 'number' && res.expires_in_seconds > 0
+          ? res.expires_in_seconds
+          : 900,
+      );
       setNewPassword('');
       setConfirmNewPassword('');
       window.requestAnimationFrame(onFocusHeading);
@@ -203,7 +292,14 @@ export function PasswordResetFlowPanel({
       });
       onSuccess(session.user, extAuth.resetSuccessMsg);
     } catch (err) {
-      toast.error(err);
+      const apiErr = err as { code?: string; status?: number } | null;
+      if (apiErr?.code === 'RESET_TOKEN_INVALID' || apiErr?.status === 400) {
+        setLinkExpired(true);
+        setVerifiedResetToken('');
+        setUrlTokenValidated(false);
+      } else {
+        toast.error(err);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -272,8 +368,63 @@ export function PasswordResetFlowPanel({
     );
   }
 
+  if (mode === 'reset' && linkExpired) {
+    return (
+      <div key="reset-expired-panel" className="flex flex-col gap-5">
+        <div
+          role="alert"
+          className="rounded-xl border p-4 text-sm"
+          style={{
+            borderColor: 'var(--alert-warn-border, var(--ink-border))',
+            backgroundColor: 'var(--alert-warn-bg, transparent)',
+            color: 'var(--ink-text)',
+          }}
+        >
+          <p className="font-semibold mb-1.5">{extAuth.resetLinkExpiredTitle}</p>
+          <p className="opacity-85 leading-relaxed">{extAuth.resetLinkExpiredDesc}</p>
+        </div>
+        <a
+          href={`/${locale}/auth/forgot-password${returnQuerySuffix}`}
+          className="btn-ink btn-primary w-full justify-center text-center"
+        >
+          {extAuth.resetLinkRequestNewBtn}
+        </a>
+      </div>
+    );
+  }
+
+  if (mode === 'reset' && validatingLink) {
+    return (
+      <div key="reset-validating-panel" className="flex flex-col gap-4 py-4">
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-xl border p-4 text-sm text-center"
+          style={{
+            borderColor: 'var(--ink-border)',
+            color: 'var(--ink-muted)',
+          }}
+        >
+          {extAuth.resetValidatingLink}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div key="reset-panel" className="flex flex-col gap-5">
+      {effectiveResetToken && expiresInSecs !== null && expiresInSecs > 0 && (
+        <div
+          className="text-xs px-3 py-1.5 rounded-lg border flex items-center justify-end tabular-nums font-semibold"
+          style={{
+            borderColor: 'var(--ink-border)',
+            color: 'var(--ink-muted)',
+          }}
+        >
+          {String(Math.floor(expiresInSecs / 60)).padStart(2, '0')}:
+          {String(expiresInSecs % 60).padStart(2, '0')}
+        </div>
+      )}
       {!effectiveResetToken ? (
         <form
           key="reset-otp-form"

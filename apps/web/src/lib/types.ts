@@ -850,6 +850,8 @@ export interface SmtpSettingsDto {
   email_footer_text: string;
   register_code_subject: string;
   register_code_html: string;
+  login_otp_subject: string;
+  login_otp_html: string;
   login_anomaly_subject: string;
   login_anomaly_html: string;
   invite_subject: string;
