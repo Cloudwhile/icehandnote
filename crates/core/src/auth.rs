@@ -161,6 +161,20 @@ pub fn compute_step_content_sha256(
     tags: &[String],
     body_markdown: &str,
 ) -> String {
+    compute_step_content_sha256_with_cover(title, summary, status, license, tags, body_markdown, "")
+}
+
+/// Compute a deterministic SHA-256 hex digest including an optional cover banner image URL.
+/// When `cover_image` is empty, the digest is byte-for-byte identical to `compute_step_content_sha256`.
+pub fn compute_step_content_sha256_with_cover(
+    title: &str,
+    summary: &str,
+    status: &str,
+    license: &str,
+    tags: &[String],
+    body_markdown: &str,
+    cover_image: &str,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"step_translation_v1\0");
@@ -178,6 +192,11 @@ pub fn compute_step_content_sha256(
     }
     hasher.update(b"\0");
     hasher.update(body_markdown.as_bytes());
+    let clean_cover = cover_image.trim();
+    if !clean_cover.is_empty() {
+        hasher.update(b"\0cover:");
+        hasher.update(clean_cover.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -922,6 +941,8 @@ pub struct StudioTrackDto {
     pub title: String,
     pub difficulty: String,
     pub icon_kind: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub is_published: bool,
     pub chapters: Vec<StudioChapterDto>,
 }
@@ -946,6 +967,8 @@ pub struct StudioStepEditorDto {
     #[serde(default)]
     pub etag: String,
     pub status: String,
+    #[serde(default)]
+    pub cover_image: String,
     #[serde(default)]
     pub license: String,
     pub tags: Vec<String>,
@@ -995,6 +1018,8 @@ pub struct SaveStudioStepInput {
     pub bump_canonical: bool,
     pub status: String,
     #[serde(default)]
+    pub cover_image: String,
+    #[serde(default)]
     pub license: String,
     pub tags: Vec<String>,
     pub body_markdown: String,
@@ -1008,6 +1033,98 @@ pub struct SaveStudioStepInput {
 
 fn default_write_disk() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateTrackMetaInput {
+    #[serde(default)]
+    pub icon_kind: Option<String>,
+    #[serde(default)]
+    pub difficulty: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+pub type UpdateTrackIconInput = UpdateTrackMetaInput;
+
+fn strip_plain_control_and_tags(raw: &str) -> String {
+    let mut plain = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            c if c.is_control() => plain.push(' '),
+            c => plain.push(c),
+        }
+    }
+    plain
+}
+
+/// Strip control characters / HTML tags and drop legacy machine-enum difficulty values
+/// (`beginner`, `intermediate`, `advanced`), keeping an optional author-defined label (max 24 chars).
+pub fn sanitize_track_custom_label(raw: &str) -> String {
+    let normalized = strip_plain_control_and_tags(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match normalized.to_ascii_lowercase().as_str() {
+        "" | "beginner" | "intermediate" | "advanced" => String::new(),
+        _ => normalized.chars().take(24).collect(),
+    }
+}
+
+/// Normalize author-defined series tags (strip leading `#`, control chars, tags, deduplicate, max 8).
+pub fn sanitize_track_tags(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(raw.len().min(8));
+    let mut seen = std::collections::HashSet::new();
+    for item in raw {
+        let cleaned: String = strip_plain_control_and_tags(item)
+            .trim()
+            .trim_start_matches('#')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(24)
+            .collect();
+        if cleaned.is_empty() {
+            continue;
+        }
+        let key = cleaned.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(cleaned);
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Normalize series icon kind against the 16 supported hand-drawn stationery icons.
+pub fn normalize_track_icon_kind(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "snowflake" => "snowflake",
+        "notebook" => "notebook",
+        "feather" => "feather",
+        "terminal" => "terminal",
+        "code" => "code",
+        "cube" => "cube",
+        "compass" => "compass",
+        "layers" => "layers",
+        "cpu" => "cpu",
+        "globe" => "globe",
+        "shield" => "shield",
+        "database" => "database",
+        "rocket" => "rocket",
+        "flask" => "flask",
+        "palette" => "palette",
+        "spark" | "sparkles" => "spark",
+        _ => "snowflake",
+    }
+    .to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1172,6 +1289,43 @@ pub fn format_step_markdown_file_with_full_meta(
     step_id: Option<Uuid>,
     body_markdown: &str,
 ) -> String {
+    format_step_markdown_file_with_cover(
+        title,
+        summary,
+        step_number,
+        estimated_minutes,
+        synced_revision,
+        canonical_revision,
+        status,
+        license,
+        author,
+        published_at,
+        updated_at,
+        tags,
+        step_id,
+        "",
+        body_markdown,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_step_markdown_file_with_cover(
+    title: &str,
+    summary: &str,
+    step_number: i32,
+    estimated_minutes: i32,
+    synced_revision: i32,
+    canonical_revision: i32,
+    status: &str,
+    license: &str,
+    author: &str,
+    published_at: Option<&str>,
+    updated_at: Option<&str>,
+    tags: &[String],
+    step_id: Option<Uuid>,
+    cover: &str,
+    body_markdown: &str,
+) -> String {
     let escaped_title = escape_toml_basic_string(title);
     let escaped_summary = escape_toml_basic_string(summary);
     let clean_status = if status == "draft" {
@@ -1184,6 +1338,13 @@ pub fn format_step_markdown_file_with_full_meta(
         String::new()
     } else {
         format!("license = \"{clean_license}\"\n")
+    };
+    let clean_cover = crate::sanitize_cover_image_url(cover);
+    let cover_line = if clean_cover.is_empty() {
+        String::new()
+    } else {
+        let escaped_cover = escape_toml_basic_string(&clean_cover);
+        format!("cover = \"{escaped_cover}\"\n")
     };
     let author_line = if author.trim().is_empty() {
         String::new()
@@ -1211,7 +1372,7 @@ pub fn format_step_markdown_file_with_full_meta(
         .join(", ");
 
     format!(
-        "+++\n{step_id_line}title = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{author_line}{published_line}{updated_line}tags = [{tags_toml}]\n+++\n\n{}\n",
+        "+++\n{step_id_line}title = \"{escaped_title}\"\nsummary = \"{escaped_summary}\"\nstep_number = {step_number}\nestimated_minutes = {estimated_minutes}\nsynced_revision = {synced_revision}\ncanonical_revision = {canonical_revision}\nstatus = \"{clean_status}\"\n{license_line}{cover_line}{author_line}{published_line}{updated_line}tags = [{tags_toml}]\n+++\n\n{}\n",
         body_markdown.trim()
     )
 }

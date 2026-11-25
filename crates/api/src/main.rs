@@ -682,7 +682,8 @@ fn build_router(
         )
         .route(
             "/api/v1/studio/tracks/{track}",
-            delete(routes::studio::studio_delete_track_handler),
+            patch(routes::studio::studio_update_track_meta_handler)
+                .delete(routes::studio::studio_delete_track_handler),
         )
         .route(
             "/api/v1/studio/chapters",
@@ -1866,6 +1867,7 @@ mod tests {
                     synced_revision: 1,
                     bump_canonical: false,
                     status: "published".to_string(),
+                    cover_image: "/uploads/welcome-banner.png".to_string(),
                     license: "cc-by-4.0".to_string(),
                     tags: vec!["welcome".to_string()],
                     body_markdown:
@@ -1928,6 +1930,7 @@ mod tests {
                     synced_revision: 1,
                     bump_canonical: false,
                     status: "published".to_string(),
+                    cover_image: String::new(),
                     license: String::new(),
                     tags: vec![],
                     body_markdown: "正文".to_string(),
@@ -1957,6 +1960,7 @@ mod tests {
                     synced_revision: 1,
                     bump_canonical: false,
                     status: "published".to_string(),
+                    cover_image: String::new(),
                     license: String::new(),
                     tags: vec![],
                     body_markdown: "正文".to_string(),
@@ -4044,6 +4048,179 @@ mod tests {
 
         sink_task.abort();
         server_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn article_cover_banner_and_multichapter_structure_roundtrip() {
+        let tmp_root =
+            env::temp_dir().join(format!("icehandnote-cover-chapters-{}", Uuid::new_v4()));
+        let tmp_content = tmp_root.join("content");
+        std::fs::create_dir_all(&tmp_content).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let repo = LocalSeedRepository::from_content_dir(&tmp_content, store_path).unwrap();
+
+        let admin = repo
+            .upsert_local_account(
+                "banner_author",
+                "Banner Author",
+                "bannerauthor@icehandnote.dev",
+                UserRole::Admin,
+                "supersecret123",
+            )
+            .await
+            .unwrap();
+
+        repo.studio_create_track(
+            icehandnote_core::auth::CreateTrackInput {
+                slug: "field-notes".to_string(),
+                difficulty: "intermediate".to_string(),
+                icon_kind: "compass".to_string(),
+                tags: vec!["notes".to_string()],
+                title_zh_tw: "手账专栏".to_string(),
+                subtitle_zh_tw: "副标题".to_string(),
+                description_zh_tw: "描述".to_string(),
+                first_chapter_slug: "01-foundations".to_string(),
+                first_chapter_title: "第一章 基础构筑".to_string(),
+            },
+            &tmp_content,
+        )
+        .await
+        .unwrap();
+
+        repo.studio_create_chapter(
+            icehandnote_core::auth::CreateChapterInput {
+                track_slug: "field-notes".to_string(),
+                slug: "02-advanced".to_string(),
+                number: 2,
+                title_zh_tw: "第二章 进阶编排".to_string(),
+            },
+            &tmp_content,
+        )
+        .await
+        .unwrap();
+
+        let saved_one = repo
+            .studio_save_step(
+                &admin,
+                icehandnote_core::auth::SaveStudioStepInput {
+                    track_slug: "field-notes".to_string(),
+                    chapter_slug: "01-foundations".to_string(),
+                    step_slug: "01-intro".to_string(),
+                    previous_step_slug: None,
+                    locale: "zh-CN".to_string(),
+                    title: "认识专题封面".to_string(),
+                    summary: "验证自定义缩略图横幅与兜底".to_string(),
+                    step_number: 1,
+                    estimated_minutes: 4,
+                    synced_revision: 1,
+                    bump_canonical: false,
+                    status: "published".to_string(),
+                    cover_image: "/uploads/custom-hero.webp".to_string(),
+                    license: "cc-by-4.0".to_string(),
+                    tags: vec!["banner".to_string()],
+                    body_markdown: "## 开始\n\n这里是第一篇正文。".to_string(),
+                    write_to_content_dir: true,
+                    expected_etag: None,
+                    change_note: None,
+                },
+                &tmp_content,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved_one.cover_image, "/uploads/custom-hero.webp");
+
+        repo.studio_save_step(
+            &admin,
+            icehandnote_core::auth::SaveStudioStepInput {
+                track_slug: "field-notes".to_string(),
+                chapter_slug: "02-advanced".to_string(),
+                step_slug: "02-layout".to_string(),
+                previous_step_slug: None,
+                locale: "zh-CN".to_string(),
+                title: "第二章结构篇".to_string(),
+                summary: "未设置封面时回退为空串".to_string(),
+                step_number: 2,
+                estimated_minutes: 5,
+                synced_revision: 1,
+                bump_canonical: false,
+                status: "published".to_string(),
+                cover_image: "javascript:alert(1)".to_string(),
+                license: String::new(),
+                tags: vec![],
+                body_markdown: "## 版式\n\n这里是第二篇正文。".to_string(),
+                write_to_content_dir: true,
+                expected_etag: None,
+                change_note: None,
+            },
+            &tmp_content,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let tracks = repo.list_tracks("zh-CN").await.unwrap();
+        let track = tracks.iter().find(|t| t.slug == "field-notes").unwrap();
+        assert_eq!(track.icon_kind, "compass");
+        assert_eq!(track.articles.len(), 2);
+        assert_eq!(track.articles[0].cover_image, "/uploads/custom-hero.webp");
+        assert_eq!(track.articles[1].cover_image, "");
+
+        let detail = repo
+            .get_step_detail("zh-CN", "field-notes", "01-foundations", "01-intro")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.cover_image, "/uploads/custom-hero.webp");
+        assert_eq!(detail.track_icon_kind, "compass");
+        assert_eq!(detail.chapters.len(), 2);
+        assert_eq!(detail.chapters[0].title, "第一章 基础构筑");
+        assert_eq!(detail.chapters[1].title, "第二章 进阶编排");
+
+        assert!(repo
+            .studio_update_track_meta(
+                "field-notes",
+                icehandnote_core::auth::UpdateTrackMetaInput {
+                    icon_kind: Some("rocket".to_string()),
+                    difficulty: Some("随笔专栏".to_string()),
+                    tags: Some(vec!["handcraft".to_string(), "#notes".to_string()]),
+                },
+                &tmp_content,
+            )
+            .await
+            .unwrap());
+        let detail_after = repo
+            .get_step_detail("zh-CN", "field-notes", "01-foundations", "01-intro")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail_after.track_icon_kind, "rocket");
+
+        let tracks_after = repo.list_tracks("zh-CN").await.unwrap();
+        let track_after = tracks_after.iter().find(|t| t.slug == "field-notes").unwrap();
+        assert_eq!(track_after.icon_kind, "rocket");
+        assert_eq!(track_after.difficulty, "随笔专栏");
+        assert_eq!(track_after.tags, vec!["handcraft".to_string(), "notes".to_string()]);
+
+        // Legacy preset values ("beginner"/"intermediate"/"advanced") strip cleanly, and blank clears badge
+        assert!(repo
+            .studio_update_track_meta(
+                "field-notes",
+                icehandnote_core::auth::UpdateTrackMetaInput {
+                    icon_kind: None,
+                    difficulty: Some("beginner".to_string()),
+                    tags: None,
+                },
+                &tmp_content,
+            )
+            .await
+            .unwrap());
+        let tracks_cleared = repo.list_tracks("zh-CN").await.unwrap();
+        let track_cleared = tracks_cleared.iter().find(|t| t.slug == "field-notes").unwrap();
+        assert_eq!(track_cleared.difficulty, "");
+        assert_eq!(track_cleared.icon_kind, "rocket");
+
         let _ = std::fs::remove_dir_all(tmp_root);
     }
 }

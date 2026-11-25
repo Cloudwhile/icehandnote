@@ -25,8 +25,10 @@ use axum::{
 use icehandnote_core::{
     auth::{
         build_revision_diff, format_step_markdown_file, normalize_collaborator_role,
-        normalize_locale_scope, percent_encode_component, CollaboratorInviteDto,
-        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, UserProfileDto,
+        normalize_locale_scope, normalize_track_icon_kind, percent_encode_component,
+        sanitize_track_custom_label, sanitize_track_tags, CollaboratorInviteDto,
+        CreateChapterInput, CreateTrackInput, SaveStudioStepInput, UpdateTrackMetaInput,
+        UserProfileDto,
     },
     compile_notebook_markdown,
     error::ErrorCode,
@@ -292,6 +294,37 @@ pub async fn studio_create_track_handler(
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::BadRequest))?;
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+pub async fn studio_update_track_meta_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(track): AxumPath<String>,
+    Json(input): Json<UpdateTrackMetaInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    let _author = require_author_or_admin(&state, &headers).await?;
+    let clean_input = UpdateTrackMetaInput {
+        icon_kind: input.icon_kind.as_deref().map(normalize_track_icon_kind),
+        difficulty: input.difficulty.as_deref().map(sanitize_track_custom_label),
+        tags: input.tags.as_deref().map(sanitize_track_tags),
+    };
+    let updated = state
+        .repo
+        .studio_update_track_meta(&track, clean_input.clone(), &state.content_dir)
+        .await
+        .map_err(|e| repo_err_or(e, ErrorCode::BadRequest))?;
+    if !updated {
+        return Err(ApiError::new(
+            ErrorCode::TrackNotFound,
+            "Series not found.",
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "icon_kind": clean_input.icon_kind,
+        "difficulty": clean_input.difficulty,
+        "tags": clean_input.tags,
+    })))
 }
 
 pub async fn studio_delete_track_handler(

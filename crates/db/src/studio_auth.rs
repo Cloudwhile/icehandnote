@@ -7,13 +7,14 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
-        compute_step_content_sha256, compute_step_etag, extract_body_without_frontmatter,
-        generate_uuid_v7, hash_password, hash_session_token,
-        normalize_collaborator_role, normalize_locale_scope, verify_password, ArticleAuthorDto,
+        compute_step_content_sha256_with_cover, compute_step_etag,
+        extract_body_without_frontmatter, generate_uuid_v7, hash_password, hash_session_token,
+        normalize_collaborator_role, normalize_locale_scope, normalize_track_icon_kind,
+        sanitize_track_custom_label, sanitize_track_tags, verify_password, ArticleAuthorDto,
         BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
         CreateTrackInput, SaveStudioStepInput, StepRevisionDto, StudioChapterDto,
         StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto, StudioTrackDto,
-        UserProfileDto, UserRole,
+        UpdateTrackMetaInput, UserProfileDto, UserRole,
     },
     compile_notebook_markdown,
     error::ErrorCode,
@@ -558,13 +559,15 @@ pub fn compute_loaded_translation_etag(
     }
     let body = extract_body_without_frontmatter(&tr.raw_markdown);
     let lic = icehandnote_core::normalize_license_code(&tr.compiled.frontmatter.license);
-    let sha = compute_step_content_sha256(
+    let cover = icehandnote_core::sanitize_cover_image_url(&tr.compiled.frontmatter.cover);
+    let sha = compute_step_content_sha256_with_cover(
         &tr.compiled.frontmatter.title,
         &tr.compiled.frontmatter.summary,
         &tr.compiled.frontmatter.status,
         &lic,
         &tr.compiled.frontmatter.tags,
         &body,
+        &cover,
     );
     let seq = step_meta
         .get(&step_id)
@@ -707,8 +710,9 @@ pub fn build_studio_overview_from_bundle(
                 track_id: t.id,
                 slug: t.manifest.slug.clone(),
                 title,
-                difficulty: t.manifest.difficulty.clone(),
-                icon_kind: t.manifest.icon_kind.clone(),
+                difficulty: sanitize_track_custom_label(&t.manifest.difficulty),
+                icon_kind: normalize_track_icon_kind(&t.manifest.icon_kind),
+                tags: sanitize_track_tags(&t.manifest.tags),
                 is_published: true,
                 chapters,
             })
@@ -816,6 +820,9 @@ pub fn read_step_editor_from_bundle(
                     edit_seq,
                     etag,
                     status: tr.compiled.frontmatter.status.clone(),
+                    cover_image: icehandnote_core::sanitize_cover_image_url(
+                        &tr.compiled.frontmatter.cover,
+                    ),
                     license: icehandnote_core::normalize_license_code(
                         &tr.compiled.frontmatter.license,
                     ),
@@ -878,6 +885,9 @@ pub fn read_step_editor_from_bundle(
                 edit_seq: 0,
                 etag: String::new(),
                 status: "draft".to_string(),
+                cover_image: base_tr
+                    .map(|t| icehandnote_core::sanitize_cover_image_url(&t.compiled.frontmatter.cover))
+                    .unwrap_or_default(),
                 license: base_tr
                     .map(|t| {
                         icehandnote_core::normalize_license_code(&t.compiled.frontmatter.license)
@@ -939,6 +949,7 @@ pub fn read_step_editor_from_bundle(
         edit_seq: 0,
         etag: String::new(),
         status: "draft".to_string(),
+        cover_image: String::new(),
         license: String::new(),
         tags: Vec::new(),
         body_markdown: String::new(),
@@ -1209,15 +1220,17 @@ pub fn apply_save_step_to_bundle_and_disk(
     let computed_minutes = estimate_reading_minutes(&input.body_markdown);
     let clean_title = sanitize_custom_html(&input.title, 320);
     let clean_summary = sanitize_custom_html(&input.summary, 640);
+    let clean_cover = icehandnote_core::sanitize_cover_image_url(&input.cover_image);
     let clean_license = icehandnote_core::normalize_license_code(&input.license);
 
-    let new_sha256 = compute_step_content_sha256(
+    let new_sha256 = compute_step_content_sha256_with_cover(
         &clean_title,
         &clean_summary,
         clean_status,
         &clean_license,
         &input.tags,
         &input.body_markdown,
+        &clean_cover,
     );
 
     let meta_entry = step_meta.entry(step_id).or_default();
@@ -1238,7 +1251,7 @@ pub fn apply_save_step_to_bundle_and_disk(
 
     let published_iso = published_at.to_rfc3339();
     let updated_iso = now.to_rfc3339();
-    let raw_md = icehandnote_core::auth::format_step_markdown_file_with_full_meta(
+    let raw_md = icehandnote_core::auth::format_step_markdown_file_with_cover(
         &clean_title,
         &clean_summary,
         input.step_number,
@@ -1252,6 +1265,7 @@ pub fn apply_save_step_to_bundle_and_disk(
         Some(&updated_iso),
         &input.tags,
         Some(step_id),
+        &clean_cover,
         &input.body_markdown,
     );
     let compiled = compile_notebook_markdown(&raw_md);
@@ -1484,10 +1498,10 @@ pub fn create_track_in_bundle_and_disk(
     let sort_order = (bundle.tracks.len() as i32) + 1;
     let manifest = TrackManifest {
         slug: clean_slug.clone(),
-        difficulty: input.difficulty.clone(),
-        icon_kind: input.icon_kind.clone(),
+        difficulty: sanitize_track_custom_label(&input.difficulty),
+        icon_kind: normalize_track_icon_kind(&input.icon_kind),
         sort_order,
-        tags: input.tags.clone(),
+        tags: sanitize_track_tags(&input.tags),
         translations,
         chapters: vec![ch_manifest],
     };
@@ -1527,6 +1541,41 @@ pub fn create_track_in_bundle_and_disk(
     .into_iter()
     .find(|t| t.slug == clean_slug)
     .unwrap())
+}
+
+pub fn update_track_meta_in_bundle_and_disk(
+    bundle: &mut ContentBundle,
+    track_slug: &str,
+    input: &UpdateTrackMetaInput,
+    content_dir: &Path,
+) -> Result<bool> {
+    let clean = track_slug.trim();
+    if !is_valid_slug_segment(clean) {
+        return Err(domain_err(ErrorCode::InvalidSlug, "Invalid track slug."));
+    }
+    let Some(track) = bundle.tracks.iter_mut().find(|t| t.manifest.slug == clean) else {
+        return Ok(false);
+    };
+    if let Some(ref raw_icon) = input.icon_kind {
+        track.manifest.icon_kind = normalize_track_icon_kind(raw_icon);
+    }
+    if let Some(ref raw_diff) = input.difficulty {
+        track.manifest.difficulty = sanitize_track_custom_label(raw_diff);
+    }
+    if let Some(ref raw_tags) = input.tags {
+        track.manifest.tags = sanitize_track_tags(raw_tags);
+    }
+    let track_dir = content_dir.join(clean);
+    if track_dir.exists()
+        && !crate::is_symlink_path(&track_dir)
+        && crate::ensure_within_dir(content_dir, &track_dir).is_ok()
+    {
+        let toml_text = toml::to_string_pretty(&track.manifest)?;
+        let manifest_path = track_dir.join("track.toml");
+        crate::ensure_within_dir(&track_dir, &manifest_path)?;
+        crate::atomic_write_str(&manifest_path, &toml_text)?;
+    }
+    Ok(true)
 }
 
 pub fn delete_track_in_bundle_and_disk(

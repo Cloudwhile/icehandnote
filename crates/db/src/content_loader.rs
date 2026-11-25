@@ -18,6 +18,7 @@ pub fn deterministic_uuid(name: &str) -> Uuid {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrackManifest {
     pub slug: String,
+    #[serde(default)]
     pub difficulty: String,
     #[serde(default = "default_icon")]
     pub icon_kind: String,

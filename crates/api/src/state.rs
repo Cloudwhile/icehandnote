@@ -6,8 +6,8 @@ use icehandnote_core::{
         parse_user_agent_device, percent_encode_component, slugify_oauth_provider_id,
         BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
         CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
-        StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserProfileDto, UserRole,
-        UserSessionDto,
+        StudioStepEditorDto, StudioTrackDto, UpdateTrackMetaInput, UpdateUserProfileInput,
+        UserProfileDto, UserRole, UserSessionDto,
     },
     crypto::{sign_guest_learner_cookie, verify_guest_learner_cookie},
     error::ErrorCode,
@@ -1008,6 +1008,17 @@ impl TutorialRepository for DynamicRepository {
         content_dir: &Path,
     ) -> anyhow::Result<StudioTrackDto> {
         self.current().studio_create_track(input, content_dir).await
+    }
+
+    async fn studio_update_track_meta(
+        &self,
+        track_slug: &str,
+        input: UpdateTrackMetaInput,
+        content_dir: &Path,
+    ) -> anyhow::Result<bool> {
+        self.current()
+            .studio_update_track_meta(track_slug, input, content_dir)
+            .await
     }
 
     async fn studio_delete_track(

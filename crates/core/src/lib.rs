@@ -250,6 +250,8 @@ pub struct StepFrontmatter {
     pub license: String,
     #[serde(default)]
     pub author: String,
+    #[serde(default, alias = "cover_image", alias = "banner")]
+    pub cover: String,
     #[serde(default)]
     pub published_at: Option<String>,
     #[serde(default)]
@@ -331,6 +333,27 @@ pub struct LocaleInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackArticleCardDto {
+    pub step_id: Uuid,
+    pub chapter_slug: String,
+    #[serde(default)]
+    pub chapter_title: String,
+    pub step_slug: String,
+    pub step_number: i32,
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub cover_image: String,
+    pub estimated_minutes: i32,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub author_name: String,
+    #[serde(default = "Utc::now")]
+    pub published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSummaryDto {
     pub id: Uuid,
     pub slug: String,
@@ -344,6 +367,8 @@ pub struct TrackSummaryDto {
     pub step_count: usize,
     pub first_chapter_slug: String,
     pub first_step_slug: String,
+    #[serde(default)]
+    pub articles: Vec<TrackArticleCardDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +402,8 @@ pub struct StepDetailDto {
     pub step_id: Uuid,
     pub track_slug: String,
     pub track_title: String,
+    #[serde(default)]
+    pub track_icon_kind: String,
     pub chapter_slug: String,
     pub chapter_title: String,
     pub step_slug: String,
@@ -394,6 +421,8 @@ pub struct StepDetailDto {
     pub estimated_minutes: i32,
     pub title: String,
     pub summary: String,
+    #[serde(default)]
+    pub cover_image: String,
     #[serde(default)]
     pub license: String,
     #[serde(default)]
@@ -928,6 +957,15 @@ pub fn is_safe_image_src(src: &str) -> bool {
     trimmed.starts_with("https://")
         || trimmed.starts_with("http://")
         || (trimmed.starts_with('/') && !trimmed.starts_with("//"))
+}
+
+/// Sanitize an optional article cover banner image path or URL.
+pub fn sanitize_cover_image_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 512 || !is_safe_image_src(trimmed) {
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 fn allowed_ink_classes() -> HashMap<&'static str, HashSet<&'static str>> {

@@ -485,6 +485,12 @@ pub trait TutorialRepository: Send + Sync {
         input: CreateTrackInput,
         content_dir: &Path,
     ) -> Result<StudioTrackDto>;
+    async fn studio_update_track_meta(
+        &self,
+        track_slug: &str,
+        input: icehandnote_core::auth::UpdateTrackMetaInput,
+        content_dir: &Path,
+    ) -> Result<bool>;
     async fn studio_delete_track(&self, track_slug: &str, content_dir: &Path) -> Result<bool>;
     async fn studio_create_chapter(
         &self,

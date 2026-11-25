@@ -10,32 +10,38 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use icehandnote_core::{
     auth::{
-        compute_step_content_sha256, compute_step_etag, constant_time_str_eq,
+        compute_step_content_sha256_with_cover, compute_step_etag, constant_time_str_eq,
         evaluate_login_anomaly, extract_body_without_frontmatter,
         generate_action_token,
         generate_email_verification_code, generate_uuid_v7, hash_action_token,
         hash_email_verification_code,
         hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
         normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
-        parse_user_agent_device, verify_password, ArticleAuthorDto, BlogSsoClaims,
-        CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput, CreateTrackInput,
-        InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioChapterDto,
-        StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto, StudioTrackDto,
-        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
-        TRUSTED_DEVICE_TTL_DAYS,
+        normalize_track_icon_kind, parse_user_agent_device, sanitize_track_custom_label,
+        sanitize_track_tags, verify_password, ArticleAuthorDto,
+        BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
+        CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
+        StudioChapterDto, StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto,
+        StudioTrackDto, UpdateTrackMetaInput, UpdateUserProfileInput, UserPasskeyDto,
+        UserProfileDto, UserRole, UserSessionDto, TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet, compile_notebook_markdown,
     error::{DomainError, ErrorCode},
     normalize_note_motivation, normalize_note_visuals,
-    reading_time::estimate_reading_minutes, sanitize_user_note, validate_user_note_content,
+    reading_time::estimate_reading_minutes, sanitize_cover_image_url, sanitize_user_note,
+    validate_user_note_content,
     webauthn::StoredPasskeyCredential,
     AnnotationTarget, ArticleTaskChecksDto, ChapterNavDto, CreateMarginNoteInput,
     LearnerProgressDto, ListMarginNotesFilter, NotebookBlock, SearchHitDto, StepDetailDto,
-    StepNavItemDto, StepNeighborDto, TocItem, TrackSummaryDto, UpdateMarginNoteInput,
-    UserMarginNoteDto,
+    StepNavItemDto, StepNeighborDto, TocItem, TrackArticleCardDto, TrackSummaryDto,
+    UpdateMarginNoteInput, UserMarginNoteDto,
 };
 use sqlx::{postgres::PgRow, PgPool, Row};
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 use uuid::Uuid;
 
 const USER_SELECT_COLS: &str = "id, wp_user_id, username, display_name, email, avatar_url, \
@@ -79,6 +85,8 @@ impl PostgresRepository {
             ("0013_annotations_and_notes.sql", include_str!("../migrations/0013_annotations_and_notes.sql")),
             ("0014_collaboration_rfc.sql", include_str!("../migrations/0014_collaboration_rfc.sql")),
             ("0015_hardening_and_indexes.sql", include_str!("../migrations/0015_hardening_and_indexes.sql")),
+            ("0016_step_cover_image.sql", include_str!("../migrations/0016_step_cover_image.sql")),
+            ("0017_track_custom_label.sql", include_str!("../migrations/0017_track_custom_label.sql")),
         ] {
             let applied: Option<i32> =
                 sqlx::query_scalar("SELECT 1 FROM _icehandnote_migrations WHERE name = $1")
@@ -510,22 +518,99 @@ impl TutorialRepository for PostgresRepository {
         .fetch_all(&self.pool)
         .await?;
 
+        let mut track_ids: Vec<Uuid> = Vec::with_capacity(rows.len());
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
+            let tid: Uuid = r.try_get("id")?;
+            track_ids.push(tid);
+            let raw_diff: String = r.try_get("difficulty")?;
+            let raw_icon: String = r.try_get("icon_kind")?;
+            let raw_tags: Vec<String> = r.try_get("tags")?;
             out.push(TrackSummaryDto {
-                id: r.try_get("id")?,
+                id: tid,
                 slug: r.try_get("slug")?,
-                difficulty: r.try_get("difficulty")?,
-                icon_kind: r.try_get("icon_kind")?,
+                difficulty: sanitize_track_custom_label(&raw_diff),
+                icon_kind: normalize_track_icon_kind(&raw_icon),
                 title: r.try_get("title")?,
                 subtitle: r.try_get("subtitle")?,
                 description: r.try_get("description")?,
-                tags: r.try_get("tags")?,
+                tags: sanitize_track_tags(&raw_tags),
                 chapter_count: r.try_get::<i64, _>("chapter_count")? as usize,
                 step_count: r.try_get::<i64, _>("step_count")? as usize,
                 first_chapter_slug: r.try_get("first_chapter_slug")?,
                 first_step_slug: r.try_get("first_step_slug")?,
+                articles: Vec::new(),
             });
+        }
+
+        if !track_ids.is_empty() {
+            let art_rows = sqlx::query(
+                r#"
+                SELECT
+                    c.track_id,
+                    c.slug AS chapter_slug,
+                    COALESCE(ct_req.title, ct_def.title, c.slug) AS chapter_title,
+                    s.id AS step_id,
+                    s.slug AS step_slug,
+                    s.step_number,
+                    s.estimated_minutes,
+                    tr.title,
+                    tr.summary,
+                    COALESCE(tr.cover_image, '') AS cover_image,
+                    tr.tags,
+                    CASE
+                        WHEN u.display_name IS NOT NULL AND u.display_name <> '' THEN u.display_name
+                        WHEN tr.author_name <> '' AND tr.author_name <> 'Author' THEN tr.author_name
+                        WHEN s.author_name <> '' AND s.author_name <> 'Author' THEN s.author_name
+                        ELSE ''
+                    END AS author_name,
+                    tr.published_at
+                FROM chapters c
+                JOIN steps s ON s.chapter_id = c.id
+                LEFT JOIN chapter_translations ct_req ON ct_req.chapter_id = c.id AND ct_req.locale_code = $1
+                LEFT JOIN chapter_translations ct_def ON ct_def.chapter_id = c.id AND ct_def.locale_code = 'zh-CN'
+                JOIN LATERAL (
+                    SELECT title, summary, cover_image, tags, author_name, published_at
+                    FROM step_translations st
+                    WHERE st.step_id = s.id AND st.status = 'published'
+                    ORDER BY CASE WHEN st.locale_code = $1 THEN 0 WHEN st.locale_code = s.default_locale THEN 1 ELSE 2 END, st.locale_code
+                    LIMIT 1
+                ) tr ON TRUE
+                LEFT JOIN users u ON u.id = s.owner_user_id
+                WHERE c.track_id = ANY($2)
+                  AND s.takedown_reason IS NULL
+                ORDER BY c.chapter_number ASC, s.step_number ASC, s.slug ASC
+                "#,
+            )
+            .bind(locale)
+            .bind(&track_ids)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut by_track: HashMap<Uuid, Vec<TrackArticleCardDto>> = HashMap::new();
+            for ar in art_rows {
+                let tid: Uuid = ar.try_get("track_id")?;
+                let raw_cover: String = ar.try_get("cover_image").unwrap_or_default();
+                by_track.entry(tid).or_default().push(TrackArticleCardDto {
+                    step_id: ar.try_get("step_id")?,
+                    chapter_slug: ar.try_get("chapter_slug")?,
+                    chapter_title: ar.try_get("chapter_title")?,
+                    step_slug: ar.try_get("step_slug")?,
+                    step_number: ar.try_get("step_number")?,
+                    title: ar.try_get("title")?,
+                    summary: ar.try_get("summary")?,
+                    cover_image: sanitize_cover_image_url(&raw_cover),
+                    estimated_minutes: ar.try_get("estimated_minutes")?,
+                    tags: ar.try_get("tags").unwrap_or_default(),
+                    author_name: ar.try_get("author_name").unwrap_or_default(),
+                    published_at: ar.try_get("published_at")?,
+                });
+            }
+            for item in &mut out {
+                if let Some(list) = by_track.remove(&item.id) {
+                    item.articles = list;
+                }
+            }
         }
         Ok(out)
     }
@@ -541,6 +626,7 @@ impl TutorialRepository for PostgresRepository {
             r#"
             SELECT
                 t.id AS track_id,
+                t.icon_kind AS track_icon_kind,
                 COALESCE(tt_req.title, tt_def.title, t.slug) AS track_title,
                 c.id AS chapter_id,
                 c.slug AS chapter_slug,
@@ -580,6 +666,9 @@ impl TutorialRepository for PostgresRepository {
         };
 
         let track_id: Uuid = sr.try_get("track_id")?;
+        let track_icon_kind: String = sr
+            .try_get::<String, _>("track_icon_kind")
+            .unwrap_or_else(|_| "snowflake".to_string());
         let resolved_chapter_slug: String = sr.try_get("chapter_slug")?;
         let track_title_resolved: String = sr.try_get("track_title")?;
         let step_id: Uuid = sr.try_get("step_id")?;
@@ -601,7 +690,7 @@ impl TutorialRepository for PostgresRepository {
 
         let tr_row = sqlx::query(
             r#"
-            SELECT locale_code, title, summary, license, author_name, tags, compiled_blocks, toc_tree, synced_revision, published_at, updated_at
+            SELECT locale_code, title, summary, COALESCE(cover_image, '') AS cover_image, license, author_name, tags, compiled_blocks, toc_tree, synced_revision, published_at, updated_at
             FROM step_translations
             WHERE step_id = $1 AND status = 'published'
             ORDER BY CASE WHEN locale_code = $2 THEN 0 WHEN locale_code = $3 THEN 1 ELSE 2 END, locale_code
@@ -655,12 +744,13 @@ impl TutorialRepository for PostgresRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut all_nav_steps: Vec<StepNavItemDto> = Vec::new();
+        let mut chapters: Vec<ChapterNavDto> = Vec::new();
         let mut flat_steps: Vec<(String, String, String, Uuid)> = Vec::new();
-        let mut first_nav_ch_slug: Option<String> = None;
 
         for nr in nav_rows {
             let c_slug: String = nr.try_get("chapter_slug")?;
+            let c_num: i32 = nr.try_get("chapter_number")?;
+            let c_title: String = nr.try_get("chapter_title")?;
             let s_id: Uuid = nr.try_get("step_id")?;
             let s_slug: String = nr.try_get("step_slug")?;
             let s_num: i32 = nr.try_get("step_number")?;
@@ -669,11 +759,8 @@ impl TutorialRepository for PostgresRepository {
             let has_req: bool = nr.try_get("has_req")?;
             let has_drift: bool = nr.try_get("has_drift").unwrap_or(false);
 
-            if first_nav_ch_slug.is_none() {
-                first_nav_ch_slug = Some(c_slug.clone());
-            }
-            flat_steps.push((c_slug, s_slug.clone(), s_title.clone(), s_id));
-            all_nav_steps.push(StepNavItemDto {
+            flat_steps.push((c_slug.clone(), s_slug.clone(), s_title.clone(), s_id));
+            let nav_item = StepNavItemDto {
                 id: s_id,
                 slug: s_slug,
                 step_number: s_num,
@@ -681,15 +768,27 @@ impl TutorialRepository for PostgresRepository {
                 estimated_minutes: s_mins,
                 has_requested_locale: has_req,
                 has_revision_drift: has_drift,
-            });
+            };
+            if let Some(last) = chapters.last_mut().filter(|ch| ch.slug == c_slug) {
+                last.steps.push(nav_item);
+            } else {
+                chapters.push(ChapterNavDto {
+                    slug: c_slug,
+                    number: c_num,
+                    title: c_title,
+                    steps: vec![nav_item],
+                });
+            }
         }
 
-        let chapters = vec![ChapterNavDto {
-            slug: first_nav_ch_slug.unwrap_or_else(|| resolved_chapter_slug.clone()),
-            number: 1,
-            title: track_title_resolved.clone(),
-            steps: all_nav_steps,
-        }];
+        if chapters.is_empty() {
+            chapters.push(ChapterNavDto {
+                slug: resolved_chapter_slug.clone(),
+                number: 1,
+                title: track_title_resolved.clone(),
+                steps: Vec::new(),
+            });
+        }
 
         let current_idx = flat_steps.iter().position(|(_, _, _, id)| *id == step_id);
         let prev_step = current_idx
@@ -726,10 +825,12 @@ impl TutorialRepository for PostgresRepository {
         let published_at: DateTime<Utc> = tr.try_get("published_at").unwrap_or(updated_at);
 
         let is_fallback = resolved_locale != locale;
+        let raw_cover: String = tr.try_get("cover_image").unwrap_or_default();
         Ok(Some(StepDetailDto {
             step_id,
             track_slug: track_slug.to_string(),
             track_title: track_title_resolved,
+            track_icon_kind,
             chapter_slug: resolved_chapter_slug,
             chapter_title: sr.try_get("chapter_title")?,
             step_slug: step_slug.to_string(),
@@ -746,6 +847,7 @@ impl TutorialRepository for PostgresRepository {
             estimated_minutes: sr.try_get("estimated_minutes")?,
             title: tr.try_get("title")?,
             summary: tr.try_get("summary")?,
+            cover_image: sanitize_cover_image_url(&raw_cover),
             license: icehandnote_core::normalize_license_code(
                 &tr.try_get::<String, _>("license").unwrap_or_default(),
             ),
@@ -1493,9 +1595,9 @@ impl TutorialRepository for PostgresRepository {
             )
             .bind(track.id)
             .bind(&track.manifest.slug)
-            .bind(&track.manifest.difficulty)
-            .bind(&track.manifest.icon_kind)
-            .bind(&track.manifest.tags)
+            .bind(sanitize_track_custom_label(&track.manifest.difficulty))
+            .bind(normalize_track_icon_kind(&track.manifest.icon_kind))
+            .bind(sanitize_track_tags(&track.manifest.tags))
             .bind(track.manifest.sort_order)
             .fetch_one(&mut *tx)
             .await?;
@@ -1585,26 +1687,29 @@ impl TutorialRepository for PostgresRepository {
                         let clean_license = icehandnote_core::normalize_license_code(
                             &tr.compiled.frontmatter.license,
                         );
+                        let clean_cover = sanitize_cover_image_url(&tr.compiled.frontmatter.cover);
                         let body = extract_body_without_frontmatter(&tr.raw_markdown);
-                        let sha256 = compute_step_content_sha256(
+                        let sha256 = compute_step_content_sha256_with_cover(
                             &tr.compiled.frontmatter.title,
                             &tr.compiled.frontmatter.summary,
                             status_val,
                             &clean_license,
                             &tr.compiled.frontmatter.tags,
                             &body,
+                            &clean_cover,
                         );
                         sqlx::query(
                             r#"
                             INSERT INTO step_translations (
-                                step_id, locale_code, title, summary, license, author_name, tags, raw_markdown,
+                                step_id, locale_code, title, summary, license, cover_image, author_name, tags, raw_markdown,
                                 compiled_blocks, toc_tree, plain_text, synced_revision, content_sha256, status, published_at, updated_at
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                             ON CONFLICT (step_id, locale_code) DO UPDATE
                             SET title = EXCLUDED.title,
                                 summary = EXCLUDED.summary,
                                 license = EXCLUDED.license,
+                                cover_image = EXCLUDED.cover_image,
                                 author_name = CASE WHEN EXCLUDED.author_name <> '' THEN EXCLUDED.author_name ELSE step_translations.author_name END,
                                 tags = EXCLUDED.tags,
                                 raw_markdown = EXCLUDED.raw_markdown,
@@ -1623,6 +1728,7 @@ impl TutorialRepository for PostgresRepository {
                         .bind(&tr.compiled.frontmatter.title)
                         .bind(&tr.compiled.frontmatter.summary)
                         .bind(&clean_license)
+                        .bind(&clean_cover)
                         .bind(&tr.compiled.frontmatter.author)
                         .bind(&tr.compiled.frontmatter.tags)
                         .bind(&tr.raw_markdown)
@@ -3694,7 +3800,7 @@ impl TutorialRepository for PostgresRepository {
         let is_reader_only = !viewer.role.can_author();
         let t_rows = sqlx::query(
             r#"
-            SELECT t.id, t.slug, t.difficulty, t.icon_kind, t.is_published,
+            SELECT t.id, t.slug, t.difficulty, t.icon_kind, t.tags, t.is_published,
                    COALESCE(tt_req.title, tt_def.title, t.slug) AS title
             FROM tracks t
             LEFT JOIN track_translations tt_req ON tt_req.track_id = t.id AND tt_req.locale_code = $1
@@ -3825,12 +3931,16 @@ impl TutorialRepository for PostgresRepository {
                 continue;
             }
 
+            let raw_diff: String = tr.try_get("difficulty")?;
+            let raw_icon: String = tr.try_get("icon_kind")?;
+            let raw_tags: Vec<String> = tr.try_get("tags")?;
             out.push(StudioTrackDto {
                 track_id,
                 slug: tr.try_get("slug")?,
                 title: tr.try_get("title")?,
-                difficulty: tr.try_get("difficulty")?,
-                icon_kind: tr.try_get("icon_kind")?,
+                difficulty: sanitize_track_custom_label(&raw_diff),
+                icon_kind: normalize_track_icon_kind(&raw_icon),
+                tags: sanitize_track_tags(&raw_tags),
                 is_published: tr.try_get("is_published")?,
                 chapters,
             });
@@ -3893,6 +4003,7 @@ impl TutorialRepository for PostgresRepository {
                 edit_seq: 0,
                 etag: String::new(),
                 status: "draft".to_string(),
+                cover_image: String::new(),
                 license: String::new(),
                 tags: Vec::new(),
                 body_markdown: String::new(),
@@ -3974,7 +4085,7 @@ impl TutorialRepository for PostgresRepository {
         let grav = self.fetch_gravatar_base().await;
 
         let tr_opt = sqlx::query(
-            "SELECT title, summary, license, author_name, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2",
+            "SELECT title, summary, COALESCE(cover_image, '') AS cover_image, license, author_name, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2",
         )
         .bind(step_id)
         .bind(locale)
@@ -3992,6 +4103,8 @@ impl TutorialRepository for PostgresRepository {
             let raw: String = tr.try_get("raw_markdown")?;
             let raw_lic: String = tr.try_get("license").unwrap_or_default();
             let clean_lic = icehandnote_core::normalize_license_code(&raw_lic);
+            let raw_cover: String = tr.try_get("cover_image").unwrap_or_default();
+            let clean_cover = sanitize_cover_image_url(&raw_cover);
             let tr_auth: String = tr.try_get("author_name").unwrap_or_default();
             let fb_auth = if !tr_auth.trim().is_empty() {
                 tr_auth
@@ -4006,7 +4119,15 @@ impl TutorialRepository for PostgresRepository {
             let edit_seq: i64 = tr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
             let stored_sha: String = tr.try_get("content_sha256").unwrap_or_default();
             let eff_sha = if stored_sha.is_empty() {
-                compute_step_content_sha256(&title, &summary, &status, &clean_lic, &tags, &body_markdown)
+                compute_step_content_sha256_with_cover(
+                    &title,
+                    &summary,
+                    &status,
+                    &clean_lic,
+                    &tags,
+                    &body_markdown,
+                    &clean_cover,
+                )
             } else {
                 stored_sha
             };
@@ -4033,6 +4154,7 @@ impl TutorialRepository for PostgresRepository {
                 edit_seq,
                 etag,
                 status,
+                cover_image: clean_cover,
                 license: clean_lic,
                 tags,
                 body_markdown,
@@ -4052,7 +4174,7 @@ impl TutorialRepository for PostgresRepository {
         }
 
         let fallback_tr = sqlx::query(
-            "SELECT license, author_name, tags, raw_markdown, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND ($3 OR status <> 'draft') ORDER BY CASE WHEN locale_code = $2 THEN 0 ELSE 1 END, locale_code LIMIT 1",
+            "SELECT COALESCE(cover_image, '') AS cover_image, license, author_name, tags, raw_markdown, status, published_at, updated_at FROM step_translations WHERE step_id = $1 AND ($3 OR status <> 'draft') ORDER BY CASE WHEN locale_code = $2 THEN 0 ELSE 1 END, locale_code LIMIT 1",
         )
         .bind(step_id)
         .bind(&default_locale)
@@ -4067,8 +4189,9 @@ impl TutorialRepository for PostgresRepository {
             ));
         }
 
-        let (prefill_license, prefill_tags, prefill_body, fb_auth, fb_pub, fb_upd) =
+        let (prefill_cover, prefill_license, prefill_tags, prefill_body, fb_auth, fb_pub, fb_upd) =
             if let Some(fb) = fallback_tr {
+                let cov: String = fb.try_get("cover_image").unwrap_or_default();
                 let lic: String = fb.try_get("license").unwrap_or_default();
                 let tgs: Vec<String> = fb.try_get("tags").unwrap_or_default();
                 let raw: String = fb.try_get("raw_markdown").unwrap_or_default();
@@ -4076,6 +4199,7 @@ impl TutorialRepository for PostgresRepository {
                 let upd: DateTime<Utc> = fb.try_get("updated_at").unwrap_or(now_utc);
                 let pub_at: DateTime<Utc> = fb.try_get("published_at").unwrap_or(upd);
                 (
+                    sanitize_cover_image_url(&cov),
                     icehandnote_core::normalize_license_code(&lic),
                     tgs,
                     extract_body_without_frontmatter(&raw),
@@ -4085,6 +4209,7 @@ impl TutorialRepository for PostgresRepository {
                 )
             } else {
                 (
+                    String::new(),
                     String::new(),
                     Vec::new(),
                     String::new(),
@@ -4114,6 +4239,7 @@ impl TutorialRepository for PostgresRepository {
             edit_seq: 0,
             etag: String::new(),
             status: "draft".to_string(),
+            cover_image: prefill_cover,
             license: prefill_license,
             tags: prefill_tags,
             body_markdown: prefill_body,
@@ -4328,7 +4454,7 @@ impl TutorialRepository for PostgresRepository {
                     ));
                 }
                 let prev_row = sqlx::query(
-                    "SELECT title, summary, license, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, author_name, last_editor_name, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2 FOR UPDATE",
+                    "SELECT title, summary, COALESCE(cover_image, '') AS cover_image, license, tags, raw_markdown, synced_revision, edit_seq, content_sha256, status, author_name, last_editor_name, published_at, updated_at FROM step_translations WHERE step_id = $1 AND locale_code = $2 FOR UPDATE",
                 )
                 .bind(sid)
                 .bind(&input.locale)
@@ -4352,6 +4478,9 @@ impl TutorialRepository for PostgresRepository {
                     let cur_seq: i64 = pr.try_get::<i64, _>("edit_seq").unwrap_or(1).max(1);
                     let prev_title: String = pr.try_get("title").unwrap_or_default();
                     let prev_summary: String = pr.try_get("summary").unwrap_or_default();
+                    let prev_cover: String = sanitize_cover_image_url(
+                        &pr.try_get::<String, _>("cover_image").unwrap_or_default(),
+                    );
                     let prev_lic: String = icehandnote_core::normalize_license_code(
                         &pr.try_get::<String, _>("license").unwrap_or_default(),
                     );
@@ -4360,13 +4489,14 @@ impl TutorialRepository for PostgresRepository {
                     let prev_body = extract_body_without_frontmatter(&prev_raw);
                     let stored_sha: String = pr.try_get("content_sha256").unwrap_or_default();
                     let cur_sha = if stored_sha.is_empty() {
-                        compute_step_content_sha256(
+                        compute_step_content_sha256_with_cover(
                             &prev_title,
                             &prev_summary,
                             &prev_status,
                             &prev_lic,
                             &prev_tags,
                             &prev_body,
+                            &prev_cover,
                         )
                     } else {
                         stored_sha
@@ -4475,9 +4605,10 @@ impl TutorialRepository for PostgresRepository {
             };
 
         let clean_license = icehandnote_core::normalize_license_code(&input.license);
+        let clean_cover = sanitize_cover_image_url(&input.cover_image);
         let pub_iso = resolved_published_at.to_rfc3339();
         let upd_iso = now_utc.to_rfc3339();
-        let raw_md = icehandnote_core::auth::format_step_markdown_file_with_full_meta(
+        let raw_md = icehandnote_core::auth::format_step_markdown_file_with_cover(
             &input.title,
             &input.summary,
             input.step_number,
@@ -4491,32 +4622,35 @@ impl TutorialRepository for PostgresRepository {
             Some(&upd_iso),
             &input.tags,
             Some(step_id),
+            &clean_cover,
             &input.body_markdown,
         );
         let compiled = compile_notebook_markdown(&raw_md);
         let blocks_json = serde_json::to_value(&compiled.blocks)?;
         let toc_json = serde_json::to_value(&compiled.toc)?;
-        let new_sha256 = compute_step_content_sha256(
+        let new_sha256 = compute_step_content_sha256_with_cover(
             &compiled.frontmatter.title,
             &compiled.frontmatter.summary,
             clean_status,
             &clean_license,
             &input.tags,
             &input.body_markdown,
+            &clean_cover,
         );
 
         sqlx::query(
             r#"
             INSERT INTO step_translations (
-                step_id, locale_code, title, summary, license, tags, raw_markdown,
+                step_id, locale_code, title, summary, license, cover_image, tags, raw_markdown,
                 compiled_blocks, toc_tree, plain_text, synced_revision, edit_seq, content_sha256,
                 last_editor_name, status, author_id, author_name, published_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             ON CONFLICT (step_id, locale_code) DO UPDATE
             SET title = EXCLUDED.title,
                 summary = EXCLUDED.summary,
                 license = EXCLUDED.license,
+                cover_image = EXCLUDED.cover_image,
                 tags = EXCLUDED.tags,
                 raw_markdown = EXCLUDED.raw_markdown,
                 compiled_blocks = EXCLUDED.compiled_blocks,
@@ -4538,6 +4672,7 @@ impl TutorialRepository for PostgresRepository {
         .bind(&compiled.frontmatter.title)
         .bind(&compiled.frontmatter.summary)
         .bind(&clean_license)
+        .bind(&clean_cover)
         .bind(&input.tags)
         .bind(&raw_md)
         .bind(blocks_json)
@@ -4653,15 +4788,18 @@ impl TutorialRepository for PostgresRepository {
             return Err(domain_err(ErrorCode::InvalidSlug, "Invalid chapter slug."));
         }
 
+        let clean_icon = normalize_track_icon_kind(&input.icon_kind);
+        let clean_diff = sanitize_track_custom_label(&input.difficulty);
+        let clean_tags = sanitize_track_tags(&input.tags);
         let track_id = deterministic_uuid(&format!("track:{clean_slug}"));
         sqlx::query(
             "INSERT INTO tracks (id, slug, difficulty, icon_kind, tags, is_published) VALUES ($1, $2, $3, $4, $5, TRUE)",
         )
         .bind(track_id)
         .bind(&clean_slug)
-        .bind(&input.difficulty)
-        .bind(&input.icon_kind)
-        .bind(&input.tags)
+        .bind(&clean_diff)
+        .bind(&clean_icon)
+        .bind(&clean_tags)
         .execute(&self.pool)
         .await?;
 
@@ -4724,6 +4862,63 @@ impl TutorialRepository for PostgresRepository {
             .into_iter()
             .find(|t| t.slug == clean_slug)
             .expect("newly created track must exist"))
+    }
+
+    async fn studio_update_track_meta(
+        &self,
+        track_slug: &str,
+        input: UpdateTrackMetaInput,
+        content_dir: &Path,
+    ) -> Result<bool> {
+        let clean = track_slug.trim();
+        if !crate::is_valid_slug_segment(clean) {
+            return Err(domain_err(ErrorCode::InvalidSlug, "Invalid track slug."));
+        }
+        let clean_icon = input.icon_kind.as_deref().map(normalize_track_icon_kind);
+        let clean_diff = input.difficulty.as_deref().map(sanitize_track_custom_label);
+        let clean_tags = input.tags.as_deref().map(sanitize_track_tags);
+        let res = sqlx::query(
+            r#"
+            UPDATE tracks
+            SET icon_kind = COALESCE($2, icon_kind),
+                difficulty = COALESCE($3, difficulty),
+                tags = COALESCE($4, tags)
+            WHERE slug = $1
+            "#,
+        )
+        .bind(clean)
+        .bind(&clean_icon)
+        .bind(&clean_diff)
+        .bind(&clean_tags)
+        .execute(&self.pool)
+        .await?;
+        let updated = res.rows_affected() > 0;
+        if updated && content_dir.exists() {
+            let track_dir = content_dir.join(clean);
+            let manifest_path = track_dir.join("track.toml");
+            if manifest_path.exists()
+                && !crate::is_symlink_path(&track_dir)
+                && crate::ensure_within_dir(&track_dir, &manifest_path).is_ok()
+            {
+                if let Ok(raw) = fs::read_to_string(&manifest_path) {
+                    if let Ok(mut manifest) = toml::from_str::<crate::content_loader::TrackManifest>(&raw) {
+                        if let Some(ref ic) = clean_icon {
+                            manifest.icon_kind = ic.clone();
+                        }
+                        if let Some(ref df) = clean_diff {
+                            manifest.difficulty = df.clone();
+                        }
+                        if let Some(ref tg) = clean_tags {
+                            manifest.tags = tg.clone();
+                        }
+                        if let Ok(toml_text) = toml::to_string_pretty(&manifest) {
+                            let _ = crate::atomic_write_str(&manifest_path, &toml_text);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(updated)
     }
 
     async fn studio_delete_track(&self, track_slug: &str, content_dir: &Path) -> Result<bool> {
@@ -5590,6 +5785,7 @@ impl TutorialRepository for PostgresRepository {
         let meta_row = sqlx::query(
             r#"
             SELECT s.step_number, COALESCE(st.status, 'draft') AS status,
+                   COALESCE(st.cover_image, '') AS cover_image,
                    COALESCE(st.license, '') AS license, COALESCE(st.tags, '{}') AS tags
             FROM steps s
             LEFT JOIN step_translations st ON st.step_id = s.id AND st.locale_code = $2
@@ -5615,6 +5811,7 @@ impl TutorialRepository for PostgresRepository {
             synced_revision: rev.try_get("synced_revision").unwrap_or(1),
             bump_canonical: false,
             status: meta_row.try_get("status")?,
+            cover_image: meta_row.try_get("cover_image").unwrap_or_default(),
             license: meta_row.try_get("license").unwrap_or_default(),
             tags: meta_row.try_get("tags").unwrap_or_default(),
             body_markdown: rev.try_get("body_markdown")?,

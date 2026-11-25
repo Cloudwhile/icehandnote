@@ -6,10 +6,11 @@ use crate::{
         default_seeded_blog_users, delete_chapter_in_bundle_and_disk,
         delete_step_in_bundle_and_disk, delete_track_in_bundle_and_disk,
         generate_raw_session_token, match_local_user_password, read_step_editor_from_bundle,
-        resolve_local_step_authors, upsert_local_blog_user, user_can_edit_local_step_locale,
-        user_can_read_local_draft, StoredCollabInviteRecord, StoredEmailVerificationRecord,
-        StoredLoginOtpChallengeRecord, StoredOAuthBinding, StoredPasswordResetRecord,
-        StoredSessionRecord, StoredStepMetaRecord, StoredTrustedDeviceRecord, StoredUserRecord,
+        resolve_local_step_authors, update_track_meta_in_bundle_and_disk, upsert_local_blog_user,
+        user_can_edit_local_step_locale, user_can_read_local_draft, StoredCollabInviteRecord,
+        StoredEmailVerificationRecord, StoredLoginOtpChallengeRecord, StoredOAuthBinding,
+        StoredPasswordResetRecord, StoredSessionRecord, StoredStepMetaRecord,
+        StoredTrustedDeviceRecord, StoredUserRecord,
     },
     domain_err, if_match_satisfies, note_quota_for_owner, precondition_failed_err,
     TutorialRepository, NOTE_UNDO_GRACE_MINUTES,
@@ -23,20 +24,21 @@ use icehandnote_core::{
         generate_email_verification_code, generate_uuid_v7, hash_action_token, hash_email_verification_code,
         hash_password, hash_session_token, mask_email_address, normalize_avatar_source,
         normalize_client_ip, normalize_collaborator_role, normalize_locale_scope,
-        parse_user_agent_device, verify_password, BlogSsoClaims, CollaborationAuditLogDto,
+        normalize_track_icon_kind, parse_user_agent_device, sanitize_track_custom_label,
+        sanitize_track_tags, verify_password, BlogSsoClaims, CollaborationAuditLogDto,
         CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, InvitePreviewDto,
         SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioStepEditorDto, StudioTrackDto,
-        UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole, UserSessionDto,
-        TRUSTED_DEVICE_TTL_DAYS,
+        UpdateTrackMetaInput, UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole,
+        UserSessionDto, TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet,
     error::{DomainError, ErrorCode},
-    normalize_note_motivation, normalize_note_visuals, sanitize_user_note,
-    validate_user_note_content,
+    normalize_note_motivation, normalize_note_visuals, sanitize_cover_image_url,
+    sanitize_user_note, validate_user_note_content,
     webauthn::StoredPasskeyCredential,
     ArticleTaskChecksDto, ChapterNavDto, CreateMarginNoteInput, LearnerProgressDto,
     ListMarginNotesFilter, SearchHitDto, StepDetailDto, StepNavItemDto, StepNeighborDto,
-    TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
+    TrackArticleCardDto, TrackSummaryDto, UpdateMarginNoteInput, UserMarginNoteDto,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -287,20 +289,52 @@ impl TutorialRepository for LocalSeedRepository {
     async fn list_tracks(&self, locale: &str) -> Result<Vec<TrackSummaryDto>> {
         let bundle = self.bundle.read().await;
         let state = self.state.read().await;
+        let gravatar_base = Self::gravatar_base(&state);
         let mut out = Vec::new();
 
         for t in &bundle.tracks {
             let (title, subtitle, description) = Self::resolve_track_meta(t, locale);
-            let step_count: usize = t
-                .chapters
-                .iter()
-                .map(|c| {
-                    c.steps
-                        .iter()
-                        .filter(|s| step_is_public(s, &state.step_meta))
-                        .count()
-                })
-                .sum();
+            let mut articles: Vec<TrackArticleCardDto> = Vec::new();
+            for c in &t.chapters {
+                let ch_title = c
+                    .titles
+                    .get(locale)
+                    .or_else(|| c.titles.get("zh-CN"))
+                    .or_else(|| c.titles.get("en"))
+                    .cloned()
+                    .unwrap_or_else(|| c.slug.clone());
+                for s in c.steps.iter().filter(|s| step_is_public(s, &state.step_meta)) {
+                    let Some(tr) = pick_published(s, locale) else {
+                        continue;
+                    };
+                    let authors = resolve_local_step_authors(
+                        s.id,
+                        &tr.compiled.frontmatter.author,
+                        &state.step_meta,
+                        &state.users,
+                        gravatar_base,
+                    );
+                    let author_name = authors
+                        .first()
+                        .map(|a| a.display_name.clone())
+                        .unwrap_or_default();
+                    articles.push(TrackArticleCardDto {
+                        step_id: s.id,
+                        chapter_slug: c.slug.clone(),
+                        chapter_title: ch_title.clone(),
+                        step_slug: s.slug.clone(),
+                        step_number: s.step_number,
+                        title: tr.compiled.frontmatter.title.clone(),
+                        summary: tr.compiled.frontmatter.summary.clone(),
+                        cover_image: sanitize_cover_image_url(&tr.compiled.frontmatter.cover),
+                        estimated_minutes: tr.compiled.frontmatter.estimated_minutes,
+                        tags: tr.compiled.frontmatter.tags.clone(),
+                        author_name,
+                        published_at: tr.published_at,
+                    });
+                }
+            }
+            let step_count = articles.len();
             let first_ch_with_step = t
                 .chapters
                 .iter()
@@ -312,18 +346,19 @@ impl TutorialRepository for LocalSeedRepository {
             out.push(TrackSummaryDto {
                 id: t.id,
                 slug: t.manifest.slug.clone(),
-                difficulty: t.manifest.difficulty.clone(),
-                icon_kind: t.manifest.icon_kind.clone(),
+                difficulty: sanitize_track_custom_label(&t.manifest.difficulty),
+                icon_kind: normalize_track_icon_kind(&t.manifest.icon_kind),
                 title: title.to_string(),
                 subtitle: subtitle.to_string(),
                 description: description.to_string(),
-                tags: t.manifest.tags.clone(),
+                tags: sanitize_track_tags(&t.manifest.tags),
                 chapter_count: t.chapters.len(),
                 step_count,
                 first_chapter_slug: first_ch_with_step
                     .map(|c| c.slug.clone())
                     .unwrap_or_default(),
                 first_step_slug: first_st.map(|s| s.slug.clone()).unwrap_or_default(),
+                articles,
             });
         }
         Ok(out)
@@ -345,10 +380,11 @@ impl TutorialRepository for LocalSeedRepository {
         };
         let (track_title, _, _) = Self::resolve_track_meta(track, locale);
 
-        let mut all_nav_steps: Vec<StepNavItemDto> = Vec::new();
+        let mut chapters_nav: Vec<ChapterNavDto> = Vec::new();
         let mut flat_steps: Vec<(String, String, String, Uuid)> = Vec::new();
 
         for ch in &track.chapters {
+            let mut ch_steps: Vec<StepNavItemDto> = Vec::new();
             for s in ch.steps.iter().filter(|s| step_is_public(s, &state.step_meta)) {
                 let tr_req = s.translations.get(locale).filter(|t| is_published(t));
                 let tr_any = pick_published(s, locale);
@@ -362,7 +398,7 @@ impl TutorialRepository for LocalSeedRepository {
                 });
 
                 flat_steps.push((ch.slug.clone(), s.slug.clone(), s_title.clone(), s.id));
-                all_nav_steps.push(StepNavItemDto {
+                ch_steps.push(StepNavItemDto {
                     id: s.id,
                     slug: s.slug.clone(),
                     step_number: s.step_number,
@@ -372,19 +408,36 @@ impl TutorialRepository for LocalSeedRepository {
                     has_revision_drift: has_drift,
                 });
             }
+            if !ch_steps.is_empty() {
+                let nav_ch_title = ch
+                    .titles
+                    .get(locale)
+                    .or_else(|| ch.titles.get("zh-CN"))
+                    .or_else(|| ch.titles.get("en"))
+                    .cloned()
+                    .unwrap_or_else(|| ch.slug.clone());
+                chapters_nav.push(ChapterNavDto {
+                    slug: ch.slug.clone(),
+                    number: ch.number,
+                    title: nav_ch_title,
+                    steps: ch_steps,
+                });
+            }
         }
 
-        let primary_ch_slug = track
-            .chapters
-            .first()
-            .map(|c| c.slug.clone())
-            .unwrap_or_else(|| "chapters".to_string());
-        let chapters_nav = vec![ChapterNavDto {
-            slug: primary_ch_slug,
-            number: 1,
-            title: track_title.to_string(),
-            steps: all_nav_steps,
-        }];
+        if chapters_nav.is_empty() {
+            let primary_ch_slug = track
+                .chapters
+                .first()
+                .map(|c| c.slug.clone())
+                .unwrap_or_else(|| "chapters".to_string());
+            chapters_nav.push(ChapterNavDto {
+                slug: primary_ch_slug,
+                number: 1,
+                title: track_title.to_string(),
+                steps: Vec::new(),
+            });
+        }
 
         let found = if chapter_slug.is_empty() || chapter_slug == "-" {
             track
@@ -454,6 +507,7 @@ impl TutorialRepository for LocalSeedRepository {
             step_id: step.id,
             track_slug: track.manifest.slug.clone(),
             track_title: track_title.to_string(),
+            track_icon_kind: track.manifest.icon_kind.clone(),
             chapter_slug: ch.slug.clone(),
             chapter_title: ch_title,
             step_slug: step.slug.clone(),
@@ -475,6 +529,7 @@ impl TutorialRepository for LocalSeedRepository {
             estimated_minutes: tr.compiled.frontmatter.estimated_minutes,
             title: tr.compiled.frontmatter.title.clone(),
             summary: tr.compiled.frontmatter.summary.clone(),
+            cover_image: sanitize_cover_image_url(&tr.compiled.frontmatter.cover),
             license: icehandnote_core::normalize_license_code(&tr.compiled.frontmatter.license),
             author_name: primary_author_name,
             authors,
@@ -2608,6 +2663,16 @@ impl TutorialRepository for LocalSeedRepository {
         create_track_in_bundle_and_disk(&mut bundle, &input, content_dir)
     }
 
+    async fn studio_update_track_meta(
+        &self,
+        track_slug: &str,
+        input: UpdateTrackMetaInput,
+        content_dir: &Path,
+    ) -> Result<bool> {
+        let mut bundle = self.bundle.write().await;
+        update_track_meta_in_bundle_and_disk(&mut bundle, track_slug, &input, content_dir)
+    }
+
     async fn studio_delete_track(&self, track_slug: &str, content_dir: &Path) -> Result<bool> {
         let mut bundle = self.bundle.write().await;
         let (removed, step_ids) = delete_track_in_bundle_and_disk(&mut bundle, track_slug, content_dir)?;
@@ -3356,7 +3421,7 @@ impl TutorialRepository for LocalSeedRepository {
     ) -> Result<StudioStepEditorDto> {
         let mut bundle = self.bundle.write().await;
         let mut state = self.state.write().await;
-        let Some((resolved_ch_slug, step_id, step_number, cur_license, cur_tags, cur_status)) =
+        let Some((resolved_ch_slug, step_id, step_number, cur_license, cur_cover, cur_tags, cur_status)) =
             bundle
                 .tracks
                 .iter()
@@ -3379,6 +3444,8 @@ impl TutorialRepository for LocalSeedRepository {
                         s.id,
                         s.step_number,
                         tr.map(|t| t.compiled.frontmatter.license.clone())
+                            .unwrap_or_default(),
+                        tr.map(|t| sanitize_cover_image_url(&t.compiled.frontmatter.cover))
                             .unwrap_or_default(),
                         tr.map(|t| t.compiled.frontmatter.tags.clone())
                             .unwrap_or_default(),
@@ -3417,6 +3484,7 @@ impl TutorialRepository for LocalSeedRepository {
             synced_revision: rev.synced_revision,
             bump_canonical: false,
             status: cur_status,
+            cover_image: cur_cover,
             license: cur_license,
             tags: cur_tags,
             body_markdown: rev.body_markdown.clone(),
