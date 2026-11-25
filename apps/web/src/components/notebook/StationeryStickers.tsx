@@ -176,88 +176,95 @@ export function resolveAlertAppearance(
 
 export const ALERT_DOODLE_ICONS: Record<AlertKind, ReactNode> = {
   tip: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1.3 1.5 1.5 2.5h5c.2-1 .7-1.8 1.5-2.5A6 6 0 0 0 12 3Z" />
-      <path d="M19 4l1.5-1.5M5 4L3.5 2.5" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9.1 18 Q12 17.7 14.9 18" />
+      <path d="M10.1 20.9 Q12 20.7 13.9 20.9" />
+      <path d="M12 3.1 C8.3 3 5.5 6.4 6.2 10.1 C6.6 11.9 7.5 13 8.1 14.1 Q8.3 15 8.5 15.8 Q12 15.5 15.5 15.8 Q15.7 15 15.9 14.1 C16.6 12.9 17.6 11.8 17.8 9.9 C18.3 6.3 15.6 3.2 12 3.1 Z" />
+      <path d="M18.9 4.2 Q19.7 3.4 20.4 2.7" />
+      <path d="M5.1 4.2 Q4.3 3.4 3.6 2.7" />
     </svg>
   ),
   note: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-      <path d="m15 5 4 4" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16.8 3.3 C18.1 2.2 19.8 2.4 20.7 3.4 C21.7 4.4 21.8 6.1 20.6 7.3 Q14.2 13.8 7.7 20.2 Q4.9 21 2.6 21.4 Q3 19.1 3.9 16.3 Q10.3 9.8 16.8 3.3 Z" />
+      <path d="M14.7 5.4 Q16.8 7.2 18.6 9.3" />
     </svg>
   ),
   info: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 16v-4M12 8h.01" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12.1 3.1 C17 3 21 6.9 20.9 12 C20.8 17 16.9 21 11.9 20.9 C6.9 20.8 3 16.9 3.1 11.9 C3.2 7 7 3.2 12.1 3.1 Z" />
+      <path d="M12 16 Q11.8 14 12.1 12" />
+      <path d="M11.9 8.1 Q12.1 7.8 12.3 8.2" />
     </svg>
   ),
   idea: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12 2l2.1 5.4L19.5 9l-5.4 2.1L12 16.5l-2.1-5.4L4.5 9l5.4-1.6L12 2Z" />
-      <path d="M19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16Z" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.4 C12.8 6.1 15.6 8.3 19.4 9 C15.6 9.7 12.8 12.2 12 16.4 C11.2 12.2 8.4 9.7 4.6 9 C8.4 8.3 11.2 6.1 12 2.4 Z" />
+      <path d="M18.9 15.9 Q19.4 17.9 21.8 18.9 Q19.4 19.4 18.9 21.8 Q18.3 19.4 16 18.9 Q18.4 17.9 18.9 15.9 Z" />
     </svg>
   ),
   question: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2.5-3 4.5" />
-      <path d="M12 18h.01" />
-      <path d="M21 11.5a8.5 8.5 0 1 1-4.2-7.3" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9.1 9.1 C9.2 7.1 10.6 6 12.3 6.1 C14.1 6.2 15.1 7.3 15 8.9 C14.9 10.7 12.3 11.4 12.1 13.4" />
+      <path d="M11.9 17.8 Q12.1 17.5 12.3 17.9" />
+      <path d="M20.8 11.5 C21.1 16.4 17.3 20.6 12.4 20.8 C7.4 21 3.3 17.2 3.2 12.2 C3.1 7.3 6.9 3.2 11.9 3.1 C13.7 3.1 15.3 3.6 16.6 4.4" />
     </svg>
   ),
   check: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 7 10 17l-5-5" />
-      <path d="M4 19.5h16" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M19.8 6.9 Q14.8 12 9.9 16.9 Q7.5 14.4 5.1 12.1" />
+      <path d="M4.2 19.6 Q12 19.1 19.8 19.6" />
     </svg>
   ),
   bookmark: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z" />
-      <path d="M9.5 8.5h5" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6.4 3.2 Q12 2.8 17.6 3.2 Q18.8 3.5 18.9 4.7 Q19.1 12.8 18.8 20.8 Q15.4 18.6 12 16.7 Q8.6 18.7 5.2 20.8 Q4.9 12.8 5.2 4.7 Q5.3 3.5 6.4 3.2 Z" />
+      <path d="M9.4 8.5 Q12 8.2 14.6 8.5" />
     </svg>
   ),
   warning: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="m10.3 3.9-8.1 14a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3l-8.1-14a2 2 0 0 0-3.4 0Z" />
-      <path d="M12 9v4M12 17h.01" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10.4 4.1 Q6.3 11.1 2.6 18.1 C2 19.3 2.8 20.7 4.2 20.8 Q12 21.1 19.8 20.8 C21.2 20.7 22 19.3 21.4 18.1 Q17.6 11.1 13.6 4.1 C12.9 2.9 11.1 2.9 10.4 4.1 Z" />
+      <path d="M12 9.1 Q11.8 11.2 12.1 13.2" />
+      <path d="M11.9 17.1 Q12.1 16.8 12.3 17.2" />
     </svg>
   ),
   danger: (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      <path d="m9.5 9.5 5 5m0-5-5 5" />
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 21.7 C16.3 19.8 19.6 15.7 19.7 11.4 Q19.8 8.2 19.5 5.2 Q15.8 3.7 12 2.4 Q8.2 3.8 4.5 5.3 Q4.2 8.4 4.3 11.6 C4.4 15.9 7.8 19.8 12 21.7 Z" />
+      <path d="M9.6 9.6 Q12 12 14.4 14.4" />
+      <path d="M14.4 9.6 Q12 12 9.6 14.4" />
     </svg>
   ),
 };
 
 export const MARGIN_TAG_ICONS: Record<MarginStickerTag, ReactNode> = {
   note: (
-    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16.8 3.3 C18.1 2.2 19.8 2.4 20.7 3.4 C21.7 4.4 21.8 6.1 20.6 7.3 Q14.2 13.8 7.7 20.2 Q4.9 21 2.6 21.4 Q3 19.1 3.9 16.3 Q10.3 9.8 16.8 3.3 Z" />
     </svg>
   ),
   idea: (
-    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12 2l2 5.2L19.2 9 14 11l-2 5.2L10 11 4.8 9 10 7.2 12 2Z" />
+    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.4 C12.8 6.1 15.6 8.3 19.4 9 C15.6 9.7 12.8 12.2 12 16.4 C11.2 12.2 8.4 9.7 4.6 9 C8.4 8.3 11.2 6.1 12 2.4 Z" />
     </svg>
   ),
   ask: (
-    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M9.5 9a2.5 2.5 0 0 1 4.8.8c0 1.6-2.3 2.1-2.3 3.7M12 17h.01" />
+    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12.1 3.1 C17 3 21 6.9 20.9 12 C20.8 17 16.9 21 11.9 20.9 C6.9 20.8 3 16.9 3.1 11.9 C3.2 7 7 3.2 12.1 3.1 Z" />
+      <path d="M9.6 9.1 C9.8 7.4 11 6.4 12.4 6.5 C13.8 6.6 14.6 7.5 14.5 8.8 C14.4 10.3 12.2 10.9 12.1 12.6" />
+      <path d="M11.9 17.1 Q12.1 16.8 12.3 17.2" />
     </svg>
   ),
   star: (
-    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.7 5.8 21 7 14.1 2 9.3 8.9 8.3 12 2" />
+    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.7 Q13.7 5.8 15.1 8.4 Q18.4 8.9 21.7 9.4 Q19.2 11.7 17 14.1 Q17.6 17.5 18.1 20.9 Q15 19.2 12 17.7 Q9 19.3 5.9 20.9 Q6.5 17.5 7 14.1 Q4.6 11.7 2.3 9.4 Q5.7 8.9 8.9 8.4 Q10.4 5.7 12 2.7 Z" />
     </svg>
   ),
   todo: (
-    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="16" rx="3" />
-      <path d="m8.5 12 2.5 2.5 4.5-4.5" />
+    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.95" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4.6 4.1 Q12 3.7 19.4 4.1 Q20.7 4.4 20.8 5.8 Q21 12 20.8 18.2 Q20.6 19.6 19.3 19.8 Q12 20.1 4.7 19.8 Q3.4 19.6 3.2 18.2 Q3 12 3.2 5.8 Q3.4 4.4 4.6 4.1 Z" />
+      <path d="M8.5 12.1 Q9.9 13.5 11.1 14.4 Q13.2 12.1 15.5 9.9" />
     </svg>
   ),
 };

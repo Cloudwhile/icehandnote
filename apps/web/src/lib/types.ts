@@ -180,6 +180,21 @@ export interface TocItem {
   is_task?: boolean;
 }
 
+export interface TrackArticleCardDto {
+  step_id: string;
+  chapter_slug: string;
+  chapter_title?: string;
+  step_slug: string;
+  step_number: number;
+  title: string;
+  summary: string;
+  cover_image?: string;
+  estimated_minutes: number;
+  tags: string[];
+  author_name?: string;
+  published_at: string;
+}
+
 export interface TrackSummaryDto {
   id: string;
   slug: string;
@@ -193,6 +208,7 @@ export interface TrackSummaryDto {
   step_count: number;
   first_chapter_slug: string;
   first_step_slug: string;
+  articles?: TrackArticleCardDto[];
 }
 
 export interface StepNavItemDto {
@@ -339,6 +355,7 @@ export interface StepDetailDto {
   step_id: string;
   track_slug: string;
   track_title: string;
+  track_icon_kind?: string;
   chapter_slug: string;
   chapter_title: string;
   step_slug: string;
@@ -355,6 +372,7 @@ export interface StepDetailDto {
   estimated_minutes: number;
   title: string;
   summary: string;
+  cover_image?: string;
   license?: string;
   author_name?: string;
   authors?: ArticleAuthorDto[];
@@ -578,8 +596,23 @@ export interface StudioTrackDto {
   title: string;
   difficulty: string;
   icon_kind: string;
+  tags?: string[];
   is_published: boolean;
   chapters: StudioChapterDto[];
+}
+
+/**
+ * Resolve optional author-defined series badge, filtering out legacy machine-enum
+ * difficulty strings (`beginner`, `intermediate`, `advanced`).
+ */
+export function resolveCustomTrackBadge(raw?: string | null): string {
+  const clean = (raw ?? '').trim();
+  if (!clean) return '';
+  const lower = clean.toLowerCase();
+  if (lower === 'beginner' || lower === 'intermediate' || lower === 'advanced') {
+    return '';
+  }
+  return clean;
 }
 
 export interface StudioStepEditorDto {
@@ -598,6 +631,7 @@ export interface StudioStepEditorDto {
   edit_seq?: number;
   etag?: string;
   status: string;
+  cover_image?: string;
   license?: string;
   tags: string[];
   body_markdown: string;

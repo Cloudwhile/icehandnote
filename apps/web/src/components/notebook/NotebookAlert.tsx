@@ -311,11 +311,12 @@ export function NotebookAlert({
                   viewBox="0 0 16 16"
                   fill="none"
                   stroke="currentColor"
-                  strokeWidth="2.2"
+                  strokeWidth="2.1"
                   strokeLinecap="round"
+                  strokeLinejoin="round"
                   aria-hidden="true"
                 >
-                  <path d="M6 4l4 4-4 4" />
+                  <path d="M5.8 4.1 Q8.2 6.2 10.2 8 Q8.2 9.8 5.9 11.9" />
                 </svg>
                 <span>{detailSummary}</span>
               </summary>

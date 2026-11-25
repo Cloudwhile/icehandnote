@@ -16,7 +16,12 @@ import type { ExtendedMessages, UiMessages } from '../../lib/i18n';
 import { SafeHtml } from '../../lib/sanitizer';
 import type { ResolvedTheme } from '../../lib/theme';
 import type { NotebookBlock, UserMarginNoteDto } from '../../lib/types';
-import { IconAlertCircle, IconCheck, IconSparkBullet } from '../ui/Icons';
+import {
+  IconAlertCircle,
+  IconCheck,
+  IconSparkBullet,
+  IconSquareEmpty,
+} from '../ui/Icons';
 import {
   AuthorMarginSticker,
   BlockWithMargin,
@@ -685,10 +690,7 @@ export function NotebookBlockRenderer({
             {isChecked ? (
               <IconCheck className="w-3.5 h-3.5 shrink-0" />
             ) : (
-              <span
-                aria-hidden="true"
-                className="w-3.5 h-3.5 rounded border-[1.75px] border-current inline-block shrink-0"
-              />
+              <IconSquareEmpty className="w-3.5 h-3.5 shrink-0" />
             )}
             <span>
               {isChecked

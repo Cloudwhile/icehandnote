@@ -11,9 +11,9 @@ import { UI_COPY } from '../../lib/i18n';
 import type { LicenseId, LocaleCode } from '../../lib/types';
 
 /**
- * Finely engraved Creative Commons / Copyright double-ring coin medallion.
- * Uses optical curves, knockout slash masking (for NC), and balanced proportions
- * across both 32px archival plates and 24px Studio selector tiles.
+ * Hand-drawn Creative Commons / Copyright double-ring ink coin medallion.
+ * Uses pure organic `<path>` pen strokes, knockout slash masking (for NC), and balanced
+ * proportions across both 32px archival plates and 24px Studio selector tiles.
  */
 export function CcEmblemMedallion({
   emblem,
@@ -36,26 +36,26 @@ export function CcEmblemMedallion({
     >
       <defs>
         <clipPath id={clipId}>
-          <circle cx={16} cy={16} r={13.4} />
+          <path d="M16.1 2.7 C23.6 2.6, 29.4 8.5, 29.3 16.1 C29.4 23.5, 23.5 29.4, 15.9 29.3 C8.4 29.4, 2.7 23.4, 2.7 15.9 C2.6 8.6, 8.5 2.7, 16.1 2.7 Z" />
         </clipPath>
       </defs>
 
-      {/* Outer heavy archival bezel & inner hair-line coin engraving */}
-      <circle
-        cx={16}
-        cy={16}
-        r={14.2}
+      {/* Outer hand-drawn archival ink bezel & inner sketch hairline ring */}
+      <path
+        d="M16.1 1.9 C23.9 1.7, 30.2 8.1, 30.1 16.0 C30.3 23.8, 23.9 30.2, 15.9 30.1 C8.1 30.2, 1.8 23.8, 1.9 15.9 C1.8 8.2, 8.2 1.8, 16.1 1.9 Z"
         style={{ fill: coinBg }}
         stroke="currentColor"
-        strokeWidth={1.7}
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
-      <circle
-        cx={16}
-        cy={16}
-        r={11.8}
+      <path
+        d="M16.2 4.2 C22.8 4.1, 27.9 9.3, 27.8 16.1 C27.9 22.7, 22.6 27.9, 15.9 27.8 C9.2 27.9, 4.1 22.5, 4.2 15.8 C4.1 9.5, 9.4 4.3, 16.2 4.2 Z"
         stroke="currentColor"
-        strokeWidth={0.65}
-        strokeOpacity={0.32}
+        strokeWidth={0.7}
+        strokeOpacity={0.34}
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
 
       {emblem === 'cc' && (
@@ -63,30 +63,34 @@ export function CcEmblemMedallion({
           stroke="currentColor"
           strokeWidth={2.05}
           strokeLinecap="round"
+          strokeLinejoin="round"
         >
-          <path d="M14.7 13.3a2.95 3.35 0 1 0 0 5.4" />
-          <path d="M21.4 13.3a2.95 3.35 0 1 0 0 5.4" />
+          <path d="M14.7 13.1 C12.4 11.4, 9.3 12.9, 9.2 16.0 C9.1 19.2, 12.3 20.6, 14.8 18.8" />
+          <path d="M21.4 13.1 C19.1 11.4, 16.0 12.9, 15.9 16.0 C15.8 19.2, 19.0 20.6, 21.5 18.8" />
         </g>
       )}
 
       {emblem === 'by' && (
         <g>
-          {/* Sculpted portrait head */}
-          <circle cx={16} cy={9.55} r={2.2} fill="currentColor" />
-          {/* Tapered torso silhouette with open sleeve & leg separation */}
+          {/* Hand-inked portrait head */}
           <path
-            d="M11.65 14.35c0-1.15.9-2.05 2.08-2.05h4.54c1.18 0 2.08.9 2.08 2.05v4.15c0 .44-.36.8-.8.8h-1.08v4.55a.78.78 0 0 1-.78.78h-3.38a.78.78 0 0 1-.78-.78V19.3h-1.08a.8.8 0 0 1-.8-.8v-4.15Z"
+            d="M16.1 7.4 C17.4 7.3, 18.3 8.3, 18.2 9.6 C18.3 10.9, 17.2 11.8, 15.9 11.7 C14.6 11.8, 13.7 10.8, 13.8 9.5 C13.7 8.2, 14.8 7.3, 16.1 7.4 Z"
             fill="currentColor"
           />
-          {/* Subtle collar scoop & sleeve/stance engraving lines */}
+          {/* Hand-sketched tapered torso silhouette */}
           <path
-            d="M14.2 12.25q1.8 1.15 3.6 0"
+            d="M11.7 14.4 C11.7 13.2, 12.6 12.3, 13.8 12.3 Q16.0 12.1 18.3 12.3 C19.5 12.3, 20.3 13.2, 20.3 14.4 L20.2 18.4 C20.2 18.9, 19.9 19.3, 19.4 19.3 L18.4 19.3 L18.4 23.8 C18.4 24.3, 18.1 24.6, 17.6 24.6 L14.4 24.6 C13.9 24.6, 13.6 24.3, 13.6 23.8 L13.6 19.3 L12.5 19.3 C12.0 19.3, 11.7 18.9, 11.7 18.4 Z"
+            fill="currentColor"
+          />
+          {/* Subtle collar scoop & sleeve/stance engraving strokes */}
+          <path
+            d="M14.2 12.3 Q16.0 13.4 17.8 12.3"
             style={{ stroke: coinBg }}
             strokeWidth={0.95}
             strokeLinecap="round"
           />
           <path
-            d="M13.5 15.1v3.85M18.5 15.1v3.85M16 19.65v4.9"
+            d="M13.5 15.1 Q13.4 17.0 13.5 18.9 M18.5 15.1 Q18.6 17.0 18.5 18.9 M16.0 19.6 Q15.9 22.1 16.0 24.5"
             style={{ stroke: coinBg }}
             strokeWidth={0.85}
             strokeLinecap="round"
@@ -96,54 +100,53 @@ export function CcEmblemMedallion({
 
       {emblem === 'nc' && (
         <g clipPath={`url(#${clipId})`}>
-          {/* Vertical currency spine */}
+          {/* Hand-inked vertical currency spine */}
           <path
-            d="M16 8.35v2.35M16 21.3v2.35"
+            d="M16.0 8.3 Q15.9 9.5 16.0 10.7 M16.0 21.3 Q16.1 22.5 16.0 23.7"
             stroke="currentColor"
             strokeWidth={1.75}
             strokeLinecap="round"
           />
-          {/* Balanced geometric S-curve */}
+          {/* Organic calligraphy S-curve */}
           <path
-            d="M19.15 12.2c-.55-.95-1.65-1.5-3.1-1.5-1.85 0-3.15.92-3.15 2.28 0 1.42 1.18 2.02 3.22 2.5 2.1.5 3.3 1.12 3.3 2.65 0 1.52-1.45 2.55-3.42 2.55-1.72 0-3.12-.62-3.65-1.72"
+            d="M19.15 12.2 C18.6 11.25, 17.5 10.7, 16.05 10.7 C14.2 10.7, 12.9 11.62, 12.9 12.98 C12.9 14.4, 14.08 15.0, 16.12 15.48 C18.22 15.98, 19.42 16.6, 19.42 18.13 C19.42 19.65, 17.97 20.68, 16.0 20.68 C14.28 20.68, 12.88 20.06, 12.35 18.96"
             stroke="currentColor"
             strokeWidth={1.95}
             strokeLinecap="round"
+            strokeLinejoin="round"
           />
-          {/* Diagonal prohibition slash with clean coin-surface halo */}
-          <line
-            x1={6.2}
-            y1={6.2}
-            x2={25.8}
-            y2={25.8}
+          {/* Diagonal hand-drawn prohibition nib stroke with halo */}
+          <path
+            d="M6.1 6.3 Q16.2 15.8 25.9 25.7"
             style={{ stroke: coinBg }}
             strokeWidth={3.6}
+            strokeLinecap="round"
           />
-          <line
-            x1={6.2}
-            y1={6.2}
-            x2={25.8}
-            y2={25.8}
+          <path
+            d="M6.1 6.3 Q16.2 15.8 25.9 25.7"
             stroke="currentColor"
             strokeWidth={1.85}
+            strokeLinecap="round"
           />
         </g>
       )}
 
       {emblem === 'sa' && (
         <g>
-          {/* True circular share-alike loop + crisp geometric tangent arrowhead */}
+          {/* Organic circular share-alike ink loop + nib arrowhead */}
           <path
-            d="M19.95 11.45a5.95 5.95 0 1 0 2.05 4.85"
+            d="M19.9 11.4 C17.3 9.2, 13.0 9.8, 11.1 12.6 C9.2 15.4, 10.2 19.4, 13.2 21.0 C16.3 22.6, 20.5 21.2, 21.8 17.8 Q22.0 17.1 22.0 16.3"
             stroke="currentColor"
             strokeWidth={2.05}
             strokeLinecap="round"
+            strokeLinejoin="round"
           />
           <path
-            d="M21.9 9.15l.75 4.25-4.35-.7Z"
+            d="M21.9 9.2 Q22.4 11.3 22.6 13.4 Q20.4 13.1 18.3 12.7 Q20.1 10.9 21.9 9.2 Z"
             fill="currentColor"
             stroke="currentColor"
             strokeWidth={0.7}
+            strokeLinecap="round"
             strokeLinejoin="round"
           />
         </g>
@@ -155,28 +158,28 @@ export function CcEmblemMedallion({
           strokeWidth={2.15}
           strokeLinecap="round"
         >
-          <path d="M10.15 13.75h11.7" />
-          <path d="M10.15 18.25h11.7" />
+          <path d="M10.1 13.8 Q16.0 13.5 21.9 13.8" />
+          <path d="M10.2 18.3 Q16.1 18.0 21.8 18.2" />
         </g>
       )}
 
       {emblem === 'zero' && (
-        <ellipse
-          cx={16}
-          cy={16}
-          rx={3.55}
-          ry={5.6}
+        <path
+          d="M16.1 10.4 C18.3 10.3, 19.7 12.8, 19.6 16.0 C19.7 19.3, 18.2 21.7, 15.9 21.6 C13.6 21.7, 12.3 19.2, 12.4 15.9 C12.3 12.7, 13.9 10.5, 16.1 10.4 Z"
           stroke="currentColor"
-          strokeWidth={2.25}
+          strokeWidth={2.2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
         />
       )}
 
       {emblem === 'copyright' && (
         <path
-          d="M19.85 12.65a4.95 4.95 0 1 0 0 6.7"
+          d="M19.8 12.6 C17.6 10.5, 13.8 11.0, 12.1 13.6 C10.4 16.2, 11.2 19.7, 14.0 20.9 C16.4 21.9, 18.5 21.0, 19.9 19.4"
           stroke="currentColor"
           strokeWidth={2.2}
           strokeLinecap="round"
+          strokeLinejoin="round"
         />
       )}
     </svg>

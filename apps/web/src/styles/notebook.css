@@ -131,12 +131,15 @@ kbd,
 
 .sidebar-chapter-group > summary::before {
   content: "";
+  content: "" / "";
   inline-size: 0.875rem;
   block-size: 0.875rem;
-  flex-shrink: 0;
+  flex: none;
+  pointer-events: none;
+  forced-color-adjust: none;
   background-color: currentColor;
-  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>") no-repeat center / contain;
-  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>") no-repeat center / contain;
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M6.2 9.2 Q9.2 12.2 12.1 14.9 Q15 12.1 17.9 9.1'></path></svg>") no-repeat center / contain;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M6.2 9.2 Q9.2 12.2 12.1 14.9 Q15 12.1 17.9 9.1'></path></svg>") no-repeat center / contain;
   rotate: -90deg;
 }
 
@@ -1707,7 +1710,7 @@ input[type="checkbox"][switch]:disabled {
  *   SVG mask checkmark animation, forced-colors support, `:focus-visible`, and >= 44px label target
  * ============================================================================ */
 :root {
-  --icon-check: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
+  --icon-check: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M4.6 12.2 Q7.2 14.8 9.2 16.9 Q13.8 11.1 19.6 6.2'></path></svg>");
 }
 
 /* Whole-Section Task Milestone (`节任务`, `## [ ] ...`): sits flush with standard sections (no side rail) */
@@ -2151,20 +2154,25 @@ input[type="checkbox"][switch]:disabled {
   background-color: var(--alert-danger-bg);
 }
 
-/* Reserved leading checkmark slot for checkable radio/checkbox menu items (`menu` guide) */
+/* Reserved leading checkmark slot for checkable radio/checkbox menu items (`menu` & `icons` guides) */
 .ink-menu-list button[role="menuitemradio"]::before,
 .ink-menu-list button[role="menuitemcheckbox"]::before {
   content: "";
+  content: "" / "";
+  display: inline-block;
   flex: none;
+  pointer-events: none;
   inline-size: var(--menu-icon-size);
-  font-weight: 600;
+  block-size: var(--menu-icon-size);
   color: var(--link-ink);
-  text-align: center;
 }
 
 .ink-menu-list button[role="menuitemradio"][aria-checked="true"]::before,
 .ink-menu-list button[role="menuitemcheckbox"][aria-checked="true"]::before {
-  content: "✓";
+  background-color: currentColor;
+  -webkit-mask: var(--icon-check) no-repeat center / contain;
+  mask: var(--icon-check) no-repeat center / contain;
+  forced-color-adjust: none;
 }
 
 .ink-menu-list .ink-menu-hint {
@@ -3322,4 +3330,51 @@ mark.nb-user-highlight[data-tone="rose"] {
 
 mark.nb-user-highlight:hover {
   filter: brightness(0.95);
+}
+
+/* ============================================================================
+ * Structured Notebook Cards & Typography (`card` & `improve-text-layout-and-legibility`)
+ * - Container-responsive `<article class="card ...">` with single stretched `.card-link`.
+ * - Secondary links/controls inside `.card` stay elevated (`z-index: 1`) without blocking clicks.
+ * ============================================================================ */
+.card {
+  container-type: inline-size;
+}
+
+.card:has(a.card-link) {
+  position: relative;
+}
+
+.card a.card-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.card:has(a.card-link) a:not(.card-link),
+.card:has(a.card-link) button,
+.card:has(a.card-link) input {
+  position: relative;
+  z-index: 1;
+}
+
+.card a.card-link:focus-visible {
+  outline: none;
+}
+
+.card:has(a.card-link:focus-visible) {
+  outline: 2px solid var(--action-bg);
+  outline-offset: 2px;
+}
+
+.card:has(a.card-link:hover) {
+  border-color: var(--action-bg);
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+.pretty-text {
+  text-wrap: pretty;
 }

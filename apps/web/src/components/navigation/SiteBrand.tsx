@@ -32,11 +32,24 @@ export function BrandSnowflakeSvg({ className = 'w-5 h-5' }: { className?: strin
       viewBox="0 0 24 24"
       fill="none"
       stroke="var(--accent-ice-ink)"
-      strokeWidth="2"
+      strokeWidth="1.95"
       strokeLinecap="round"
+      strokeLinejoin="round"
     >
-      <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07" />
-      <circle cx="12" cy="12" r="2.2" fill="var(--link-ink)" stroke="none" />
+      <path d="M12 2.4 Q11.6 12 12.2 21.6" />
+      <path d="M3.7 7.3 Q12 12.1 20.3 16.7" />
+      <path d="M20.3 7.3 Q12 11.9 3.7 16.7" />
+      <path d="M9.6 4.7 Q12 6.3 14.5 4.8" />
+      <path d="M9.5 19.3 Q12 17.7 14.4 19.2" />
+      <path d="M4.8 10.1 Q6.9 9.1 6.7 6.6" />
+      <path d="M17.3 17.4 Q17.1 14.9 19.2 13.9" />
+      <path d="M17.2 6.6 Q17.1 9.1 19.2 10.1" />
+      <path d="M4.8 13.9 Q6.9 14.9 6.8 17.4" />
+      <path
+        d="M12 10 C13.2 10 14 10.9 13.9 12.1 C13.8 13.2 12.9 14 11.9 13.9 C10.8 13.8 10 12.9 10.1 11.9 C10.2 10.8 11 10.1 12 10 Z"
+        fill="var(--link-ink)"
+        stroke="none"
+      />
     </svg>
   );
 }

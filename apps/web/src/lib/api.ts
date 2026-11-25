@@ -885,6 +885,7 @@ export const api = {
     synced_revision: number;
     bump_canonical: boolean;
     status: string;
+    cover_image?: string;
     license?: string;
     tags: string[];
     body_markdown: string;
@@ -924,6 +925,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  studioUpdateTrackMeta: (
+    track: string,
+    payload: {
+      icon_kind?: string;
+      difficulty?: string;
+      tags?: string[];
+    },
+  ) =>
+    fetchJson<{
+      ok: boolean;
+      icon_kind?: string | null;
+      difficulty?: string | null;
+      tags?: string[] | null;
+    }>(`/api/v1/studio/tracks/${encodeURIComponent(track)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  studioUpdateTrackIcon: (track: string, icon_kind: string) =>
+    fetchJson<{ ok: boolean; icon_kind?: string | null }>(
+      `/api/v1/studio/tracks/${encodeURIComponent(track)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ icon_kind }),
+      },
+    ),
 
   studioDeleteTrack: (track: string) =>
     fetchJson<{ deleted: boolean }>(

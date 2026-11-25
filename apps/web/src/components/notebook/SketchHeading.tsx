@@ -1,5 +1,5 @@
 import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
-import { IconCheck } from '../ui/Icons';
+import { IconCheck, IconHash } from '../ui/Icons';
 
 interface SectionTaskControl {
   checked: boolean;
@@ -114,10 +114,8 @@ export function SketchHeading({
               />
               <span className="flex-1 min-w-0 leading-snug">
                 <span
-                  className={`inline-block align-middle font-mono text-xs font-semibold px-1.5 py-0.5 me-2 rounded-lg transition-colors ${
-                    isChecked
-                      ? 'bg-surface-sheet border border-border-subtle text-accent-success'
-                      : 'bg-action-subtle text-link-ink'
+                  className={`font-mono text-sm font-semibold me-2 transition-colors tabular-nums ${
+                    isChecked ? 'text-accent-success' : 'text-ink-muted'
                   }`}
                 >
                   §{number}
@@ -125,7 +123,7 @@ export function SketchHeading({
                 <SafeHtml
                   as="span"
                   html={text}
-                  className={`align-middle transition-colors ${
+                  className={`transition-colors ${
                     isChecked ? 'text-ink-secondary' : 'text-ink-primary'
                   }`}
                 />
@@ -142,24 +140,25 @@ export function SketchHeading({
           <a
             href={`#${id}`}
             aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-2 shrink-0 ink-icon-target"
+            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-2 shrink-0 ink-icon-target inline-flex items-center"
           >
-            #
+            <IconHash className="w-3.5 h-3.5" />
           </a>
         </div>
 
-        {/* Hand-drawn SVG wobbly marker underline (shifts to emerald when section task completed) */}
+        {/* Restraint hand-drawn pen rule underline */}
         <svg
           aria-hidden="true"
-          className={`h-2.5 w-56 max-w-full -mt-1 block pointer-events-none ${svgAlignClass}`}
-          viewBox="0 0 220 11"
+          className={`h-1.5 w-16 max-w-full mt-0.5 block pointer-events-none ${svgAlignClass}`}
+          viewBox="0 0 80 8"
           preserveAspectRatio="none"
           fill="none"
         >
           <path
-            d={`M3 ${y1} C 58 ${y2}, 118 ${y3}, 172 ${y4} C 192 ${y2 + 1}, 206 ${y3 - 1}, 217 ${y1}`}
+            d={`M2 ${y1 * 0.72} C 24 ${y2 * 0.72}, 52 ${y3 * 0.72}, 78 ${y4 * 0.72}`}
             stroke={markerVar}
-            strokeWidth="3.4"
+            strokeWidth="1.9"
+            strokeOpacity="0.6"
             strokeLinecap="round"
           />
         </svg>
@@ -173,34 +172,35 @@ export function SketchHeading({
       className={`mt-10 mb-3 scroll-mt-24 group ${alignWrapClass}`.trim()}
     >
       <Tag
-        className={`${sizeClass} font-semibold text-ink-primary inline-flex items-baseline gap-2.5 leading-snug m-0`}
+        className={`${sizeClass} font-semibold text-ink-primary inline-flex items-baseline gap-2 leading-snug m-0`}
         style={{ fontFamily: 'var(--font-hand)' }}
       >
-        <span className="font-mono text-xs font-semibold px-1.5 py-0.5 rounded-lg bg-surface-sunken text-ink-muted shrink-0">
+        <span className="font-mono text-sm text-ink-muted shrink-0 tabular-nums">
           §{number}
         </span>
         <SafeHtml as="span" html={text} />
         <a
           href={`#${id}`}
           aria-label={jumpAriaLabel ?? `Jump to ${stripHtmlTags(text)}`}
-          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-1 ink-icon-target"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-60 text-sm font-mono text-ink-muted hover:text-link-ink transition-opacity no-underline px-1.5 py-1 ink-icon-target inline-flex items-center"
         >
-          #
+          <IconHash className="w-3.5 h-3.5" />
         </a>
       </Tag>
 
-      {/* Hand-drawn SVG wobbly marker underline */}
+      {/* Restraint hand-drawn pen rule underline */}
       <svg
         aria-hidden="true"
-        className={`h-2.5 w-56 max-w-full -mt-0.5 block pointer-events-none ${svgAlignClass}`}
-        viewBox="0 0 220 11"
+        className={`h-1.5 w-16 max-w-full mt-0.5 block pointer-events-none ${svgAlignClass}`}
+        viewBox="0 0 80 8"
         preserveAspectRatio="none"
         fill="none"
       >
         <path
-          d={`M3 ${y1} C 58 ${y2}, 118 ${y3}, 172 ${y4} C 192 ${y2 + 1}, 206 ${y3 - 1}, 217 ${y1}`}
+          d={`M2 ${y1 * 0.72} C 24 ${y2 * 0.72}, 52 ${y3 * 0.72}, 78 ${y4 * 0.72}`}
           stroke={markerVar}
-          strokeWidth="3.4"
+          strokeWidth="1.9"
+          strokeOpacity="0.6"
           strokeLinecap="round"
         />
       </svg>

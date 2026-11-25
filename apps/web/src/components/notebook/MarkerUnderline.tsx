@@ -16,20 +16,22 @@ export function MarkerUnderline({
     return (
       <svg
         aria-hidden="true"
-        className={className ?? 'w-72 max-w-full h-3 block pointer-events-none'}
-        viewBox="0 0 280 12"
+        className={className ?? 'w-24 sm:w-28 h-2 mt-1 block pointer-events-none'}
+        viewBox="0 0 120 10"
         fill="none"
       >
         <path
-          d="M4 7 C 78 2, 162 10, 274 4.5"
+          d="M2 6.2 C 34 3.2, 74 7.8, 114 4.2"
           stroke="var(--marker-h1)"
-          strokeWidth="3.8"
+          strokeWidth="2.4"
+          strokeOpacity="0.72"
           strokeLinecap="round"
         />
         <path
-          d="M28 10.2 C 110 7.5, 198 11, 255 8.5"
+          d="M8 8.4 C 44 6.8, 72 8.8, 96 7.4"
           stroke="var(--marker-h2)"
-          strokeWidth="2.2"
+          strokeWidth="1.4"
+          strokeOpacity="0.6"
           strokeLinecap="round"
         />
       </svg>
@@ -40,14 +42,15 @@ export function MarkerUnderline({
     return (
       <svg
         aria-hidden="true"
-        className={className ?? 'w-52 max-w-full h-2.5 block pointer-events-none'}
-        viewBox="0 0 220 10"
+        className={className ?? 'w-20 max-w-full h-2 mt-0.5 block pointer-events-none'}
+        viewBox="0 0 100 10"
         fill="none"
       >
         <path
-          d="M3 6.5 C 65 2.5, 138 9, 216 4.2"
+          d="M2 6 C 30 3, 66 7.5, 96 4"
           stroke="var(--marker-h1)"
-          strokeWidth="3.5"
+          strokeWidth="2.1"
+          strokeOpacity="0.65"
           strokeLinecap="round"
         />
       </svg>
@@ -57,14 +60,15 @@ export function MarkerUnderline({
   return (
     <svg
       aria-hidden="true"
-      className={className ?? 'w-64 max-w-full h-3 mt-0.5 block pointer-events-none'}
-      viewBox="0 0 260 12"
+      className={className ?? 'w-24 max-w-full h-2 mt-1 block pointer-events-none'}
+      viewBox="0 0 110 10"
       fill="none"
     >
       <path
-        d="M3 7.5 C 72 2.5, 155 10.5, 256 4.8"
+        d="M2 6.2 C 34 2.8, 72 7.8, 106 4.2"
         stroke="var(--marker-h1)"
-        strokeWidth="4"
+        strokeWidth="2.2"
+        strokeOpacity="0.68"
         strokeLinecap="round"
       />
     </svg>

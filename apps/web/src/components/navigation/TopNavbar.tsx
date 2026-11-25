@@ -109,21 +109,8 @@ export function TopNavbar({
   }, [mobileMenuOpen]);
 
   return (
-    <header
-      className="w-full sticky top-0 z-30 pt-[max(0.75rem,env(safe-area-inset-top,0px))] ps-[max(0.75rem,env(safe-area-inset-left,0px))] pe-[max(0.75rem,env(safe-area-inset-right,0px))] sm:px-6"
-      style={{
-        background:
-          'linear-gradient(to bottom, var(--surface-page) 62%, transparent)',
-      }}
-    >
-      <div className="max-w-6xl mx-auto relative">
-        <div
-          className="rounded-2xl bg-surface-sheet/95 backdrop-blur px-3.5 sm:px-5 py-2 flex items-center justify-between gap-2.5"
-          style={{
-            border: '2px solid var(--border-ink)',
-            boxShadow: 'var(--shadow-control)',
-          }}
-        >
+    <header className="sticky top-0 z-30 w-full bg-surface-page/92 backdrop-blur-md border-b border-border-subtle pt-[env(safe-area-inset-top,0px)] ps-[max(1rem,env(safe-area-inset-left,0px))] pe-[max(1rem,env(safe-area-inset-right,0px))] sm:px-6">
+      <div className="max-w-6xl mx-auto h-14 flex items-center justify-between gap-2.5 relative">
           {/* Left: Shared Site Brand + Desktop Primary Navigation Landmark */}
           <div className="flex items-center gap-4 min-w-0">
             <SiteBrand
@@ -133,13 +120,13 @@ export function TopNavbar({
               showBadge
             />
 
-            <nav aria-label={copy.navPrimaryAria} className="hidden md:flex items-center gap-2 text-sm">
+            <nav aria-label={copy.navPrimaryAria} className="hidden md:flex items-center gap-1.5 text-sm">
               <Link
                 to={`/${locale}`}
                 aria-current={isHome ? 'page' : undefined}
                 className={`no-underline px-2.5 py-1.5 rounded-lg transition-colors ${
                   isHome
-                    ? 'font-semibold text-ink-primary border-b-2 border-action-bg'
+                    ? 'font-semibold text-ink-primary underline decoration-action-bg decoration-2 underline-offset-8'
                     : 'text-ink-muted hover:text-ink-primary'
                 }`}
               >
@@ -152,7 +139,7 @@ export function TopNavbar({
                   aria-current={isStudio ? 'page' : undefined}
                   className={`no-underline px-2.5 py-1.5 rounded-lg inline-flex items-center gap-1.5 transition-colors ${
                     isStudio
-                      ? 'font-semibold text-ink-primary border-b-2 border-accent-ice'
+                      ? 'font-semibold text-ink-primary underline decoration-accent-ice decoration-2 underline-offset-8'
                       : 'text-ink-muted hover:text-ink-primary'
                   }`}
                 >
@@ -242,14 +229,13 @@ export function TopNavbar({
               )}
             </button>
           </div>
-        </div>
 
         {/* Mobile Popover Navigation & Language Sheet */}
         {mobileMenuOpen && (
           <div
             ref={mobileMenuRef}
             id={mobileMenuId}
-            className="ui-popover-enter origin-top-right md:hidden absolute end-0 mt-2 w-[min(20rem,calc(100dvw-1.5rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-(--z-popover)"
+            className="ui-popover-enter origin-top-right md:hidden absolute end-0 top-full mt-2 w-[min(20rem,calc(100dvw-1.5rem))] max-h-[calc(100dvh-5rem)] overflow-y-auto overscroll-contain rounded-2xl bg-surface-sheet p-4 space-y-4 ink-surface-floating z-(--z-popover)"
           >
             <nav aria-label={copy.navPrimaryAria} className="space-y-1">
               <Link

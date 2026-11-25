@@ -16,7 +16,7 @@ import {
 } from '../../lib/codeHighlight';
 import type { StickerTone } from '../../lib/types';
 import { normalizeCodeCardStyle } from '../../lib/visualBlocks';
-import { IconCheck, IconCopy } from '../ui/Icons';
+import { IconCheck, IconCode, IconCopy } from '../ui/Icons';
 import {
   PaperclipOrnament,
   SpiralBindingRings,
@@ -278,9 +278,9 @@ export function WashiCodeCard({
         ) : (
           <span
             aria-hidden="true"
-            className="font-hand text-sm text-ink-muted select-none"
+            className="inline-flex items-center text-ink-muted select-none"
           >
-            #
+            <IconCode className="w-3.5 h-3.5" />
           </span>
         )
       }

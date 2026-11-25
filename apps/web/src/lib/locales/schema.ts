@@ -870,6 +870,23 @@ export interface ExtendedMessages {
     editorStatusPublished: string;
     editorStatusDraft: string;
     editorCanvasTitlePlaceholder: string;
+    coverBannerLabel: string;
+    coverBannerHint: string;
+    coverBannerPlaceholder: string;
+    coverBannerUploadBtn: string;
+    coverBannerUploadingBtn: string;
+    coverBannerClearBtn: string;
+    coverBannerAutoBadge: string;
+    trackIconLabel: string;
+    trackIconUpdatedToast: string;
+    trackBadgeLabel: string;
+    trackBadgePlaceholder: string;
+    trackTagsLabel: string;
+    trackTagsPlaceholder: string;
+    editTrackMetaBtn: string;
+    saveTrackMetaBtn: string;
+    clearTrackMetaBtn: string;
+    trackMetaUpdatedToast: string;
     flowEditor: {
       slashPlaceholder: string;
       firstParagraphPlaceholder: string;
@@ -1056,6 +1073,15 @@ export interface ExtendedMessages {
     staleNoticeBadge: string;
     staleNoticeTitle: string;
     staleNoticeBody: (days: number, updatedDate: string) => string;
+    featuredArticlesHeading: string;
+    featuredArticlesDesc: string;
+    seriesDirectoryHeading: string;
+    seriesDirectoryDesc: string;
+    seriesContentsLabel: string;
+    moreArticlesCount: (count: number) => string;
+    leadSummaryLabel: string;
+    articleOutlineLabel: string;
+    readArticleCta: string;
   };
   notes: {
     myNotesBtn: string;
