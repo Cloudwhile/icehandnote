@@ -23,7 +23,8 @@ use icehandnote_core::{
         CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
         StudioChapterDto, StudioLocaleBadgeDto, StudioStepEditorDto, StudioStepRowDto,
         StudioTrackDto, UpdateTrackMetaInput, UpdateUserProfileInput, UserPasskeyDto,
-        UserProfileDto, UserRole, UserSessionDto, TRUSTED_DEVICE_TTL_DAYS,
+        UserProfileDto, UserRole, UserSessionDto, VerifiedLoginChallengeDto,
+        PASSWORD_RESET_TTL_MINUTES, TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet, compile_notebook_markdown,
     error::{DomainError, ErrorCode},
@@ -2695,9 +2696,13 @@ impl TutorialRepository for PostgresRepository {
         };
         let grav = self.fetch_gravatar_base().await;
         let user = Self::row_to_user(&row, &grav)?;
+        let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1")
+            .bind(user.id)
+            .execute(&self.pool)
+            .await;
         let (raw_token, token_hash) = generate_action_token("ihn_rst", "pw_reset_v1");
         let (raw_otp, code_hash) = generate_email_verification_code(&user.email);
-        let expires_at = Utc::now() + Duration::minutes(30);
+        let expires_at = Utc::now() + Duration::minutes(PASSWORD_RESET_TTL_MINUTES);
         sqlx::query(
             "INSERT INTO password_reset_tokens (token_hash, code_hash, attempts, user_id, expires_at) VALUES ($1, $2, 0, $3, $4)",
         )
@@ -2708,6 +2713,41 @@ impl TutorialRepository for PostgresRepository {
         .execute(&self.pool)
         .await?;
         Ok(Some((user, raw_token, raw_otp)))
+    }
+
+    async fn validate_password_reset_token(&self, raw_token: &str) -> Result<i64> {
+        let trimmed = raw_token.trim();
+        if trimmed.is_empty() {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        }
+        let token_hash = hash_action_token("pw_reset_v1", trimmed);
+        let _ = sqlx::query("DELETE FROM password_reset_tokens WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await;
+        let row_opt = sqlx::query(
+            "SELECT p.expires_at, u.is_banned FROM password_reset_tokens p JOIN users u ON u.id = p.user_id WHERE p.token_hash = $1 AND p.expires_at > NOW() LIMIT 1",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row_opt else {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        };
+        let is_banned: bool = row.try_get("is_banned").unwrap_or(false);
+        if is_banned {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        }
+        let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
+        Ok((expires_at - Utc::now()).num_seconds().max(1))
     }
 
     async fn verify_password_reset_otp(&self, email: &str, otp_code: &str) -> Result<String> {
@@ -2785,8 +2825,7 @@ impl TutorialRepository for PostgresRepository {
         }
 
         let (raw_verified_token, verified_hash) = generate_action_token("ihn_rstv", "pw_reset_v1");
-        let min_exp = Utc::now() + Duration::minutes(15);
-        let next_exp = existing_exp.max(min_exp);
+        let next_exp = Utc::now() + Duration::minutes(PASSWORD_RESET_TTL_MINUTES);
         sqlx::query(
             "UPDATE password_reset_tokens SET token_hash = $2, code_hash = '', expires_at = $3 WHERE token_hash = $1",
         )
@@ -2795,6 +2834,11 @@ impl TutorialRepository for PostgresRepository {
         .bind(next_exp)
         .execute(&mut *tx)
         .await?;
+        sqlx::query("DELETE FROM password_reset_tokens WHERE user_id = $1 AND token_hash <> $2")
+            .bind(user_id)
+            .bind(&verified_hash)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
 
         Ok(raw_verified_token)
@@ -3645,12 +3689,12 @@ impl TutorialRepository for PostgresRepository {
         &self,
         challenge_id: Uuid,
         code: &str,
-    ) -> Result<(UserProfileDto, String, String, String, String)> {
+    ) -> Result<VerifiedLoginChallengeDto> {
         let now = Utc::now();
         let clean_code = code.trim();
         let mut tx = self.pool.begin().await?;
         let row_opt = sqlx::query(
-            "SELECT user_id, email, ip_address, user_agent, device_label, device_fingerprint, code_hash, attempts, expires_at FROM login_otp_challenges WHERE id = $1 FOR UPDATE",
+            "SELECT user_id, email, ip_address, user_agent, device_label, device_fingerprint, anomaly_reason, code_hash, attempts, expires_at FROM login_otp_challenges WHERE id = $1 FOR UPDATE",
         )
         .bind(challenge_id)
         .fetch_optional(&mut *tx)
@@ -3713,6 +3757,7 @@ impl TutorialRepository for PostgresRepository {
         let user_agent: String = row.try_get("user_agent")?;
         let device_label: String = row.try_get("device_label")?;
         let device_fingerprint: String = row.try_get("device_fingerprint")?;
+        let anomaly_reason: String = row.try_get("anomaly_reason").unwrap_or_default();
 
         sqlx::query("DELETE FROM login_otp_challenges WHERE id = $1")
             .bind(challenge_id)
@@ -3738,7 +3783,14 @@ impl TutorialRepository for PostgresRepository {
         }
         let grav = self.fetch_gravatar_base().await;
         let user = Self::row_to_user(&urow, &grav)?;
-        Ok((user, ip_address, user_agent, device_label, device_fingerprint))
+        Ok(VerifiedLoginChallengeDto {
+            user,
+            ip_address,
+            user_agent,
+            device_label,
+            device_fingerprint,
+            anomaly_reason,
+        })
     }
 
     async fn delete_login_otp_challenge(&self, challenge_id: Uuid) -> Result<()> {

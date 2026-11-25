@@ -37,6 +37,10 @@ pub struct SmtpSettingsDto {
     #[serde(default)]
     pub register_code_html: String,
     #[serde(default)]
+    pub login_otp_subject: String,
+    #[serde(default)]
+    pub login_otp_html: String,
+    #[serde(default)]
     pub login_anomaly_subject: String,
     #[serde(default)]
     pub login_anomaly_html: String,
@@ -105,6 +109,8 @@ impl Default for SmtpSettingsDto {
             email_footer_text: String::new(),
             register_code_subject: String::new(),
             register_code_html: String::new(),
+            login_otp_subject: String::new(),
+            login_otp_html: String::new(),
             login_anomaly_subject: String::new(),
             login_anomaly_html: String::new(),
             invite_subject: String::new(),
@@ -145,8 +151,16 @@ impl SmtpSettingsDto {
         self.email_footer_text = crate::sanitize_email_footer_html(&self.email_footer_text, 1200);
         self.register_code_subject = self.register_code_subject.trim().to_string();
         self.register_code_html = self.register_code_html.trim().to_string();
+        self.login_otp_subject = self.login_otp_subject.trim().to_string();
+        self.login_otp_html = self.login_otp_html.trim().to_string();
         self.login_anomaly_subject = self.login_anomaly_subject.trim().to_string();
         self.login_anomaly_html = self.login_anomaly_html.trim().to_string();
+        if self.login_anomaly_subject.contains("{{code}}")
+            || self.login_anomaly_html.contains("{{code}}")
+        {
+            self.login_anomaly_subject.clear();
+            self.login_anomaly_html.clear();
+        }
         self.invite_subject = self.invite_subject.trim().to_string();
         self.invite_html = self.invite_html.trim().to_string();
         self.reset_subject = self.reset_subject.trim().to_string();
@@ -233,10 +247,10 @@ pub fn resolve_email_footer_template(custom_footer: Option<&str>, locale: &str) 
 pub fn localize_anomaly_reason(reason_code: &str, locale: &str) -> &'static str {
     let loc = normalize_supported_locale(Some(locale), "en");
     match (reason_code, loc) {
-        ("new_ip_and_device", "zh-CN") => "检测到来自陌生 IP 地址与新设备的登录尝试",
-        ("new_ip_and_device", "zh-TW") => "偵測到來自陌生 IP 位址與新裝置的登入嘗試",
-        ("new_ip_and_device", "ja") => "新しい IP アドレスおよび未確認の端末からのサインイン試行",
-        ("new_ip_and_device", _) => "Sign-in attempt from an unrecognized IP address and new device",
+        ("new_ip_and_device", "zh-CN") => "检测到来自陌生 IP 地址与新设备的登录活动",
+        ("new_ip_and_device", "zh-TW") => "偵測到來自陌生 IP 位址與新裝置的登入活動",
+        ("new_ip_and_device", "ja") => "新しい IP アドレスおよび未確認の端末からのサインイン活動",
+        ("new_ip_and_device", _) => "Sign-in activity from an unrecognized IP address and new device",
 
         ("new_ip", "zh-CN") => "检测到来自异地或陌生 IP 地址的登录活动",
         ("new_ip", "zh-TW") => "偵測到來自異地或陌生 IP 位址的登入活動",
@@ -321,41 +335,37 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
 
     match kind.trim().to_ascii_lowercase().as_str() {
         "register_code" | "register" => {
-            let (subj, stamp_label, heading, intro, code_label, expiry, ignore) = match loc {
+            let (subj, stamp_label, heading, intro, code_label, ignore) = match loc {
                 "zh-CN" => (
                     "[{{site_name}}] 注册邮箱验证码：{{code}}",
                     "邮箱验证",
                     "验证你的注册邮箱",
-                    r#"请将下方 6 位数字验证码填入注册页面，以验证邮箱 <strong style="color:#1f1411;">{{email}}</strong> 并完成账号创建："#,
+                    r#"请在 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong>内将下方 6 位数字验证码填入注册页面，以验证邮箱 <strong style="color:#1f1411;">{{email}}</strong> 并完成账号创建："#,
                     "注册验证码",
-                    r#"有效期 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong> · 仅限单次使用"#,
                     "如果这不是你本人发起的注册操作，请直接忽略此邮件，系统不会创建账号。",
                 ),
                 "zh-TW" => (
                     "[{{site_name}}] 註冊信箱驗證碼：{{code}}",
                     "信箱驗證",
                     "驗證您的註冊信箱",
-                    r#"請將下方 6 位數字驗證碼填入註冊頁面，以驗證信箱 <strong style="color:#1f1411;">{{email}}</strong> 並完成帳號建立："#,
+                    r#"請在 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong>內將下方 6 位數字驗證碼填入註冊頁面，以驗證信箱 <strong style="color:#1f1411;">{{email}}</strong> 並完成帳號建立："#,
                     "註冊驗證碼",
-                    r#"有效期限 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong> · 僅限單次使用"#,
                     "若這不是您本人發起的註冊操作，請直接忽略此信件，系統不會建立帳號。",
                 ),
                 "ja" => (
                     "[{{site_name}}] 登録用確認コード：{{code}}",
                     "メール確認",
                     "メールアドレスを確認してください",
-                    r#"アカウント登録を完了するため、<strong style="color:#1f1411;">{{email}}</strong> 宛の 6 桁の確認コードを入力画面にご入力ください："#,
+                    r#"アカウント登録を完了するため、<strong style="color:#1f1411;">{{expires_minutes}} 分</strong>以内に <strong style="color:#1f1411;">{{email}}</strong> 宛の 6 桁の確認コードを入力画面にご入力ください："#,
                     "確認コード",
-                    r#"有効期限 <strong style="color:#1f1411;">{{expires_minutes}} 分</strong> · 1 回限り有効"#,
                     "この登録に心当たりがない場合は、このメールを破棄してください。アカウントは作成されません。",
                 ),
                 _ => (
                     "[{{site_name}}] Your registration verification code: {{code}}",
                     "VERIFY EMAIL",
                     "Verify your email address",
-                    r#"Enter the 6-digit verification code below to confirm <strong style="color:#1f1411;">{{email}}</strong> and finish creating your account:"#,
+                    r#"Enter the 6-digit verification code below within <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> to confirm <strong style="color:#1f1411;">{{email}}</strong> and finish creating your account:"#,
                     "VERIFICATION CODE",
-                    r#"Valid for <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> &middot; Single use"#,
                     "If you did not try to create an account on {{site_name}}, you can safely ignore this email.",
                 ),
             };
@@ -365,8 +375,7 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
               <p style="margin:0 0 22px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
               <div style="margin:0 0 22px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
                 <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
-                <div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
-                <div style="margin:0;font-size:12px;line-height:1.5;color:#5c5046;">{expiry}</div>
+                <div style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
               </div>
               <p style="margin:0;font-size:13px;line-height:1.68;color:#5c5046;">{ignore}</p>"#
             );
@@ -384,6 +393,65 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
             )
         }
 
+        "login_otp" => {
+            let (subj, stamp_label, heading, intro, code_label, warning) = match loc {
+                "zh-CN" => (
+                    "[{{site_name}}] 登录安全验证码：{{code}}",
+                    "登录验证",
+                    "输入验证码以完成登录",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，检测到本次登录来自新设备。请在 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong>内输入下方 6 位验证码以完成登录验证："#,
+                    "登录验证码",
+                    "如果这不是你本人发起的登录操作，请勿向任何人提供此验证码，并建议尽快修改密码。",
+                ),
+                "zh-TW" => (
+                    "[{{site_name}}] 登入安全驗證碼：{{code}}",
+                    "登入驗證",
+                    "輸入驗證碼以完成登入",
+                    r#"您好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，偵測到本次登入來自新裝置。請在 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong>內輸入下方 6 位驗證碼以完成登入驗證："#,
+                    "登入驗證碼",
+                    "若這並非您本人發起的登入操作，請勿向任何人提供此驗證碼，並建議儘快變更密碼。",
+                ),
+                "ja" => (
+                    "[{{site_name}}] サインイン確認コード：{{code}}",
+                    "ログイン確認",
+                    "確認コードを入力してサインイン",
+                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> 様、新しい端末からのサインインを検知しました。<strong style="color:#1f1411;">{{expires_minutes}} 分</strong>以内に下の 6 桁コードを入力してログインを完了してください："#,
+                    "ログイン確認コード",
+                    "このサインインに心当たりがない場合は、コードを他者に共有せず、速やかにパスワードを変更してください。",
+                ),
+                _ => (
+                    "[{{site_name}}] Sign-in verification code: {{code}}",
+                    "SIGN-IN CODE",
+                    "Enter verification code to sign in",
+                    r#"Hello <strong style="color:#1f1411;">{{recipient_name}}</strong>, we noticed a sign-in from an unrecognized device. Enter the 6-digit code below within <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> to finish signing in:"#,
+                    "SIGN-IN VERIFICATION CODE",
+                    "If you did not try to sign in, do not share this code with anyone and consider changing your password.",
+                ),
+            };
+            let title_block = hand_heading_html(heading, "#bae6fd");
+            let body = format!(
+                r#"{title_block}
+              <p style="margin:0 0 22px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
+              <div style="margin:0 0 22px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
+                <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
+                <div style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
+              </div>
+              <p style="margin:0;font-size:13px;line-height:1.68;color:#5c5046;">{warning}</p>"#
+            );
+            (
+                subj.to_string(),
+                wrap_stationery_email(
+                    StampBadge {
+                        label: stamp_label,
+                        bg_color: "#eef8ff",
+                        border_color: "#52a8d8",
+                        text_color: "#075985",
+                    },
+                    &body,
+                ),
+            )
+        }
+
         "login_anomaly" | "anomaly" => {
             let (
                 subj,
@@ -395,65 +463,55 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
                 lbl_ip,
                 lbl_device,
                 lbl_time,
-                code_label,
-                expiry,
                 warning,
             ) = match loc {
                 "zh-CN" => (
-                    "[{{site_name}}] 异常登录安全验证：{{code}}",
-                    "异常登录提醒",
-                    "检测到异常地点或新设备登录",
-                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，系统检测到你的账号正在尝试从非常用 IP 地点或未识别的新设备登录，为保障账号安全，需要输入一次性验证码完成确认："#,
+                    "[{{site_name}}] 账号活动异常提醒：检测到异地或新设备登录",
+                    "活动异常提醒",
+                    "检测到账号登录异常活动",
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，你的账号刚刚在非常用 IP 地址或新设备上完成了登录，特此发送安全活动提醒供你核对："#,
                     "异常活动记录",
                     "检测原因",
                     "来源 IP",
                     "设备与浏览器",
                     "发生时间",
-                    "安全登录验证码",
-                    r#"有效期 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong> · 仅限本次登录"#,
-                    "若这不是你本人的登录操作，请切勿向任何人提供此验证码，并立即修改密码、前往「个人中心 → 设备与会话」检查并下线异常设备。",
+                    "如果是你本人的常规网络或设备切换，可放心忽略此提醒；若非本人操作，请立即修改密码并前往「个人中心 → 设备与会话」检查并下线可疑设备。",
                 ),
                 "zh-TW" => (
-                    "[{{site_name}}] 異常登入安全驗證：{{code}}",
-                    "異常登入提醒",
-                    "偵測到異常地點或新裝置登入",
-                    r#"您好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，系統偵測到您的帳號正嘗試從非常用 IP 地點或未識別的新裝置登入，請輸入一次性驗證碼確認為本人操作："#,
+                    "[{{site_name}}] 帳號活動異常提醒：偵測到異地或新裝置登入",
+                    "活動異常提醒",
+                    "偵測到帳號登入異常活動",
+                    r#"您好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，您的帳號剛剛在非常用 IP 位址或新裝置上完成了登入，特此寄送安全活動提醒供您核對："#,
                     "異常活動紀錄",
                     "偵測原因",
                     "來源 IP",
                     "裝置與瀏覽器",
                     "發生時間",
-                    "安全登入驗證碼",
-                    r#"有效期限 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong> · 僅限本次登入"#,
-                    "若這並非您本人的登入操作，請勿洩漏此驗證碼，並立即變更密碼、前往「個人中心 → 裝置與工作階段」檢查並登出異常裝置。",
+                    "若為您本人的日常網路或裝置切換，可安心忽略此提醒；若非本人操作，請立即變更密碼並前往「個人中心 → 裝置與工作階段」檢查並登出可疑裝置。",
                 ),
                 "ja" => (
-                    "[{{site_name}}] 不審なサインインの確認コード：{{code}}",
-                    "異常ログイン警告",
-                    "新しい場所または端末からのサインインを検知しました",
-                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> 様、通常と異なる IP 場所または未確認の端末からのサインイン試行を検知しました。ご本人確認のため、以下の 6 桁コードを入力してください："#,
+                    "[{{site_name}}] セキュリティ通知：新しい場所または端末でのサインイン",
+                    "活動異常通知",
+                    "通常とは異なるサインイン活動を検知しました",
+                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> 様、ご利用のアカウントで普段と異なる IP アドレスまたは新しい端末からのサインインが完了しましたのでお知らせいたします："#,
                     "検知されたアクティビティ",
                     "検知理由",
                     "IP アドレス",
                     "端末・ブラウザ",
                     "発生時刻",
-                    "セキュリティ確認コード",
-                    r#"有効期限 <strong style="color:#1f1411;">{{expires_minutes}} 分</strong> · 今回のみ有効"#,
-                    "このサインインに心当たりがない場合は、コードを誰にも共有せず、直ちにパスワードを変更のうえ「プロフィール → 端末とセッション」で不審なセッションを終了してください。",
+                    "ご自身による通常のネットワーク変更や端末利用であれば、このメールは破棄して問題ありません。心当たりがない場合は、直ちにパスワードを変更し「プロフィール → 端末とセッション」で不審な端末を終了してください。",
                 ),
                 _ => (
-                    "[{{site_name}}] Unusual sign-in alert — verification code: {{code}}",
-                    "UNUSUAL ACTIVITY",
-                    "Unusual sign-in location or device",
-                    r#"Hello <strong style="color:#1f1411;">{{recipient_name}}</strong>, we noticed a sign-in attempt to your account from an unrecognized IP location or new device. Enter the one-time code below to confirm it&apos;s you:"#,
+                    "[{{site_name}}] Unusual sign-in activity alert",
+                    "SECURITY ALERT",
+                    "Unusual sign-in activity detected",
+                    r#"Hello <strong style="color:#1f1411;">{{recipient_name}}</strong>, your account just completed a sign-in from a different IP address or newly recognized device:"#,
                     "ACTIVITY LOG",
                     "Detected",
                     "IP Address",
                     "Device",
                     "Time (UTC)",
-                    "SECURITY VERIFICATION CODE",
-                    r#"Valid for <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> &middot; Single use"#,
-                    "If you did not attempt to sign in, do not share this code. Change your password right away and review active devices in your Account Sessions page.",
+                    "If this was your own routine network or device change, you can safely ignore this notice. If you do not recognize this activity, change your password right away and revoke unfamiliar sessions in your Account Sessions page.",
                 ),
             };
             let title_block = hand_heading_html(heading, "#fde08d");
@@ -481,11 +539,6 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
                   </tr>
                 </table>
               </div>
-              <div style="margin:0 0 20px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
-                <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
-                <div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
-                <div style="margin:0;font-size:12px;line-height:1.5;color:#5c5046;">{expiry}</div>
-              </div>
               <div style="padding:10px 14px;background-color:#fffef8;border:1px dashed #d6c8ad;border-left:3.5px solid #b45309;border-radius:8px 11px 10px 9px;font-size:12.5px;line-height:1.68;color:#433831;">{warning}</div>"#
             );
             (
@@ -503,51 +556,47 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
         }
 
         "reset" => {
-            let (subj, stamp_label, heading, intro, code_label, expiry, btn, tip, fallback_lbl) =
+            let (subj, stamp_label, heading, intro, code_label, btn, tip, fallback_lbl) =
                 match loc {
                     "zh-CN" => (
                         "[{{site_name}}] 重置账号密码：{{code}}",
                         "密码安全",
                         "重置你的登录密码",
-                        r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，我们收到了你的密码重置请求。请在验证页面输入下方 6 位验证码，或直接点击按钮设置新密码（<strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong>内有效）："#,
+                        r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，我们收到了你的密码重置请求。请在验证页面输入下方 6 位验证码，或直接点击按钮设置新密码（验证码与重置链接均在 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong>内有效）："#,
                         "密码重置验证码",
-                        r#"有效期 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong> · 仅限单次使用"#,
                         "立即设置新密码 &rarr;",
                         "如果这不是你本人发起的操作，请放心忽略此邮件，你的当前密码不会被更改。",
-                        "若按钮无法打开，也可复制以下链接到浏览器：",
+                        "重置链接将在 {{expires_minutes}} 分钟后超时失效；若按钮无法打开，可复制以下链接到浏览器：",
                     ),
                     "zh-TW" => (
                         "[{{site_name}}] 重設帳號密碼：{{code}}",
                         "密碼安全",
                         "重設您的登入密碼",
-                        r#"您好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，我們收到了您的密碼重設請求。請在驗證頁面輸入下方 6 位驗證碼，或直接點擊按鈕設定新密碼（<strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong>內有效）："#,
+                        r#"您好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，我們收到了您的密碼重設請求。請在驗證頁面輸入下方 6 位驗證碼，或直接點擊按鈕設定新密碼（驗證碼與重設連結皆於 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong>內有效）："#,
                         "密碼重設驗證碼",
-                        r#"有效期限 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong> · 僅限單次使用"#,
                         "立即設定新密碼 &rarr;",
                         "若這不是您本人發起的操作，請放心忽略此郵件，您目前的密碼不會受到變更。",
-                        "若按鈕無法開啟，亦可複製以下連結至瀏覽器：",
+                        "重設連結將於 {{expires_minutes}} 分鐘後逾時失效；若按鈕無法開啟，亦可複製以下連結至瀏覽器：",
                     ),
                     "ja" => (
                         "[{{site_name}}] パスワード再設定コード：{{code}}",
                         "セキュリティ",
                         "パスワードを再設定",
-                        r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> 様、パスワード再設定のリクエストを受け付けました。確認画面で下の 6 桁コードを入力するか、ボタンから <strong style="color:#1f1411;">{{expires_minutes}} 分</strong>以内に新しいパスワードを設定してください："#,
+                        r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> 様、パスワード再設定のリクエストを受け付けました。確認画面で下の 6 桁コードを入力するか、ボタンから新しいパスワードを設定してください（確認コードと再設定リンクの有効期限は <strong style="color:#1f1411;">{{expires_minutes}} 分</strong>です）："#,
                         "再設定確認コード",
-                        r#"有効期限 <strong style="color:#1f1411;">{{expires_minutes}} 分</strong> · 1 回限り有効"#,
                         "新しいパスワードを設定 &rarr;",
                         "このリクエストに心当たりがない場合は、このメールを無視してください。現在のパスワードは変更されません。",
-                        "ボタンが開けない場合は以下のリンクをコピーしてください：",
+                        "再設定リンクは {{expires_minutes}} 分後に有効期限切れとなります。ボタンが開けない場合は以下のリンクをコピーしてください：",
                     ),
                     _ => (
                         "[{{site_name}}] Reset your password — code: {{code}}",
                         "SECURITY",
                         "Reset your password",
-                        r#"Hello <strong style="color:#1f1411;">{{recipient_name}}</strong>, we received a request to reset your password. Enter the 6-digit code below to verify your email, or use the button within <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong>:"#,
+                        r#"Hello <strong style="color:#1f1411;">{{recipient_name}}</strong>, we received a request to reset your password. Enter the 6-digit code below or click the button to choose a new password (both expire in <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong>):"#,
                         "RESET VERIFICATION CODE",
-                        r#"Valid for <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> &middot; Single use"#,
                         "Set New Password &rarr;",
                         "If you did not request a password reset, you can safely ignore this message. Your current password remains unchanged.",
-                        "Button not working? Copy and open this link:",
+                        "This reset link expires after {{expires_minutes}} minutes. Button not working? Copy and open this link:",
                     ),
                 };
             let title_block = hand_heading_html(heading, "#bae6fd");
@@ -556,8 +605,7 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
               <p style="margin:0 0 20px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
               <div style="margin:0 0 22px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
                 <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
-                <div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
-                <div style="margin:0;font-size:12px;line-height:1.5;color:#5c5046;">{expiry}</div>
+                <div style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
               </div>
               <p style="margin:0 0 22px;">
                 <a href="{{{{action_url}}}}" style="display:inline-block;padding:12px 24px;background-color:#5b1ae0;color:#ffffff;text-decoration:none;text-decoration-line:none;border:2px solid #2b211c;border-radius:11px 14px 12px 10px;font-size:14px;font-weight:700;line-height:1.25;box-shadow:3px 3px 0 #2b211c;"><span style="color:#ffffff;text-decoration:none;">{btn}</span></a>
@@ -721,41 +769,37 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
         }
 
         "email_change" => {
-            let (subj, stamp_label, heading, intro, code_label, expiry, ignore) = match loc {
+            let (subj, stamp_label, heading, intro, code_label, ignore) = match loc {
                 "zh-CN" => (
                     "[{{site_name}}] 更换绑定邮箱验证码：{{code}}",
                     "邮箱变更",
                     "验证你的新邮箱地址",
-                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，你正在将账号绑定邮箱更换为 <strong style="color:#1f1411;">{{email}}</strong>。请输入下方 6 位验证码完成验证："#,
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，你正在将账号绑定邮箱更换为 <strong style="color:#1f1411;">{{email}}</strong>。请在 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong>内输入下方 6 位验证码完成验证："#,
                     "新邮箱验证码",
-                    r#"有效期 <strong style="color:#1f1411;">{{expires_minutes}} 分钟</strong> · 仅限单次使用"#,
                     "如果这不是你本人发起的操作，请直接忽略此邮件，你的原邮箱绑定不会发生改变。",
                 ),
                 "zh-TW" => (
                     "[{{site_name}}] 更換綁定信箱驗證碼：{{code}}",
                     "信箱變更",
                     "驗證您的新信箱地址",
-                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，您正在將帳號綁定信箱更換為 <strong style="color:#1f1411;">{{email}}</strong>。請輸入下方 6 位驗證碼完成驗證："#,
+                    r#"你好 <strong style="color:#1f1411;">{{recipient_name}}</strong>，您正在將帳號綁定信箱更換為 <strong style="color:#1f1411;">{{email}}</strong>。請在 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong>內輸入下方 6 位驗證碼完成驗證："#,
                     "新信箱驗證碼",
-                    r#"有效期限 <strong style="color:#1f1411;">{{expires_minutes}} 分鐘</strong> · 僅限單次使用"#,
                     "若這不是您本人發起的操作，請直接忽略此信件，您原本的信箱綁定不會改變。",
                 ),
                 "ja" => (
                     "[{{site_name}}] メールアドレス変更確認コード：{{code}}",
                     "メール変更",
                     "新しいメールアドレスを確認してください",
-                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> さん、アカウントのメールアドレスを <strong style="color:#1f1411;">{{email}}</strong> に変更するリクエストを受け付けました。以下の 6 桁コードを入力してください："#,
+                    r#"<strong style="color:#1f1411;">{{recipient_name}}</strong> さん、アカウントのメールアドレスを <strong style="color:#1f1411;">{{email}}</strong> に変更するリクエストを受け付けました。<strong style="color:#1f1411;">{{expires_minutes}} 分</strong>以内に以下の 6 桁コードを入力してください："#,
                     "変更確認コード",
-                    r#"有効期限 <strong style="color:#1f1411;">{{expires_minutes}} 分</strong> · 1 回限り有効"#,
                     "この変更に心当たりがない場合は、このメールを破棄してください。現在のメールアドレスは変更されません。",
                 ),
                 _ => (
                     "[{{site_name}}] Verify your new email address: {{code}}",
                     "EMAIL CHANGE",
                     "Confirm your new email address",
-                    r#"Hi <strong style="color:#1f1411;">{{recipient_name}}</strong>, enter the 6-digit code below to verify <strong style="color:#1f1411;">{{email}}</strong> as your new account email:"#,
+                    r#"Hi <strong style="color:#1f1411;">{{recipient_name}}</strong>, enter the 6-digit code below within <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> to verify <strong style="color:#1f1411;">{{email}}</strong> as your new account email:"#,
                     "VERIFICATION CODE",
-                    r#"Valid for <strong style="color:#1f1411;">{{expires_minutes}} minutes</strong> &middot; Single use"#,
                     "If you did not request this email change, you can safely ignore this message — your current email will remain unchanged.",
                 ),
             };
@@ -765,8 +809,7 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
               <p style="margin:0 0 22px;font-size:14.5px;line-height:1.7;color:#433831;">{intro}</p>
               <div style="margin:0 0 22px;padding:22px 18px;text-align:center;background-color:#f9f5ea;border:1.5px dashed #7c6f61;border-radius:13px 16px 14px 15px;box-shadow:inset 0 0 0 3px #fffef8,2px 2px 0 #e5dcc8;">
                 <div style="margin:0 0 9px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#5c5046;">&#8212; {code_label} &#8212;</div>
-                <div style="margin:0 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
-                <div style="margin:0;font-size:12px;line-height:1.5;color:#5c5046;">{expiry}</div>
+                <div style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:35px;line-height:1.15;font-weight:700;letter-spacing:0.28em;padding-left:0.28em;color:#1f1411;">{{{{code}}}}</div>
               </div>
               <p style="margin:0;font-size:13px;line-height:1.68;color:#5c5046;">{ignore}</p>"#
             );
@@ -855,28 +898,28 @@ pub fn default_localized_template(kind: &str, locale: &str) -> (String, String) 
                     "连接正常",
                     "SMTP 邮件通道已就绪",
                     r#"<strong style="color:#1f1411;">{{site_name}}</strong> 的邮件发送配置测试成功，系统可正常投递各类多语言手账通知邮件。"#,
-                    "<strong>已启用的邮件场景：</strong>注册邮箱验证码、异常地点/新设备登录 OTP 验证、密码重置、协作者邀请与文章下架通知。",
+                    "<strong>已启用的邮件场景：</strong>注册邮箱验证码、新设备登录验证码、异地/新设备登录活动异常提醒、密码重置、协作者邀请与文章下架通知。",
                 ),
                 "zh-TW" => (
                     "[{{site_name}}] SMTP 郵件連線測試成功",
                     "連線正常",
                     "SMTP 郵件通道已就緒",
                     r#"<strong style="color:#1f1411;">{{site_name}}</strong> 的郵件寄送設定測試成功，系統可正常投遞各類多語言手帳通知郵件。"#,
-                    "<strong>已啟用的郵件場景：</strong>註冊信箱驗證碼、異常地點/新裝置登入 OTP 驗證、密碼重設、協作者邀請與文章下架通知。",
+                    "<strong>已啟用的郵件場景：</strong>註冊信箱驗證碼、新裝置登入驗證碼、異地/新裝置登入活動異常提醒、密碼重設、協作者邀請與文章下架通知。",
                 ),
                 "ja" => (
                     "[{{site_name}}] SMTP 接続テスト完了",
                     "接続確認済み",
                     "SMTP メール配信の準備が完了しました",
                     r#"<strong style="color:#1f1411;">{{site_name}}</strong> のメール配信チャネルは正常に動作しています。"#,
-                    "<strong>有効な通知：</strong>登録確認コード、異常ログイン OTP 確認、パスワード再設定、共同執筆招待、公開停止通知。",
+                    "<strong>有効な通知：</strong>登録確認コード、新端末ログイン確認コード、ログイン活動異常通知、パスワード再設定、共同執筆招待、公開停止通知。",
                 ),
                 _ => (
                     "[{{site_name}}] SMTP connectivity test",
                     "CONNECTED",
                     "SMTP connection verified",
                     r#"Your mail delivery channel for <strong style="color:#1f1411;">{{site_name}}</strong> is configured and working properly."#,
-                    "<strong>Active notifications:</strong> Registration verification codes, unusual sign-in OTP alerts, password resets, co-author invites, and moderation notices.",
+                    "<strong>Active notifications:</strong> Registration verification codes, new-device sign-in codes, unusual sign-in activity alerts, password resets, co-author invites, and moderation notices.",
                 ),
             };
             let title_block = hand_heading_html(heading, "#a7f3d0");
@@ -989,12 +1032,10 @@ pub fn render_mail_preview(
     let (def_subj, def_html) = default_localized_template(template_kind, loc);
     let subj = subject_tpl
         .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or(def_subj);
+        .unwrap_or(&def_subj);
     let html = html_tpl
         .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or(def_html);
+        .unwrap_or(&def_html);
 
     match template_kind.trim().to_ascii_lowercase().as_str() {
         "register_code" | "register" => {
@@ -1005,12 +1046,37 @@ pub fn render_mail_preview(
                 ("expires_minutes", "10"),
             ];
             (
-                render_mail_subject(&subj, &vars),
-                render_mail_html(&html, &vars, &logo_html, &footer_tpl),
+                render_mail_subject(subj, &vars),
+                render_mail_html(html, &vars, &logo_html, &footer_tpl),
+            )
+        }
+        "login_otp" => {
+            let vars = [
+                ("site_name", site_label),
+                ("recipient_name", "Alice"),
+                ("code", "739204"),
+                ("expires_minutes", "10"),
+            ];
+            (
+                render_mail_subject(subj, &vars),
+                render_mail_html(html, &vars, &logo_html, &footer_tpl),
             )
         }
         "login_anomaly" | "anomaly" => {
-            let anomaly_summary = localize_anomaly_reason("new_ip_and_device", loc);
+            let has_code_placeholder = subject_tpl
+                .is_some_and(|s| s.contains("{{code}}"))
+                || html_tpl.is_some_and(|s| s.contains("{{code}}"));
+            let safe_subj = if has_code_placeholder {
+                def_subj.as_str()
+            } else {
+                subj
+            };
+            let safe_html = if has_code_placeholder {
+                def_html.as_str()
+            } else {
+                html
+            };
+            let anomaly_summary = localize_anomaly_reason("new_ip", loc);
             let vars = [
                 ("site_name", site_label),
                 ("recipient_name", "Alice"),
@@ -1018,12 +1084,10 @@ pub fn render_mail_preview(
                 ("ip_address", "203.0.113.42"),
                 ("device_label", "Safari · macOS"),
                 ("occurred_at", "2026-11-21 12:30 UTC"),
-                ("code", "739204"),
-                ("expires_minutes", "10"),
             ];
             (
-                render_mail_subject(&subj, &vars),
-                render_mail_html(&html, &vars, &logo_html, &footer_tpl),
+                render_mail_subject(safe_subj, &vars),
+                render_mail_html(safe_html, &vars, &logo_html, &footer_tpl),
             )
         }
         "invite" => {
@@ -1054,7 +1118,7 @@ pub fn render_mail_preview(
                 ("site_name", site_label),
                 ("recipient_name", "Alice"),
                 ("code", "615829"),
-                ("expires_minutes", "30"),
+                ("expires_minutes", "15"),
                 ("action_url", action_url.as_str()),
             ];
             (
@@ -1248,6 +1312,7 @@ mod tests {
         for loc in ["zh-CN", "en", "zh-TW", "ja"] {
             for kind in [
                 "register_code",
+                "login_otp",
                 "login_anomaly",
                 "reset",
                 "email_change",
@@ -1283,8 +1348,46 @@ mod tests {
                     html.contains("border:2px solid #2b211c"),
                     "hand-drawn sepia ink card border missing for {kind}/{loc}"
                 );
+                for forbidden in ["仅限单次使用", "僅限單次使用", "1 回限り有効", "Single use", "仅限本次登录", "僅限本次登入", "今回のみ有効"] {
+                    assert!(
+                        !html.contains(forbidden),
+                        "unexpected single-use footer '{forbidden}' found in {kind}/{loc}"
+                    );
+                }
+                if kind == "login_anomaly" {
+                    assert!(!subj.contains("739204") && !html.contains("739204"));
+                    assert!(!html.contains("{{code}}") && !subj.contains("{{code}}"));
+                }
+                if kind == "reset" {
+                    assert!(
+                        html.contains("15"),
+                        "reset template should surface 15-minute expiry in {loc}"
+                    );
+                }
             }
         }
+
+        // Legacy custom login_anomaly templates carrying {{code}} must be rejected/stripped
+        let mut legacy = SmtpSettingsDto {
+            login_anomaly_subject: "Alert: {{code}}".to_string(),
+            login_anomaly_html: "<p>{{code}}</p>".to_string(),
+            ..Default::default()
+        };
+        let sanitized = legacy.clone().sanitize();
+        assert!(sanitized.login_anomaly_subject.is_empty());
+        assert!(sanitized.login_anomaly_html.is_empty());
+        let (safe_subj, safe_html) = render_mail_preview(
+            "login_anomaly",
+            "zh-CN",
+            Some(&legacy.login_anomaly_subject),
+            Some(&legacy.login_anomaly_html),
+            None,
+            "IceHandnote",
+            "",
+            "https://notes.test",
+        );
+        legacy.login_anomaly_subject.clear();
+        assert!(!safe_subj.contains("739204") && !safe_html.contains("739204"));
 
         // Custom footer supports {{site_name}} and safe HTML tags while stripping XSS payloads
         let (_subj, custom_html) = render_mail_preview(

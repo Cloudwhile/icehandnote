@@ -1661,13 +1661,9 @@ pub async fn send_email_change_code_email(
     send_guarded_html_email(ctx, to_email, &subject, &html).await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn send_login_anomaly_otp_email(
+pub async fn send_login_otp_email(
     ctx: &MailSendContext<'_>,
     recipient_name: &str,
-    ip_address: &str,
-    device_label: &str,
-    anomaly_reason: &str,
     code: &str,
     expires_minutes: u32,
     to_email: &str,
@@ -1677,12 +1673,47 @@ pub async fn send_login_anomaly_otp_email(
     let footer_tpl =
         resolve_email_footer_template(Some(&ctx.smtp.email_footer_text), ctx.brand.locale);
     let (subj_tpl, html_tpl) = resolve_template_pair(
-        "login_anomaly",
+        "login_otp",
         ctx.brand.locale,
-        &ctx.smtp.login_anomaly_subject,
-        &ctx.smtp.login_anomaly_html,
+        &ctx.smtp.login_otp_subject,
+        &ctx.smtp.login_otp_html,
     );
     let expires_str = expires_minutes.to_string();
+    let vars = [
+        ("site_name", clean_site.as_str()),
+        ("recipient_name", recipient_name),
+        ("code", code),
+        ("expires_minutes", expires_str.as_str()),
+    ];
+    let subject = render_mail_subject(&subj_tpl, &vars);
+    let html = render_mail_html(&html_tpl, &vars, &logo_html, &footer_tpl);
+    send_guarded_html_email(ctx, to_email, &subject, &html).await
+}
+
+pub async fn send_login_anomaly_alert_email(
+    ctx: &MailSendContext<'_>,
+    recipient_name: &str,
+    ip_address: &str,
+    device_label: &str,
+    anomaly_reason: &str,
+    to_email: &str,
+) -> Result<(), MailSendError> {
+    let clean_site = strip_html_tags(ctx.brand.site_name);
+    let logo_html = build_email_logo_html(ctx.brand.logo_url, &clean_site, ctx.brand.origin);
+    let footer_tpl =
+        resolve_email_footer_template(Some(&ctx.smtp.email_footer_text), ctx.brand.locale);
+    let legacy_has_code = ctx.smtp.login_anomaly_subject.contains("{{code}}")
+        || ctx.smtp.login_anomaly_html.contains("{{code}}");
+    let (subj_tpl, html_tpl) = if legacy_has_code {
+        default_localized_template("login_anomaly", ctx.brand.locale)
+    } else {
+        resolve_template_pair(
+            "login_anomaly",
+            ctx.brand.locale,
+            &ctx.smtp.login_anomaly_subject,
+            &ctx.smtp.login_anomaly_html,
+        )
+    };
     let occurred_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
     let anomaly_summary = localize_anomaly_reason(anomaly_reason, ctx.brand.locale);
     let vars = [
@@ -1692,8 +1723,6 @@ pub async fn send_login_anomaly_otp_email(
         ("ip_address", ip_address),
         ("device_label", device_label),
         ("occurred_at", occurred_at.as_str()),
-        ("code", code),
-        ("expires_minutes", expires_str.as_str()),
     ];
     let subject = render_mail_subject(&subj_tpl, &vars);
     let html = render_mail_html(&html_tpl, &vars, &logo_html, &footer_tpl);
@@ -1746,11 +1775,12 @@ pub async fn send_password_reset_email(
         &ctx.smtp.reset_subject,
         &ctx.smtp.reset_html,
     );
+    let expires_str = icehandnote_core::auth::PASSWORD_RESET_TTL_MINUTES.to_string();
     let vars = [
         ("site_name", clean_site.as_str()),
         ("recipient_name", recipient_name),
         ("code", otp_code),
-        ("expires_minutes", "30"),
+        ("expires_minutes", expires_str.as_str()),
         ("action_url", action_url),
     ];
     let subject = render_mail_subject(&subj_tpl, &vars);

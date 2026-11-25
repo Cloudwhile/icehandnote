@@ -29,7 +29,8 @@ use icehandnote_core::{
         CollaboratorInviteDto, CreateChapterInput, CreateTrackInput, InvitePreviewDto,
         SaveStudioStepInput, SiteSettingsDto, StepRevisionDto, StudioStepEditorDto, StudioTrackDto,
         UpdateTrackMetaInput, UpdateUserProfileInput, UserPasskeyDto, UserProfileDto, UserRole,
-        UserSessionDto, TRUSTED_DEVICE_TTL_DAYS,
+        UserSessionDto, VerifiedLoginChallengeDto, PASSWORD_RESET_TTL_MINUTES,
+        TRUSTED_DEVICE_TTL_DAYS,
     },
     build_highlighted_snippet,
     error::{DomainError, ErrorCode},
@@ -1694,6 +1695,7 @@ impl TutorialRepository for LocalSeedRepository {
             return Ok(None);
         };
         let user_dto = Self::resolve_user_dto(user_rec, &grav, &state.step_meta);
+        state.password_resets.retain(|r| r.user_id != user_dto.id);
         let (raw_token, token_hash) = generate_action_token("ihn_rst", "pw_reset_v1");
         let (raw_otp, code_hash) = generate_email_verification_code(&user_dto.email);
         state.password_resets.push(StoredPasswordResetRecord {
@@ -1701,11 +1703,50 @@ impl TutorialRepository for LocalSeedRepository {
             code_hash,
             attempts: 0,
             user_id: user_dto.id,
-            expires_at: now + Duration::minutes(30),
+            expires_at: now + Duration::minutes(PASSWORD_RESET_TTL_MINUTES),
             created_at: now,
         });
         self.persist_state(&state);
         Ok(Some((user_dto, raw_token, raw_otp)))
+    }
+
+    async fn validate_password_reset_token(&self, raw_token: &str) -> Result<i64> {
+        let trimmed = raw_token.trim();
+        if trimmed.is_empty() {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        }
+        let token_hash = hash_action_token("pw_reset_v1", trimmed);
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let before = state.password_resets.len();
+        state.password_resets.retain(|r| r.expires_at > now);
+        if state.password_resets.len() != before {
+            self.persist_state(&state);
+        }
+        let Some(rec) = state
+            .password_resets
+            .iter()
+            .find(|r| r.token_hash == token_hash)
+        else {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        };
+        let active_user = state
+            .users
+            .iter()
+            .any(|u| u.profile.id == rec.user_id && !u.profile.is_banned);
+        if !active_user {
+            return Err(domain_err(
+                ErrorCode::ResetTokenInvalid,
+                "Password reset link is invalid or has expired.",
+            ));
+        }
+        Ok((rec.expires_at - now).num_seconds().max(1))
     }
 
     async fn verify_password_reset_otp(&self, email: &str, otp_code: &str) -> Result<String> {
@@ -1764,8 +1805,11 @@ impl TutorialRepository for LocalSeedRepository {
         // OTP verified! Consume code_hash (single-use OTP) and rotate to a fresh verified reset token
         let (raw_verified_token, verified_hash) = generate_action_token("ihn_rstv", "pw_reset_v1");
         rec.code_hash.clear();
-        rec.token_hash = verified_hash;
-        rec.expires_at = rec.expires_at.max(now + Duration::minutes(15));
+        rec.token_hash = verified_hash.clone();
+        rec.expires_at = now + Duration::minutes(PASSWORD_RESET_TTL_MINUTES);
+        state
+            .password_resets
+            .retain(|r| r.user_id != user_id || r.token_hash == verified_hash);
         self.persist_state(&state);
         Ok(raw_verified_token)
     }
@@ -2429,7 +2473,7 @@ impl TutorialRepository for LocalSeedRepository {
         &self,
         challenge_id: Uuid,
         code: &str,
-    ) -> Result<(UserProfileDto, String, String, String, String)> {
+    ) -> Result<VerifiedLoginChallengeDto> {
         let now = Utc::now();
         let clean_code = code.trim();
         let mut state = self.state.write().await;
@@ -2488,13 +2532,14 @@ impl TutorialRepository for LocalSeedRepository {
         }
         let user = Self::resolve_user_dto(user_rec, &grav, &state.step_meta);
         self.persist_state(&state);
-        Ok((
+        Ok(VerifiedLoginChallengeDto {
             user,
-            rec.ip_address,
-            rec.user_agent,
-            rec.device_label,
-            rec.device_fingerprint,
-        ))
+            ip_address: rec.ip_address,
+            user_agent: rec.user_agent,
+            device_label: rec.device_label,
+            device_fingerprint: rec.device_fingerprint,
+            anomaly_reason: rec.anomaly_reason,
+        })
     }
 
     async fn delete_login_otp_challenge(&self, challenge_id: Uuid) -> Result<()> {

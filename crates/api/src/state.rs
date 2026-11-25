@@ -7,7 +7,7 @@ use icehandnote_core::{
         BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
         CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
         StudioStepEditorDto, StudioTrackDto, UpdateTrackMetaInput, UpdateUserProfileInput,
-        UserProfileDto, UserRole, UserSessionDto,
+        UserProfileDto, UserRole, UserSessionDto, VerifiedLoginChallengeDto,
     },
     crypto::{sign_guest_learner_cookie, verify_guest_learner_cookie},
     error::ErrorCode,
@@ -748,6 +748,10 @@ impl TutorialRepository for DynamicRepository {
         self.current().create_password_reset_token(email).await
     }
 
+    async fn validate_password_reset_token(&self, raw_token: &str) -> anyhow::Result<i64> {
+        self.current().validate_password_reset_token(raw_token).await
+    }
+
     async fn verify_password_reset_otp(
         &self,
         email: &str,
@@ -935,7 +939,7 @@ impl TutorialRepository for DynamicRepository {
         &self,
         challenge_id: Uuid,
         code: &str,
-    ) -> anyhow::Result<(UserProfileDto, String, String, String, String)> {
+    ) -> anyhow::Result<VerifiedLoginChallengeDto> {
         self.current()
             .verify_login_otp_challenge(challenge_id, code)
             .await

@@ -511,6 +511,16 @@ pub struct UserSessionDto {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct VerifiedLoginChallengeDto {
+    pub user: UserProfileDto,
+    pub ip_address: String,
+    pub user_agent: String,
+    pub device_label: String,
+    pub device_fingerprint: String,
+    pub anomaly_reason: String,
+}
+
 pub fn normalize_supported_locale(raw: Option<&str>, fallback: &str) -> &'static str {
     let pick = |candidate: &str| -> Option<&'static str> {
         let lower = candidate.trim().to_ascii_lowercase();
@@ -760,6 +770,9 @@ pub fn compute_device_fingerprint(client_device_id: Option<&str>, ua: &str) -> S
 /// Sliding trust window (days) before a previously verified `(ip, device)` pair requires re-verification.
 pub const TRUSTED_DEVICE_TTL_DAYS: i64 = 30;
 
+/// Lifetime (minutes) for password reset links and 6-digit password reset codes.
+pub const PASSWORD_RESET_TTL_MINUTES: i64 = 15;
+
 /// Parse and canonicalize a single IP candidate from proxy headers (`CF-Connecting-IP`, `X-Forwarded-For`,
 /// `Forwarded`, `X-Real-IP`, etc.): strips quotes/brackets/ports, rejects obfuscated/unknown tokens,
 /// and unmaps IPv4-mapped IPv6 addresses (`::ffff:203.0.113.10` -> `203.0.113.10`).
@@ -870,21 +883,23 @@ pub fn evaluate_login_anomaly(
         return None;
     }
 
+    let dev_fp_matched = !clean_fp.is_empty()
+        && baseline
+            .iter()
+            .any(|(_, known_fp)| !known_fp.is_empty() && known_fp == clean_fp);
+    if dev_fp_matched {
+        return Some("new_ip");
+    }
+
     let ip_seen = clean_ip.is_empty()
         || baseline
             .iter()
             .any(|(known_ip, _)| !known_ip.is_empty() && known_ip == &clean_ip);
-    let dev_seen = clean_fp.is_empty()
-        || baseline
-            .iter()
-            .any(|(_, known_fp)| !known_fp.is_empty() && known_fp == clean_fp);
 
-    match (ip_seen, dev_seen) {
-        (false, false) => Some("new_ip_and_device"),
-        (false, true) => Some("new_ip"),
-        (true, false) => Some("new_device"),
-        // Both IP and device appeared individually on different trusted rows, never together as a pair.
-        (true, true) => Some("new_ip_and_device"),
+    if ip_seen {
+        Some("new_device")
+    } else {
+        Some("new_ip_and_device")
     }
 }
 
@@ -1618,7 +1633,7 @@ mod tests {
             None
         );
 
-        // Pair-based trust: cross-pair combination (IP_1 + Dev_B) must NOT bypass anomaly detection
+        // Known device fingerprint on a different IP -> "new_ip" (log in + activity alert)
         let trusted = vec![
             ("198.51.100.10".to_string(), "dev:a:chrome".to_string()),
             ("203.0.113.42".to_string(), "dev:b:safari".to_string()),
@@ -1629,7 +1644,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_login_anomaly("198.51.100.10", "dev:b:safari", &trusted, true, &[]),
-            Some("new_ip_and_device")
+            Some("new_ip")
         );
         assert_eq!(
             evaluate_login_anomaly("192.0.2.77", "dev:a:chrome", &trusted, true, &[]),
@@ -1638,6 +1653,10 @@ mod tests {
         assert_eq!(
             evaluate_login_anomaly("198.51.100.10", "dev:c:firefox", &trusted, true, &[]),
             Some("new_device")
+        );
+        assert_eq!(
+            evaluate_login_anomaly("192.0.2.77", "dev:c:firefox", &trusted, true, &[]),
+            Some("new_ip_and_device")
         );
 
         // Expired trust history (all past 30d TTL) forces re-verification

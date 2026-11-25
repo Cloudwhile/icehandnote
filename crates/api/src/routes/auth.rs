@@ -1,9 +1,9 @@
 use crate::{
     error::ApiError,
     mailer::{
-        is_mail_ready, send_email_change_code_email, send_login_anomaly_otp_email,
-        send_password_reset_email, send_registration_code_email, MailBrandContext, MailCredentials,
-        MailSendContext, MailSendError,
+        is_mail_ready, send_email_change_code_email, send_login_anomaly_alert_email,
+        send_login_otp_email, send_password_reset_email, send_registration_code_email,
+        MailBrandContext, MailCredentials, MailSendContext, MailSendError,
     },
     state::{
         check_sliding_rate_limit, detect_external_origin, enforce_map_capacity,
@@ -31,7 +31,7 @@ use icehandnote_core::{
         is_deliverable_email, is_valid_email, mask_email_address, percent_encode_component,
         sanitize_internal_return_path, sign_blog_sso_token, validate_and_normalize_email,
         verify_blog_sso_token, BlogSsoClaims, SiteSettingsDto, UpdateUserProfileInput,
-        UserProfileDto, UserRole,
+        UserProfileDto, UserRole, PASSWORD_RESET_TTL_MINUTES,
     },
     error::ErrorCode,
     webauthn::{
@@ -72,6 +72,8 @@ pub struct LoginVerifyOtpRequest {
     pub code: String,
     #[serde(default)]
     pub anonymous_learner_id: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +116,12 @@ pub struct ForgotPasswordRequest {
 pub struct VerifyResetOtpRequest {
     pub email: String,
     pub otp_code: String,
+}
+
+#[derive(Deserialize)]
+pub struct ValidateResetTokenQuery {
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Deserialize)]
@@ -431,6 +439,87 @@ async fn try_wordpress_remote_login(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn send_post_login_anomaly_alert_if_configured(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: &UserProfileDto,
+    req_locale: Option<&str>,
+    ip_address: &str,
+    device_label: &str,
+    device_fingerprint: &str,
+    anomaly_reason: &str,
+) {
+    let clean_email = user.email.trim();
+    if !is_deliverable_email(clean_email) {
+        return;
+    }
+    let (smtp_cfg, smtp_pw, cf_token) = {
+        let secrets = state.runtime_secrets.read().await;
+        (
+            secrets.smtp.clone(),
+            secrets.smtp_password.clone(),
+            secrets.cloudflare_api_token.clone(),
+        )
+    };
+    let creds = MailCredentials {
+        smtp_password: &smtp_pw,
+        cloudflare_api_token: &cf_token,
+    };
+    if !is_mail_ready(&smtp_cfg, &creds) {
+        return;
+    }
+    let settings = state
+        .repo
+        .get_site_settings(&state.default_settings)
+        .await
+        .unwrap_or_else(|_| state.default_settings.clone());
+    let origin = detect_external_origin(state, headers);
+    let target_locale = resolve_request_locale(req_locale, headers, &settings.default_locale);
+    let dedup_key = format!(
+        "login_anomaly_alert:{}:{}:{}",
+        user.id, ip_address, device_fingerprint
+    );
+    let mail_ctx = MailSendContext {
+        guard: &state.mail_guard,
+        http_client: &state.http_client,
+        smtp: &smtp_cfg,
+        creds,
+        brand: MailBrandContext {
+            site_name: &settings.site_name,
+            logo_url: &settings.logo_url,
+            origin: &origin,
+            locale: target_locale,
+        },
+        dedup_key: Some(&dedup_key),
+        cooldown_secs: 300,
+        allow_disabled_draft: false,
+    };
+    if let Err(err) = send_login_anomaly_alert_email(
+        &mail_ctx,
+        &user.display_name,
+        ip_address,
+        device_label,
+        anomaly_reason,
+        clean_email,
+    )
+    .await
+    {
+        if !matches!(
+            err,
+            MailSendError::InFlightDuplicate | MailSendError::CooldownDuplicate { .. }
+        ) {
+            tracing::warn!(
+                user_id = %user.id,
+                reason = %anomaly_reason,
+                ip = %ip_address,
+                error = %err,
+                "Failed to send post-login abnormal activity alert email"
+            );
+        }
+    }
+}
+
 async fn complete_password_login_or_challenge_with_bind(
     state: &AppState,
     headers: &HeaderMap,
@@ -447,119 +536,122 @@ async fn complete_password_login_or_challenge_with_bind(
         .map_err(repo_err)?;
 
     let mut trust_device = true;
+    let mut post_login_alert_reason: Option<String> = None;
     if let Some(anomaly_reason) = anomaly {
-        let (smtp_cfg, smtp_pw, cf_token) = {
-            let secrets = state.runtime_secrets.read().await;
-            (
-                secrets.smtp.clone(),
-                secrets.smtp_password.clone(),
-                secrets.cloudflare_api_token.clone(),
-            )
-        };
-        let clean_email = user.email.trim();
-        let email_deliverable = is_deliverable_email(clean_email);
-        let creds = MailCredentials {
-            smtp_password: &smtp_pw,
-            cloudflare_api_token: &cf_token,
-        };
-
-        if is_mail_ready(&smtp_cfg, &creds) && email_deliverable {
-            let settings = state
-                .repo
-                .get_site_settings(&state.default_settings)
-                .await
-                .unwrap_or_else(|_| state.default_settings.clone());
-            let origin = detect_external_origin(state, headers);
-            let target_locale =
-                resolve_request_locale(req_locale, headers, &settings.default_locale);
-
-            let (challenge_id, raw_code) = state
-                .repo
-                .create_login_otp_challenge(
-                    user.id,
-                    clean_email,
-                    &ctx.ip_address,
-                    &ctx.user_agent,
-                    &ctx.device_label,
-                    &ctx.device_fingerprint,
-                    &anomaly_reason,
+        if anomaly_reason == "new_ip" {
+            // Same trusted device fingerprint on a different IP: complete sign-in directly, then notify post-login.
+            post_login_alert_reason = Some(anomaly_reason);
+        } else {
+            let (smtp_cfg, smtp_pw, cf_token) = {
+                let secrets = state.runtime_secrets.read().await;
+                (
+                    secrets.smtp.clone(),
+                    secrets.smtp_password.clone(),
+                    secrets.cloudflare_api_token.clone(),
                 )
-                .await
-                .map_err(repo_err)?;
-
-            let dedup_key = format!(
-                "login_anomaly:{}:{}:{}",
-                user.id, ctx.ip_address, ctx.device_fingerprint
-            );
-            let mail_ctx = MailSendContext {
-                guard: &state.mail_guard,
-                http_client: &state.http_client,
-                smtp: &smtp_cfg,
-                creds,
-                brand: MailBrandContext {
-                    site_name: &settings.site_name,
-                    logo_url: &settings.logo_url,
-                    origin: &origin,
-                    locale: target_locale,
-                },
-                dedup_key: Some(&dedup_key),
-                cooldown_secs: 15,
-                allow_disabled_draft: false,
+            };
+            let clean_email = user.email.trim();
+            let email_deliverable = is_deliverable_email(clean_email);
+            let creds = MailCredentials {
+                smtp_password: &smtp_pw,
+                cloudflare_api_token: &cf_token,
             };
 
-            if let Err(err) = send_login_anomaly_otp_email(
-                &mail_ctx,
-                &user.display_name,
-                &ctx.ip_address,
-                &ctx.device_label,
-                &anomaly_reason,
-                &raw_code,
-                10,
-                clean_email,
-            )
-            .await
-            {
-                if !err.is_ambiguous_outcome() {
-                    let _ = state.repo.delete_login_otp_challenge(challenge_id).await;
+            if is_mail_ready(&smtp_cfg, &creds) && email_deliverable {
+                let settings = state
+                    .repo
+                    .get_site_settings(&state.default_settings)
+                    .await
+                    .unwrap_or_else(|_| state.default_settings.clone());
+                let origin = detect_external_origin(state, headers);
+                let target_locale =
+                    resolve_request_locale(req_locale, headers, &settings.default_locale);
+
+                let (challenge_id, raw_code) = state
+                    .repo
+                    .create_login_otp_challenge(
+                        user.id,
+                        clean_email,
+                        &ctx.ip_address,
+                        &ctx.user_agent,
+                        &ctx.device_label,
+                        &ctx.device_fingerprint,
+                        &anomaly_reason,
+                    )
+                    .await
+                    .map_err(repo_err)?;
+
+                let dedup_key = format!(
+                    "login_otp:{}:{}:{}",
+                    user.id, ctx.ip_address, ctx.device_fingerprint
+                );
+                let mail_ctx = MailSendContext {
+                    guard: &state.mail_guard,
+                    http_client: &state.http_client,
+                    smtp: &smtp_cfg,
+                    creds,
+                    brand: MailBrandContext {
+                        site_name: &settings.site_name,
+                        logo_url: &settings.logo_url,
+                        origin: &origin,
+                        locale: target_locale,
+                    },
+                    dedup_key: Some(&dedup_key),
+                    cooldown_secs: 15,
+                    allow_disabled_draft: false,
+                };
+
+                if let Err(err) = send_login_otp_email(
+                    &mail_ctx,
+                    &user.display_name,
+                    &raw_code,
+                    10,
+                    clean_email,
+                )
+                .await
+                {
+                    if !err.is_ambiguous_outcome() {
+                        let _ = state.repo.delete_login_otp_challenge(challenge_id).await;
+                    }
+                    return Err(err.to_api_error("Failed to send sign-in verification email"));
                 }
-                return Err(err.to_api_error("Failed to send unusual sign-in verification email"));
-            }
 
-            if let Some(bind) = pending_bind {
-                let now_ts = Utc::now().timestamp();
-                let mut binds = state.pending_oauth_binds.lock().await;
-                enforce_map_capacity(&mut binds, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
-                    v.expires_at <= now_ts
-                });
-                binds.insert(challenge_id, bind);
-            }
+                if let Some(bind) = pending_bind {
+                    let now_ts = Utc::now().timestamp();
+                    let mut binds = state.pending_oauth_binds.lock().await;
+                    enforce_map_capacity(&mut binds, EPHEMERAL_MAP_MAX_ENTRIES, |v| {
+                        v.expires_at <= now_ts
+                    });
+                    binds.insert(challenge_id, bind);
+                }
 
-            return Ok(Json(serde_json::json!({
-                "requires_otp": true,
-                "challenge_id": challenge_id,
-                "masked_email": mask_email_address(clean_email),
-                "anomaly_reason": anomaly_reason,
-                "ip_address": ctx.ip_address,
-                "device_label": ctx.device_label,
-                "cooldown_seconds": 60,
-                "expires_in_seconds": 600,
-            }))
-            .into_response());
-        } else {
-            // Never permanently trust an unverified anomalous device/IP when OTP was skipped.
-            trust_device = false;
-            tracing::warn!(
-                user_id = %user.id,
-                username = %user.username,
-                reason = %anomaly_reason,
-                ip = %ctx.ip_address,
-                device = %ctx.device_label,
-                smtp_enabled = smtp_cfg.enabled,
-                smtp_host_set = !smtp_cfg.host.trim().is_empty(),
-                smtp_from_valid = is_valid_email(&smtp_cfg.from_email),
-                email_deliverable = email_deliverable,
-                "Anomalous login detected but SMTP is unconfigured or user has no deliverable email; proceeding without email OTP challenge (device not marked trusted)."
-            );
+                return Ok(Json(serde_json::json!({
+                    "requires_otp": true,
+                    "challenge_id": challenge_id,
+                    "masked_email": mask_email_address(clean_email),
+                    "anomaly_reason": anomaly_reason,
+                    "ip_address": ctx.ip_address,
+                    "device_label": ctx.device_label,
+                    "cooldown_seconds": 60,
+                    "expires_in_seconds": 600,
+                }))
+                .into_response());
+            } else {
+                // Never permanently trust an unverified anomalous device/IP when OTP was skipped.
+                trust_device = false;
+                tracing::warn!(
+                    user_id = %user.id,
+                    username = %user.username,
+                    reason = %anomaly_reason,
+                    ip = %ctx.ip_address,
+                    device = %ctx.device_label,
+                    smtp_enabled = smtp_cfg.enabled,
+                    smtp_host_set = !smtp_cfg.host.trim().is_empty(),
+                    smtp_from_valid = is_valid_email(&smtp_cfg.from_email),
+                    email_deliverable = email_deliverable,
+                    "Unrecognized device login detected but SMTP is unconfigured or user has no deliverable email; proceeding without email OTP challenge (device not marked trusted)."
+                );
+            }
         }
     }
 
@@ -573,6 +665,19 @@ async fn complete_password_login_or_challenge_with_bind(
 
     let session =
         finalize_login_session(state, user, anon_learner_id, ctx, trust_device).await?;
+    if let Some(alert_reason) = post_login_alert_reason {
+        send_post_login_anomaly_alert_if_configured(
+            state,
+            headers,
+            &session.user,
+            req_locale,
+            &ctx.ip_address,
+            &ctx.device_label,
+            &ctx.device_fingerprint,
+            &alert_reason,
+        )
+        .await;
+    }
     Ok(Json(serde_json::json!({
         "requires_otp": false,
         "session_token": session.session_token,
@@ -677,14 +782,21 @@ pub async fn auth_login_verify_otp_handler(
             "Email verification code is required.",
         ));
     }
-    let (mut user, ip_address, user_agent, device_label, device_fingerprint) = state
+    let verified = state
         .repo
         .verify_login_otp_challenge(body.challenge_id, clean_code)
         .await
         .map_err(|e| repo_err_or(e, ErrorCode::VerificationCodeInvalid))?;
 
+    let mut user = verified.user;
+    let ip_address = verified.ip_address;
+    let user_agent = verified.user_agent;
+    let device_label = verified.device_label;
+    let device_fingerprint = verified.device_fingerprint;
+    let anomaly_reason = verified.anomaly_reason;
+
     state.mail_guard.clear_recent_dedup_key(&format!(
-        "login_anomaly:{}:{}:{}",
+        "login_otp:{}:{}:{}",
         user.id, ip_address, device_fingerprint
     ));
 
@@ -719,6 +831,21 @@ pub async fn auth_login_verify_otp_handler(
         true,
     )
     .await?;
+
+    if !anomaly_reason.is_empty() {
+        send_post_login_anomaly_alert_if_configured(
+            &state,
+            &headers,
+            &session.user,
+            body.locale.as_deref(),
+            &verified_ctx.ip_address,
+            &verified_ctx.device_label,
+            &verified_ctx.device_fingerprint,
+            &anomaly_reason,
+        )
+        .await;
+    }
+
     Ok(Json(session))
 }
 
@@ -745,7 +872,7 @@ pub async fn auth_login_resend_otp_handler(
             "Email service is not configured on this site. Please contact an administrator.",
         ));
     }
-    let (user, raw_code, ip_address, device_label, anomaly_reason) = state
+    let (user, raw_code, _ip_address, _device_label, _anomaly_reason) = state
         .repo
         .resend_login_otp_challenge(body.challenge_id)
         .await
@@ -760,7 +887,7 @@ pub async fn auth_login_resend_otp_handler(
     let target_locale =
         resolve_request_locale(body.locale.as_deref(), &headers, &settings.default_locale);
 
-    let dedup_key = format!("login_anomaly_resend:{}", body.challenge_id);
+    let dedup_key = format!("login_otp_resend:{}", body.challenge_id);
     let mail_ctx = MailSendContext {
         guard: &state.mail_guard,
         http_client: &state.http_client,
@@ -777,18 +904,9 @@ pub async fn auth_login_resend_otp_handler(
         allow_disabled_draft: false,
     };
 
-    send_login_anomaly_otp_email(
-        &mail_ctx,
-        &user.display_name,
-        &ip_address,
-        &device_label,
-        &anomaly_reason,
-        &raw_code,
-        10,
-        &user.email,
-    )
-    .await
-    .map_err(|e| e.to_api_error("Failed to resend unusual sign-in verification email"))?;
+    send_login_otp_email(&mail_ctx, &user.display_name, &raw_code, 10, &user.email)
+        .await
+        .map_err(|e| e.to_api_error("Failed to resend sign-in verification email"))?;
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -1134,7 +1252,42 @@ pub async fn forgot_password_handler(
     Ok(Json(serde_json::json!({
         "ok": true,
         "cooldown_seconds": 60,
+        "expires_in_seconds": PASSWORD_RESET_TTL_MINUTES * 60,
     })))
+}
+
+pub async fn validate_reset_token_handler(
+    State(state): State<AppState>,
+    extensions: Extensions,
+    headers: HeaderMap,
+    Query(q): Query<ValidateResetTokenQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let ip = extract_client_ip(
+        &headers,
+        extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip()),
+        state.trust_proxy_headers,
+    );
+    check_sliding_rate_limit(
+        &state,
+        &format!("auth:verify_reset:{ip}"),
+        30,
+        60,
+        "Too many verification attempts. Please wait a moment and try again.",
+    )
+    .await?;
+    let expires_in_seconds = state
+        .repo
+        .validate_password_reset_token(q.token.trim())
+        .await
+        .map_err(|e| repo_err_or(e, ErrorCode::ResetTokenInvalid))?;
+    let mut resp = Json(serde_json::json!({
+        "valid": true,
+        "expires_in_seconds": expires_in_seconds,
+    }))
+    .into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(resp)
 }
 
 pub async fn verify_reset_otp_handler(
@@ -1172,6 +1325,7 @@ pub async fn verify_reset_otp_handler(
     Ok(Json(serde_json::json!({
         "ok": true,
         "reset_token": reset_token,
+        "expires_in_seconds": PASSWORD_RESET_TTL_MINUTES * 60,
     })))
 }
 

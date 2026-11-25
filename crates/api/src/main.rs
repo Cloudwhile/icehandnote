@@ -527,6 +527,10 @@ fn build_router(
             post(routes::auth::verify_reset_otp_handler),
         )
         .route(
+            "/api/v1/auth/reset-password/validate",
+            get(routes::auth::validate_reset_token_handler),
+        )
+        .route(
             "/api/v1/auth/reset-password",
             post(routes::auth::reset_password_handler),
         )
@@ -1385,14 +1389,15 @@ mod tests {
             .verify_login_otp_challenge(chal_id, "000000")
             .await
             .is_err());
-        let (verified_user, ip, _ua, label, fp) = repo
+        let verified = repo
             .verify_login_otp_challenge(chal_id, &otp_code)
             .await
             .unwrap();
-        assert_eq!(verified_user.id, user.id);
-        assert_eq!(ip, "203.0.113.42");
-        assert_eq!(label, "Safari · macOS");
-        assert_eq!(fp, "dev:b:safari");
+        assert_eq!(verified.user.id, user.id);
+        assert_eq!(verified.ip_address, "203.0.113.42");
+        assert_eq!(verified.device_label, "Safari · macOS");
+        assert_eq!(verified.device_fingerprint, "dev:b:safari");
+        assert_eq!(verified.anomaly_reason, "new_ip_and_device");
 
         // Second session + list + revoke single + revoke others
         let tok2 = repo
@@ -2935,42 +2940,61 @@ mod tests {
         assert_eq!(phone_challenge["ip_address"], "203.0.113.77");
         let chal_id = phone_challenge["challenge_id"].as_str().unwrap().to_string();
 
-        // Confirm SMTP sink received the anomaly OTP email and extract 6-digit OTP
+        // Confirm SMTP sink received ONLY the clean login_otp email BEFORE login completes (no activity alert yet!)
         let mail_raw = {
             let mails = delivered_mails.lock().await;
             assert_eq!(mails.len(), 1);
             mails[0].clone()
         };
         let unfolded = mail_raw.replace("=\r\n", "").replace("=\n", "");
+        assert!(
+            !unfolded.contains("203.0.113.77"),
+            "Pre-login OTP email must NOT contain post-login abnormal activity log"
+        );
         let otp_code = unfolded
             .split('>')
             .filter_map(|seg| seg.split('<').next())
             .map(str::trim)
             .find(|tok| tok.len() == 6 && tok.bytes().all(|b| b.is_ascii_digit()))
-            .expect("6-digit OTP code in anomaly email")
+            .expect("6-digit OTP code in login_otp email")
             .to_string();
 
-        // Step 5: Verify OTP -> issues session and trusts (203.0.113.77, dev_phone_beta)
+        // Step 5: Verify OTP -> issues session, trusts (203.0.113.77, dev_phone_beta), AND sends post-login anomaly alert (NO OTP inside!)
         let verify_resp = client
             .post(format!("{base}/api/v1/auth/login/verify-otp"))
             .json(&serde_json::json!({
                 "challenge_id": chal_id,
-                "code": otp_code
+                "code": otp_code,
+                "locale": "zh-CN"
             }))
             .send()
             .await
             .unwrap();
         assert_eq!(verify_resp.status(), reqwest::StatusCode::OK);
+        {
+            let mails = delivered_mails.lock().await;
+            assert_eq!(mails.len(), 2, "Expected post-login anomaly alert email after OTP verification succeeded");
+            let alert_unfolded = mails[1].replace("=\r\n", "").replace("=\n", "");
+            assert!(
+                alert_unfolded.contains("203.0.113.77"),
+                "Post-login anomaly alert must include detected IP"
+            );
+            assert!(
+                !alert_unfolded.contains(&otp_code),
+                "Post-login anomaly alert must NOT carry any verification code"
+            );
+        }
 
-        // Step 6: Cross-pair login (PC IP + Phone device) MUST still trigger OTP!
-        let cross_pair: serde_json::Value = client
+        // Step 6: Same trusted device fingerprint on a different IP (PC IP + Phone device) MUST log in directly and send code-free activity alert!
+        let same_dev_new_ip: serde_json::Value = client
             .post(format!("{base}/api/v1/auth/login"))
             .header("cf-connecting-ip", "198.51.100.10")
             .header("x-device-id", "dev_phone_beta")
             .header(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/604.1")
             .json(&serde_json::json!({
                 "identifier": alice.username,
-                "password": "StrongPass123!"
+                "password": "StrongPass123!",
+                "locale": "zh-CN"
             }))
             .send()
             .await
@@ -2978,11 +3002,17 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(cross_pair["requires_otp"], true);
-        assert_eq!(cross_pair["anomaly_reason"], "new_ip_and_device");
-        assert_eq!(delivered_mails.lock().await.len(), 2);
+        assert_eq!(same_dev_new_ip["requires_otp"], false);
+        assert!(same_dev_new_ip["session_token"].as_str().is_some());
+        {
+            let mails = delivered_mails.lock().await;
+            assert_eq!(mails.len(), 3, "Same device fingerprint + new IP must send post-login activity alert");
+            let alert_unfolded = mails[2].replace("=\r\n", "").replace("=\n", "");
+            assert!(alert_unfolded.contains("198.51.100.10"));
+            assert!(!alert_unfolded.contains("letter-spacing:0.28em"), "Post-login alert must not render an OTP box");
+        }
 
-        // Step 7: Revoking other sessions from PC also revokes Phone's trust -> Phone triggers OTP again!
+        // Step 7: Revoking other sessions from PC also revokes Phone's trust -> Phone triggers OTP again (and does NOT send anomaly alert before OTP completes)
         let revoke_resp = client
             .post(format!("{base}/api/v1/auth/sessions/revoke-others"))
             .bearer_auth(&pc_token)
@@ -3007,7 +3037,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after_revoke["requires_otp"], true);
-        assert_eq!(delivered_mails.lock().await.len(), 3);
+        assert_eq!(delivered_mails.lock().await.len(), 4);
 
         // Step 8: Cold-start fallback for legacy user (only user_sessions, empty user_trusted_devices)
         // using RFC 7239 Forwarded header
@@ -3029,10 +3059,146 @@ mod tests {
         assert_eq!(legacy_anomaly["requires_otp"], true);
         assert_eq!(legacy_anomaly["anomaly_reason"], "new_ip_and_device");
         assert_eq!(legacy_anomaly["ip_address"], "203.0.113.88");
-        assert_eq!(delivered_mails.lock().await.len(), 4);
+        assert_eq!(delivered_mails.lock().await.len(), 5);
 
         server_task.abort();
         smtp_task.abort();
+        let _ = std::fs::remove_dir_all(tmp_root);
+    }
+
+    #[tokio::test]
+    async fn password_reset_token_validation_expiry_and_superseding_end_to_end() {
+        let content_dir = resolve_content_dir(None);
+        let tmp_root = env::temp_dir().join(format!("icehandnote-reset-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        let store_path = tmp_root.join("store.json");
+        let uploads_dir = tmp_root.join("uploads");
+        let secrets_path = tmp_root.join("secrets.json");
+
+        let repo =
+            LocalSeedRepository::from_content_dir_with_options(&content_dir, store_path.clone(), false)
+                .unwrap();
+        let user = repo
+            .register_local_account(
+                "alice_reset",
+                "Alice Reset",
+                "alice_reset@icehandnote.dev",
+                "StrongPass123!",
+                UserRole::Reader,
+            )
+            .await
+            .unwrap();
+
+        let state = AppState {
+            repo: Arc::new(DynamicRepository::new(Arc::new(repo))),
+            content_dir,
+            store_path,
+            uploads_dir,
+            secrets_path,
+            runtime_secrets: Arc::new(tokio::sync::RwLock::new(RuntimeSecretsConfig::default())),
+            oauth_pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_onboardings: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            forgot_password_cooldowns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            email_change_otps: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            passkey_ceremonies: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            note_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_idempotency: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            invite_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            collab_hub: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mail_guard: Arc::new(mailer::MailDeliveryGuard::in_memory()),
+            bind_tickets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_oauth_binds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            sso_used_jtis: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            update_check_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            public_origin: None,
+            trust_proxy_headers: true,
+            guest_cookie_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_sso_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            blog_origin_url: String::new(),
+            blog_wp_api_url: None,
+            dev_sso_simulator: false,
+            default_settings: SiteSettingsDto::default_with_env("zh-CN", ""),
+            http_client: reqwest::Client::new(),
+        };
+
+        let (_, token_1, _) = state
+            .repo
+            .create_password_reset_token(&user.email)
+            .await
+            .unwrap()
+            .unwrap();
+        let app = build_router(state.clone(), CorsLayer::permissive(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Read-only validation succeeds repeatedly without consuming token_1, and reports ~15-min TTL
+        for _ in 0..2 {
+            let v: serde_json::Value = client
+                .get(format!("{base}/api/v1/auth/reset-password/validate?token={token_1}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(v["valid"], true);
+            let secs = v["expires_in_seconds"].as_i64().unwrap();
+            assert!(secs > 800 && secs <= 900, "unexpected TTL: {secs}");
+        }
+
+        // Requesting a new token supersedes token_1 immediately
+        let (_, token_2, _) = state
+            .repo
+            .create_password_reset_token(&user.email)
+            .await
+            .unwrap()
+            .unwrap();
+        let old_res = client
+            .get(format!("{base}/api/v1/auth/reset-password/validate?token={token_1}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old_res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // Blank/invalid token rejected cleanly
+        let bad_res = client
+            .get(format!("{base}/api/v1/auth/reset-password/validate?token=invalid_tok"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_res.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        // Resetting with token_2 succeeds, and re-validating token_2 afterward rejects immediately
+        let reset_res = client
+            .post(format!("{base}/api/v1/auth/reset-password"))
+            .json(&serde_json::json!({
+                "token": token_2,
+                "new_password": "UpdatedPass456!"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reset_res.status(), reqwest::StatusCode::OK);
+        let after_consume = client
+            .get(format!("{base}/api/v1/auth/reset-password/validate?token={token_2}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_consume.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        server_task.abort();
         let _ = std::fs::remove_dir_all(tmp_root);
     }
 

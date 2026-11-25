@@ -220,7 +220,7 @@ use icehandnote_core::{
         BlogSsoClaims, CollaborationAuditLogDto, CollaboratorInviteDto, CreateChapterInput,
         CreateTrackInput, InvitePreviewDto, SaveStudioStepInput, SiteSettingsDto, StepRevisionDto,
         StudioStepEditorDto, StudioTrackDto, UpdateUserProfileInput, UserPasskeyDto,
-        UserProfileDto, UserRole, UserSessionDto,
+        UserProfileDto, UserRole, UserSessionDto, VerifiedLoginChallengeDto,
     },
     webauthn::StoredPasskeyCredential,
     ArticleTaskChecksDto, CreateMarginNoteInput, LearnerProgressDto, ListMarginNotesFilter,
@@ -368,6 +368,7 @@ pub trait TutorialRepository: Send + Sync {
         &self,
         email: &str,
     ) -> Result<Option<(UserProfileDto, String, String)>>;
+    async fn validate_password_reset_token(&self, raw_token: &str) -> Result<i64>;
     async fn verify_password_reset_otp(&self, email: &str, otp_code: &str) -> Result<String>;
     async fn consume_password_reset_token(
         &self,
@@ -448,7 +449,7 @@ pub trait TutorialRepository: Send + Sync {
         &self,
         challenge_id: Uuid,
         code: &str,
-    ) -> Result<(UserProfileDto, String, String, String, String)>;
+    ) -> Result<VerifiedLoginChallengeDto>;
     async fn delete_login_otp_challenge(&self, challenge_id: Uuid) -> Result<()>;
     async fn merge_anonymous_learner(&self, anon_id: &str, user_learner_id: &str) -> Result<()>;
 
