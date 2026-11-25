@@ -55,6 +55,7 @@ import {
   IconArrowUp,
   IconBold,
   IconCheckSquare,
+  IconClose,
   IconCode,
   IconCopy,
   IconDiagram,
@@ -432,7 +433,7 @@ export function ColorHighlightPalette({
             onClick={() => onCommand({ type: 'bg-color', value: null })}
             className="w-6 h-6 rounded-md border border-dashed border-border-control bg-surface-sheet text-ink-muted text-xs inline-flex items-center justify-center cursor-pointer"
           >
-            ×
+            <IconClose className="w-3 h-3" />
           </button>
           {RICH_BG_SWATCHES.map((sw) => (
             <button
@@ -473,7 +474,7 @@ export function ColorHighlightPalette({
             onClick={() => onCommand({ type: 'highlight', value: null })}
             className="w-6 h-6 rounded-md border border-dashed border-border-control bg-surface-sheet text-ink-muted text-xs inline-flex items-center justify-center cursor-pointer"
           >
-            ×
+            <IconClose className="w-3 h-3" />
           </button>
           {RICH_HL_SWATCHES.map((sw) => (
             <button
@@ -542,7 +543,7 @@ export function KbdComboComposer({
             aria-label={UI_COPY[locale].auth.close}
             className="w-6 h-6 rounded-md inline-flex items-center justify-center text-ink-muted hover:text-ink-primary hover:bg-surface-raised cursor-pointer"
           >
-            ×
+            <IconClose className="w-3.5 h-3.5" />
           </button>
         )}
       </div>

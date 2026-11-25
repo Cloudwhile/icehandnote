@@ -16,6 +16,7 @@ import type {
 } from '../../lib/types';
 import {
   IconChevronDown,
+  IconChevronRight,
   IconGrid,
   IconLayers,
   IconPen,
@@ -210,12 +211,7 @@ export function StudioSidebarContent({
                         className="group studio-disclosure"
                       >
                         <summary className="list-none px-1.5 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer select-none text-xs font-semibold text-ink-primary hover:bg-surface-sheet/70">
-                          <span
-                            aria-hidden="true"
-                            className="text-xs text-ink-muted motion-safe:transition-transform group-open:rotate-90 shrink-0"
-                          >
-                            ▸
-                          </span>
+                          <IconChevronRight className="w-3.5 h-3.5 text-ink-muted motion-safe:transition-transform group-open:rotate-90 shrink-0" />
                           <span
                             className="flex-1 studio-ellipsis"
                             title={stripHtmlTags(track.title)}

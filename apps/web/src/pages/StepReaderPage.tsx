@@ -14,6 +14,7 @@ import {
   useParams,
 } from 'react-router-dom';
 import { ChapterSidebarAndDrawer } from '../components/navigation/ChapterSidebarAndDrawer';
+import { ArticleCoverBanner } from '../components/notebook/ArticleCoverBanner';
 import { CcLicenseCard } from '../components/notebook/CcLicenseCard';
 import { MarkerUnderline } from '../components/notebook/MarkerUnderline';
 import { NotebookAlert } from '../components/notebook/NotebookAlert';
@@ -24,12 +25,27 @@ import {
 } from '../components/notebook/MarginNoteLayer';
 import { NotebookEmptyState } from '../components/notebook/NotebookEmptyState';
 import {
-  PixelCatBookmarkSticker,
   PixelHourglassSticker,
-  PixelPaperPlaneSticker,
   PixelStarStampSticker,
 } from '../components/notebook/PixelStickers';
-import { IconCheck, IconClose, IconHeart, IconHome, IconMenu, IconPen } from '../components/ui/Icons';
+import {
+  IconArrowLeft,
+  IconArrowRight,
+  IconCalendar,
+  IconChapterList,
+  IconCheck,
+  IconClock,
+  IconClose,
+  IconCopy,
+  IconEdit,
+  IconHeart,
+  IconHighlighter,
+  IconHome,
+  IconMenu,
+  IconPen,
+  IconTag,
+  TrackHandIcon,
+} from '../components/ui/Icons';
 import { useToast } from '../components/ui/ToastProvider';
 import { UserAvatar } from '../components/ui/UserAvatar';
 import {
@@ -79,6 +95,7 @@ interface StepReaderPageProps {
   siteSettings: SiteSettingsDto;
   settingsReady?: boolean;
   authScopeKey?: string;
+  canAuthorEdit?: boolean;
   onChangeLocale: (next: LocaleCode) => void;
 }
 
@@ -134,6 +151,7 @@ export function StepReaderPage({
   siteSettings,
   settingsReady = true,
   authScopeKey = 'anon',
+  canAuthorEdit = false,
   onChangeLocale,
 }: StepReaderPageProps) {
   const { track = '', chapter = '', step = '' } = useParams();
@@ -994,7 +1012,11 @@ export function StepReaderPage({
   const handleAdvance = () => {
     if (!detail) return;
     if (detail.next_step) {
-      const nextUrl = `/${locale}/series/${detail.track_slug}/${detail.next_step.step_slug}`;
+      const next = detail.next_step;
+      const nextUrl =
+        detail.chapters.length > 1 && next.chapter_slug
+          ? `/${locale}/series/${detail.track_slug}/${next.chapter_slug}/${next.step_slug}`
+          : `/${locale}/series/${detail.track_slug}/${next.step_slug}`;
       runDirectionalTransition(() => navigate(nextUrl), 'forward');
     } else {
       runDirectionalTransition(() => navigate(`/${locale}`), 'backward');
@@ -1061,11 +1083,28 @@ export function StepReaderPage({
       ? 'zh-CN'
       : normalizeLocale(detail.available_locales[0]);
 
-  const currentStepUrl = `/${locale}/series/${detail.track_slug}/${detail.step_slug}`;
+  const isMultiChapter = detail.chapters.length > 1;
+  const currentStepUrl = isMultiChapter
+    ? `/${locale}/series/${detail.track_slug}/${detail.chapter_slug}/${detail.step_slug}`
+    : `/${locale}/series/${detail.track_slug}/${detail.step_slug}`;
   const firstTrackStep = detail.chapters[0]?.steps[0];
   const seriesRootUrl = firstTrackStep
-    ? `/${locale}/series/${detail.track_slug}/${firstTrackStep.slug}`
+    ? isMultiChapter
+      ? `/${locale}/series/${detail.track_slug}/${detail.chapters[0].slug}/${firstTrackStep.slug}`
+      : `/${locale}/series/${detail.track_slug}/${firstTrackStep.slug}`
     : `/${locale}`;
+  const studioEditUrl = `/${locale}/studio?section=editor&track=${encodeURIComponent(detail.track_slug)}&chapter=${encodeURIComponent(detail.chapter_slug)}&step=${encodeURIComponent(detail.step_slug)}&edit_locale=${encodeURIComponent(detail.resolved_locale)}`;
+
+  const handleCopyArticleUrl = () => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const fullUrl = `${origin}${currentStepUrl}`;
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard
+        .writeText(fullUrl)
+        .then(() => toast.success(extCopy.reader.copiedUrlToast))
+        .catch((err) => toast.error(err));
+    }
+  };
 
   return (
     <>
@@ -1076,6 +1115,7 @@ export function StepReaderPage({
           locale={locale}
           trackSlug={detail.track_slug}
           trackTitle={detail.track_title}
+          trackIconKind={detail.track_icon_kind}
           currentStepId={detail.step_id}
           articleTaskStats={
             siteSettings.enable_progress_tracking && totalTaskCount > 0
@@ -1108,6 +1148,13 @@ export function StepReaderPage({
                     <SafeHtml as="span" html={detail.track_title} />
                   </Link>
                 </li>
+                {isMultiChapter && detail.chapter_title && (
+                  <li className="hidden sm:flex">
+                    <span className="text-ink-muted truncate max-w-44">
+                      <SafeHtml as="span" html={detail.chapter_title} />
+                    </span>
+                  </li>
+                )}
                 <li>
                   <Link
                     to={currentStepUrl}
@@ -1162,74 +1209,86 @@ export function StepReaderPage({
                 <button
                   type="button"
                   onClick={() => onChangeLocale(canonicalLocaleTarget)}
-                  className="min-h-7 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                  className="min-h-7 text-xs font-semibold text-link-ink hover:underline inline-flex items-center gap-1 cursor-pointer"
                 >
-                  → {copy.switchCanonicalCta(detail.canonical_revision)}
+                  <IconArrowRight className="w-3.5 h-3.5" />
+                  <span>{copy.switchCanonicalCta(detail.canonical_revision)}</span>
                 </button>
               </div>
             </div>
           )}
 
-          {/* Primary Stacked Loose-Leaf Notebook Sheet */}
+          {/* Primary Loose-Leaf Notebook Sheet */}
           <article className="notebook-sheet-stack">
             <div
               ref={articleSheetRef}
-              className="notebook-sheet-card relative p-4 sm:p-8 lg:p-10"
+              className="notebook-sheet-card relative p-5 sm:p-8 lg:p-10"
             >
-              {/* Peeking Pixel Cat Bookmark perched at upper-right sheet edge */}
-              <div
-                aria-hidden="true"
-                className="pointer-events-none select-none hidden sm:block absolute -top-7 end-6 z-20"
-              >
-                <PixelCatBookmarkSticker size={46} />
-              </div>
+              {/* Author-Configured Hero Cover Banner (`fetchpriority="high"` when present) */}
+              {Boolean(detail.cover_image?.trim()) && (
+                <div className="mb-6 rounded-2xl overflow-hidden border border-border-subtle">
+                  <ArticleCoverBanner
+                    variant="hero"
+                    priority
+                    coverUrl={detail.cover_image}
+                    title={detail.title}
+                    trackSlug={detail.track_slug}
+                    trackTitle={detail.track_title}
+                    trackIconKind={detail.track_icon_kind}
+                    stepSlug={detail.step_slug}
+                    stepNumber={detail.step_number}
+                    tags={detail.tags}
+                  />
+                </div>
+              )}
 
               {/* Article Header */}
-              <header className="pb-6 mb-6 border-b border-dashed border-border-subtle space-y-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {detail.tags.map((t) => (
-                      <span
-                        key={t}
-                        className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-surface-raised text-ink-secondary border border-border-subtle"
-                      >
-                        #{t}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted tabular-nums">
-                    {siteSettings.enable_progress_tracking && totalTaskCount > 0 && (
-                      <span
-                        className={`px-2 py-0.5 rounded-full font-semibold border border-border-subtle ${
-                          allTasksDone
-                            ? 'text-accent-success'
-                            : 'bg-surface-raised text-ink-secondary'
-                        }`}
-                        style={
-                          allTasksDone
-                            ? { backgroundColor: 'var(--steps-checked-bg)' }
-                            : undefined
-                        }
-                      >
-                        {allTasksDone && <IconCheck className="w-3 h-3 inline me-1" />}
-                        {copy.articleTasksLabel}{' '}
-                        <span className="font-mono">
-                          {doneTaskCount}/{totalTaskCount}
-                        </span>
-                      </span>
-                    )}
-                    <span>
-                      <span className="font-mono">
-                        v{detail.version ?? detail.synced_revision}
-                      </span>{' '}
-                      · {detail.estimated_minutes} {copy.minutesUnit}
+              <header className="pb-6 mb-6 border-b border-dashed border-border-subtle space-y-4">
+                {/* Tier 1: Series Kicker + Quick Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <Link
+                      to={seriesRootUrl}
+                      className="inline-flex items-center gap-1.5 font-semibold text-link-ink no-underline hover:underline"
+                    >
+                      <TrackHandIcon kind={detail.track_icon_kind} className="w-4 h-4" />
+                      <SafeHtml as="span" html={detail.track_title} />
+                    </Link>
+                    <span aria-hidden="true" className="text-ink-muted">·</span>
+                    <span className="font-mono text-ink-secondary tabular-nums">
+                      {extCopy.reader.chapterPositionLabel(
+                        detail.step_number,
+                        detail.total_steps_in_track,
+                      )}
                     </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleCopyArticleUrl}
+                      className="min-h-8 sm:min-h-7 px-2.5 py-1 rounded-lg border border-border-subtle bg-surface-raised hover:border-border-ink text-xs font-semibold text-ink-secondary inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <IconCopy className="w-3.5 h-3.5 text-ink-muted" />
+                      <span>{extCopy.reader.copyUrlBtn}</span>
+                    </button>
+
+                    {canAuthorEdit && (
+                      <Link
+                        to={studioEditUrl}
+                        className="min-h-8 sm:min-h-7 px-2.5 py-1 rounded-lg border border-border-subtle bg-action-subtle/70 hover:border-link-ink text-xs font-semibold text-link-ink no-underline inline-flex items-center gap-1.5 transition-colors"
+                      >
+                        <IconEdit className="w-3.5 h-3.5" />
+                        <span>{extCopy.reader.editChapterBtn}</span>
+                      </Link>
+                    )}
                   </div>
                 </div>
 
+                {/* Tier 2: Main Article Headline + Delicate Nib Rule */}
                 <div>
                   <h1
-                    className="text-2xl sm:text-3xl font-semibold text-ink-primary leading-tight tracking-tight"
+                    className="text-2xl sm:text-3xl font-semibold text-ink-primary leading-tight tracking-tight text-balance m-0"
                     style={{ fontFamily: 'var(--font-hand)' }}
                   >
                     <SafeHtml as="span" html={detail.title} />
@@ -1237,35 +1296,37 @@ export function StepReaderPage({
                   <MarkerUnderline variant="h1" />
                 </div>
 
-                <SafeHtml
-                  as="p"
-                  html={detail.summary}
-                  className="text-base text-ink-secondary leading-relaxed"
-                />
+                {/* Tier 3: Clean Editorial Lead Paragraph */}
+                {detail.summary.trim() && (
+                  <SafeHtml
+                    as="p"
+                    html={detail.summary}
+                    className="text-base text-ink-secondary leading-relaxed pretty-text max-w-[65ch] m-0"
+                  />
+                )}
 
-                <div className="pt-2 flex flex-wrap items-center gap-2.5 text-xs text-ink-muted">
+                {/* Tier 4: Quiet Metadata Strip (Authors, Dates, Reading Time, Version, Tasks) */}
+                <div className="pt-1 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-xs text-ink-muted">
                   {detail.authors && detail.authors.length > 0 ? (
-                    <>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {detail.authors.map((a, idx) => (
-                          <span
-                            key={a.user_id ?? `${a.username}-${idx}`}
-                            className="inline-flex items-center gap-1.5"
-                          >
-                            <UserAvatar
-                              name={a.display_name || a.username}
-                              avatarUrl={a.avatar_url}
-                              sizeClass="w-5 h-5"
-                            />
-                            <span className="font-semibold text-ink-secondary">
-                              {a.display_name || a.username}
-                            </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {detail.authors.map((a, idx) => (
+                        <span
+                          key={a.user_id ?? `${a.username}-${idx}`}
+                          className="inline-flex items-center gap-1.5"
+                        >
+                          <UserAvatar
+                            name={a.display_name || a.username}
+                            avatarUrl={a.avatar_url}
+                            sizeClass="w-5 h-5"
+                          />
+                          <span className="font-semibold text-ink-secondary">
+                            {a.display_name || a.username}
                           </span>
-                        ))}
-                      </div>
-                    </>
+                        </span>
+                      ))}
+                    </div>
                   ) : (
-                    <>
+                    <span className="inline-flex items-center gap-1.5">
                       <UserAvatar
                         name={
                           detail.author_name?.trim() ||
@@ -1281,14 +1342,14 @@ export function StepReaderPage({
                             copy.brandName,
                         )}
                       </span>
-                    </>
+                    </span>
                   )}
 
                   {detail.published_at && (
                     <>
                       <span aria-hidden="true">·</span>
                       <span className="inline-flex items-center gap-1">
-                        <span>{extCopy.reader.publishedAtLabel}</span>
+                        <IconCalendar className="w-3.5 h-3.5" />
                         <time
                           dateTime={detail.published_at}
                           className="font-mono tabular-nums text-ink-secondary"
@@ -1299,21 +1360,93 @@ export function StepReaderPage({
                     </>
                   )}
 
-                  {detail.updated_at && (
+                  {detail.updated_at &&
+                    detail.updated_at.slice(0, 10) !==
+                      (detail.published_at || '').slice(0, 10) && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="inline-flex items-center gap-1">
+                          <span>{extCopy.reader.updatedAtLabel}</span>
+                          <time
+                            dateTime={detail.updated_at}
+                            className="font-mono tabular-nums text-ink-secondary"
+                          >
+                            {detail.updated_at.slice(0, 10)}
+                          </time>
+                        </span>
+                      </>
+                    )}
+
+                  <span aria-hidden="true">·</span>
+                  <span className="inline-flex items-center gap-1 tabular-nums text-ink-secondary">
+                    <IconClock className="w-3.5 h-3.5 text-ink-muted" />
+                    <span>
+                      {detail.estimated_minutes} {copy.minutesUnit}
+                    </span>
+                  </span>
+
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono text-ink-muted tabular-nums">
+                    v{detail.version ?? detail.synced_revision}
+                  </span>
+
+                  {siteSettings.enable_progress_tracking && totalTaskCount > 0 && (
                     <>
                       <span aria-hidden="true">·</span>
-                      <span className="inline-flex items-center gap-1">
-                        <span>{extCopy.reader.updatedAtLabel}</span>
-                        <time
-                          dateTime={detail.updated_at}
-                          className="font-mono tabular-nums text-ink-secondary"
-                        >
-                          {detail.updated_at.slice(0, 10)}
-                        </time>
+                      <span
+                        className={`inline-flex items-center gap-1 font-semibold tabular-nums ${
+                          allTasksDone ? 'text-accent-success' : 'text-ink-secondary'
+                        }`}
+                      >
+                        {allTasksDone && <IconCheck className="w-3 h-3" />}
+                        <span>
+                          {copy.articleTasksLabel} {doneTaskCount}/{totalTaskCount}
+                        </span>
                       </span>
                     </>
                   )}
                 </div>
+
+                {/* Tier 5: Plain Tags */}
+                {detail.tags.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono text-ink-muted">
+                    <IconTag className="w-3.5 h-3.5 shrink-0" />
+                    {detail.tags.map((t) => (
+                      <span key={t}>#{t}</span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Tier 6: Inline Collapsible Article Outline for Mobile & Tablet */}
+                {detail.toc.length >= 2 && (
+                  <details className="lg:hidden sidebar-chapter-group rounded-xl border border-border-subtle bg-surface-raised/60 px-3.5 py-2">
+                    <summary className="justify-between">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-primary">
+                        <IconChapterList className="w-3.5 h-3.5 text-link-ink" />
+                        <span>{extCopy.reader.articleOutlineLabel}</span>
+                      </span>
+                      <span className="font-mono text-xs text-ink-muted tabular-nums">
+                        {detail.toc.length}
+                      </span>
+                    </summary>
+                    <ol className="list-none m-0 p-0 pt-2 mt-2 border-t border-dashed border-border-subtle space-y-1">
+                      {detail.toc.map((item) => (
+                        <li key={item.id}>
+                          <a
+                            href={`#${item.id}`}
+                            className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
+                            style={{ paddingInlineStart: `${6 + (item.level - 1) * 8}px` }}
+                          >
+                            <span className="font-mono font-semibold text-link-ink shrink-0">
+                              {item.number}
+                            </span>
+                            <span className="truncate">{stripHtmlTags(item.text)}</span>
+                          </a>
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                )}
               </header>
 
               {/* Outdated Article Warning Banner when past configured threshold */}
@@ -1469,49 +1602,67 @@ export function StepReaderPage({
                   }
                 />
 
-                {/* Directional Navigation Row (One Primary Action on the right / top on mobile) */}
-                <div className="flex flex-col-reverse sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-3 sm:gap-4 pt-5 border-t border-dashed border-border-subtle">
+                {/* Quiet Directional Prev / Next Series Navigation Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-5 border-t border-dashed border-border-subtle">
                   {detail.prev_step ? (
                     <button
                       type="button"
                       onClick={() => {
                         const prev = detail.prev_step!;
-                        runDirectionalTransition(
-                          () =>
-                            navigate(
-                              `/${locale}/series/${detail.track_slug}/${prev.step_slug}`,
-                            ),
-                          'backward',
-                        );
+                        const prevHref =
+                          isMultiChapter && prev.chapter_slug
+                            ? `/${locale}/series/${detail.track_slug}/${prev.chapter_slug}/${prev.step_slug}`
+                            : `/${locale}/series/${detail.track_slug}/${prev.step_slug}`;
+                        runDirectionalTransition(() => navigate(prevHref), 'backward');
                       }}
-                      className="w-full sm:w-auto justify-center inline-flex items-center min-h-11 sm:min-h-10 px-4 py-2.5 rounded-xl text-sm font-semibold ink-btn-secondary cursor-pointer"
+                      className="w-full p-3.5 rounded-xl border border-border-subtle hover:border-border-ink bg-surface-raised/55 hover:bg-surface-raised text-start flex flex-col items-start gap-1 cursor-pointer transition-colors"
                     >
-                      <span>
-                        {copy.prevStep} · <SafeHtml as="span" html={detail.prev_step.title} />
+                      <span className="inline-flex items-center gap-1.5 text-xs font-mono text-ink-muted">
+                        <IconArrowLeft className="w-3.5 h-3.5" />
+                        <span>{copy.prevStep.replace(/^←\s*/, '')}</span>
+                      </span>
+                      <span className="text-sm font-semibold text-ink-primary line-clamp-1">
+                        <SafeHtml as="span" html={detail.prev_step.title} />
                       </span>
                     </button>
                   ) : (
-                    <span className="hidden sm:inline-flex items-center text-ink-muted">
-                      <PixelPaperPlaneSticker size={26} />
-                    </span>
+                    <div className="hidden sm:block" />
                   )}
 
-                  <div className="flex items-center gap-3 w-full sm:w-auto sm:ms-auto">
-                    {detail.prev_step && (
-                      <span className="hidden sm:inline-flex" aria-hidden="true">
-                        <PixelPaperPlaneSticker size={24} />
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleAdvance}
-                      className="w-full sm:w-auto justify-center inline-flex items-center min-h-11 sm:min-h-10 px-5 py-2.5 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer"
+                  <button
+                    type="button"
+                    onClick={handleAdvance}
+                    className={`w-full p-3.5 rounded-xl border text-end flex flex-col items-end gap-1 cursor-pointer transition-colors ${
+                      detail.next_step
+                        ? 'border-border-control bg-surface-raised/75 hover:border-link-ink hover:bg-action-subtle/35'
+                        : 'border-border-subtle bg-surface-raised/45 hover:border-border-ink hover:bg-surface-raised'
+                    }`}
+                  >
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-xs font-mono font-semibold ${
+                        detail.next_step ? 'text-link-ink' : 'text-ink-muted'
+                      }`}
                     >
-                      {detail.next_step
-                        ? copy.nextStepPrimary
-                        : copy.finishTrackPrimary}
-                    </button>
-                  </div>
+                      <span>
+                        {(detail.next_step
+                          ? copy.nextStepPrimary
+                          : copy.finishTrackPrimary
+                        ).replace(/\s*→$/, '')}
+                      </span>
+                      {detail.next_step ? (
+                        <IconArrowRight className="w-3.5 h-3.5" />
+                      ) : (
+                        <IconHome className="w-3.5 h-3.5" />
+                      )}
+                    </span>
+                    <span className="text-sm font-semibold text-ink-primary line-clamp-1">
+                      {detail.next_step ? (
+                        <SafeHtml as="span" html={detail.next_step.title} />
+                      ) : (
+                        <SafeHtml as="span" html={detail.track_title} />
+                      )}
+                    </span>
+                  </button>
                 </div>
               </footer>
             </div>
@@ -1595,11 +1746,7 @@ export function StepReaderPage({
                       isMobileSelectionUi ? 'min-h-10 px-3.5 py-2' : 'min-h-8 px-3 py-1'
                     } rounded-lg text-xs font-semibold ink-btn-secondary inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap`}
                   >
-                    <span
-                      aria-hidden="true"
-                      className="w-2.5 h-2.5 rounded-sm border-b-2 border-current"
-                      style={{ backgroundColor: 'var(--inline-hl-amber)' }}
-                    />
+                    <IconHighlighter className="w-3.5 h-3.5 text-accent-warn" />
                     <span>{extCopy.notes.highlightSelectionBtn}</span>
                   </button>
                   <button

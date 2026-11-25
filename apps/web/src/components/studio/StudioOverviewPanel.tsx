@@ -15,7 +15,13 @@ import type {
   StudioTrackDto,
   UserProfileDto,
 } from '../../lib/types';
-import { IconCheck } from '../ui/Icons';
+import {
+  IconArrowRight,
+  IconCheck,
+  IconPlus,
+  IconRefresh,
+  TrackHandIcon,
+} from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import type { StudioSectionId } from './StudioSidebarContent';
 import { UpdateCheckStatus, useSiteUpdateCheck } from './UpdateCheckStatus';
@@ -146,18 +152,19 @@ export function StudioOverviewPanel({
         <button
           type="button"
           onClick={onStartQuickNewStep}
-          className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary cursor-pointer"
+          className="min-h-9 px-4 py-2 rounded-xl text-sm font-semibold ink-btn-primary inline-flex items-center gap-1.5 cursor-pointer"
         >
-          {s.startNewNoteCta}
+          <IconPlus className="w-4 h-4" />
+          <span>{s.startNewNoteCta.replace(/^\+\s*/, '')}</span>
         </button>
       </div>
 
-      {/* 4 Calm Stat Tiles (subtle surface + 1px border, clear label-value hierarchy §2.5.3) */}
+      {/* Unified Horizontal Metric Bar (1px hairline grid dividers) */}
       <section
         aria-label={s.kpiRegionAria}
-        className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+        className="studio-panel overflow-hidden grid grid-cols-2 lg:grid-cols-4 gap-px bg-border-subtle"
       >
-        <div className="studio-panel p-4 space-y-1.5">
+        <div className="bg-surface-sheet p-4 space-y-1">
           <div className="text-xs text-ink-muted">{s.kpiTracksLabel}</div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-semibold text-ink-primary tabular-nums">
@@ -169,7 +176,7 @@ export function StudioOverviewPanel({
           </div>
         </div>
 
-        <div className="studio-panel p-4 space-y-1.5">
+        <div className="bg-surface-sheet p-4 space-y-1">
           <div className="text-xs text-ink-muted">{s.kpiStepsLabel}</div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-semibold text-ink-primary tabular-nums">
@@ -181,7 +188,7 @@ export function StudioOverviewPanel({
           </div>
         </div>
 
-        <div className="studio-panel p-4 space-y-1.5">
+        <div className="bg-surface-sheet p-4 space-y-1">
           <div className="text-xs text-ink-muted">{s.kpiCoverageLabel}</div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-semibold text-ink-primary tabular-nums">
@@ -193,7 +200,7 @@ export function StudioOverviewPanel({
           </div>
         </div>
 
-        <div className="studio-panel p-4 space-y-1.5">
+        <div className="bg-surface-sheet p-4 space-y-1">
           <div className="text-xs text-ink-muted">
             {isAdmin ? s.kpiResidentsLabel : s.kpiPendingLabel}
           </div>
@@ -223,19 +230,21 @@ export function StudioOverviewPanel({
           </div>
 
           {pendingQueue.length === 0 ? (
-            <div className="px-5 py-10 text-center">
+            <div className="px-5 py-5 flex items-center gap-3">
               <span
                 aria-hidden="true"
-                className="w-9 h-9 rounded-full bg-steps-checked-bg text-accent-success inline-flex items-center justify-center mx-auto"
+                className="w-7 h-7 rounded-lg border border-border-subtle bg-surface-raised text-ink-secondary inline-flex items-center justify-center shrink-0"
               >
                 <IconCheck className="w-4 h-4" />
               </span>
-              <p className="mt-2.5 text-sm text-ink-primary font-semibold">
-                {s.queueAllSyncedTitle}
-              </p>
-              <p className="mt-1 text-xs text-ink-muted max-w-sm mx-auto leading-relaxed">
-                {extCopy.studio.queueAllSyncedDesc}
-              </p>
+              <div className="min-w-0">
+                <p className="text-sm text-ink-primary font-semibold m-0">
+                  {s.queueAllSyncedTitle}
+                </p>
+                <p className="mt-0.5 text-xs text-ink-muted leading-relaxed m-0">
+                  {extCopy.studio.queueAllSyncedDesc}
+                </p>
+              </div>
             </div>
           ) : (
             <ul className="m-0 p-0 list-none divide-y divide-border-subtle">
@@ -301,9 +310,10 @@ export function StudioOverviewPanel({
               <button
                 type="button"
                 onClick={() => onSwitchSection('catalog')}
-                className="inline-flex items-center min-h-7 px-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                className="inline-flex items-center gap-1 min-h-7 px-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
               >
-                {s.viewAllInMatrix(pendingQueue.length)}
+                <span>{s.viewAllInMatrix(pendingQueue.length).replace(/\s*→$/, '')}</span>
+                <IconArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
@@ -319,9 +329,10 @@ export function StudioOverviewPanel({
               <button
                 type="button"
                 onClick={() => onSwitchSection('catalog')}
-                className="inline-flex items-center min-h-7 px-1.5 -me-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                className="inline-flex items-center gap-1 min-h-7 px-1.5 -me-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
               >
-                {s.manageMatrixLink}
+                <span>{s.manageMatrixLink.replace(/\s*→$/, '')}</span>
+                <IconArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
 
@@ -344,12 +355,15 @@ export function StudioOverviewPanel({
 
                 return (
                   <div key={t.track_id} className="space-y-1.5">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <SafeHtml
-                        as="span"
-                        html={t.title}
-                        className="text-sm text-ink-primary studio-ellipsis"
-                      />
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-1.5 min-w-0">
+                        <TrackHandIcon kind={t.icon_kind} className="w-3.5 h-3.5 text-ink-muted" />
+                        <SafeHtml
+                          as="span"
+                          html={t.title}
+                          className="text-sm text-ink-primary studio-ellipsis"
+                        />
+                      </span>
                       <span className="text-xs font-mono text-ink-muted tabular-nums shrink-0">
                         {pct}% ({pubCount}/{maxDocs})
                       </span>
@@ -364,7 +378,7 @@ export function StudioOverviewPanel({
                           width: `${pct}%`,
                           backgroundColor:
                             pct === 100
-                              ? 'var(--accent-success-ink)'
+                              ? 'var(--border-control)'
                               : 'var(--action-bg)',
                         }}
                       />
@@ -385,9 +399,10 @@ export function StudioOverviewPanel({
                 <button
                   type="button"
                   onClick={() => onSwitchSection('settings')}
-                  className="inline-flex items-center min-h-7 px-1.5 -me-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+                  className="inline-flex items-center gap-1 min-h-7 px-1.5 -me-1.5 rounded-lg text-xs font-semibold text-link-ink hover:underline cursor-pointer"
                 >
-                  {s.openSettingsLink}
+                  <span>{s.openSettingsLink.replace(/\s*→$/, '')}</span>
+                  <IconArrowRight className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
@@ -451,9 +466,12 @@ export function StudioOverviewPanel({
                     type="button"
                     disabled={update.checking}
                     onClick={() => void update.checkUpdate()}
-                    className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle cursor-pointer disabled:opacity-60 transition-colors"
+                    className="min-h-7 px-2 py-0.5 rounded-lg text-xs font-semibold text-link-ink hover:bg-action-subtle inline-flex items-center gap-1 cursor-pointer disabled:opacity-60 transition-colors"
                   >
-                    {update.checking ? st.checkingUpdateBtn : st.checkUpdateBtn}
+                    <IconRefresh
+                      className={`w-3.5 h-3.5 ${update.checking ? 'motion-safe:animate-spin' : ''}`}
+                    />
+                    <span>{update.checking ? st.checkingUpdateBtn : st.checkUpdateBtn}</span>
                   </button>
                 </dd>
               </div>

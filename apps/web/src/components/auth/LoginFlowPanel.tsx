@@ -26,7 +26,7 @@ import {
 } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
 import { FieldErrorText } from '../ui/FormControls';
-import { IconKey } from '../ui/Icons';
+import { IconArrowRight, IconExternalLink, IconKey } from '../ui/Icons';
 import { PasswordInput } from '../ui/PasswordInput';
 import { useToast } from '../ui/ToastProvider';
 import { saveOtpCooldown, useOtpCooldown } from './otpCooldown';
@@ -562,9 +562,10 @@ export function LoginFlowPanel({
           {ssoEnabled && toSafeHttpUrl(blogSsoEntryUrl) && (
             <a
               href={toSafeHttpUrl(blogSsoEntryUrl)}
-              className="w-full min-h-10 px-4 py-2 rounded-xl text-xs font-semibold bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-primary inline-flex items-center justify-center no-underline transition-colors"
+              className="w-full min-h-10 px-4 py-2 rounded-xl text-xs font-semibold bg-surface-raised border border-border-subtle hover:border-border-ink text-ink-primary inline-flex items-center justify-center gap-1.5 no-underline transition-colors"
             >
-              {copy.blogSsoLink}
+              <span>{copy.blogSsoLink.replace(/\s*↗$/, '')}</span>
+              <IconExternalLink className="w-3.5 h-3.5 text-ink-muted" />
             </a>
           )}
         </div>
@@ -578,9 +579,10 @@ export function LoginFlowPanel({
           <span>{extAuth.noAccountPrompt}</span>
           <Link
             to={`/${locale}/auth/register${returnQuerySuffix}`}
-            className="inline-flex items-center min-h-7 px-1 font-semibold text-link-ink no-underline hover:underline"
+            className="inline-flex items-center gap-1 min-h-7 px-1 font-semibold text-link-ink no-underline hover:underline"
           >
-            {extAuth.goToRegisterLink}
+            <span>{extAuth.goToRegisterLink.replace(/\s*→$/, '')}</span>
+            <IconArrowRight className="w-3.5 h-3.5" />
           </Link>
         </nav>
       )}

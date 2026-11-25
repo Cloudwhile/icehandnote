@@ -53,6 +53,7 @@ import {
   serializeVisualBlocksToMarkdown,
   type VisualBlock,
 } from '../../lib/visualBlocks';
+import { ArticleCoverBanner } from '../notebook/ArticleCoverBanner';
 import { CcLicenseCard } from '../notebook/CcLicenseCard';
 import { MarkerUnderline } from '../notebook/MarkerUnderline';
 import { NotebookBlockRenderer } from '../notebook/NotebookBlockRenderer';
@@ -92,6 +93,7 @@ interface LocalDraftSnapshot {
   summary: string;
   stepNum: number;
   minutes: number;
+  coverImage?: string;
   license?: string;
   tags: string;
   body: string;
@@ -198,6 +200,8 @@ function readLocalDraft(
       summary: typeof parsed.summary === 'string' ? parsed.summary : '',
       stepNum: typeof parsed.stepNum === 'number' ? parsed.stepNum : 1,
       minutes: typeof parsed.minutes === 'number' ? parsed.minutes : 10,
+      coverImage:
+        typeof parsed.coverImage === 'string' ? parsed.coverImage : '',
       license: typeof parsed.license === 'string' ? parsed.license : '',
       tags: typeof parsed.tags === 'string' ? parsed.tags : '',
       body: parsed.body,
@@ -351,6 +355,7 @@ export function StudioEditorPanel({
   const [docCanonicalRev, setDocCanonicalRev] = useState(1);
   const [bumpCanonical, setBumpCanonical] = useState(false);
   const [docStatus, setDocStatus] = useState<'published' | 'draft'>('published');
+  const [docCoverImage, setDocCoverImage] = useState('');
   const [docLicense, setDocLicense] = useState<LicenseId | ''>('');
   const [docTagsText, setDocTagsText] = useState('');
   const [docBody, setDocBody] = useState('');
@@ -477,6 +482,8 @@ export function StudioEditorPanel({
         const nextStatus =
           !dto.exists || dto.status === 'draft' ? 'draft' : 'published';
         setDocStatus(nextStatus);
+        const nextCover = (dto.cover_image ?? '').trim();
+        setDocCoverImage(nextCover);
         const nextLicense = normalizeLicenseId(dto.license);
         setDocLicense(nextLicense);
         const nextTags = dto.tags.join(', ');
@@ -497,6 +504,7 @@ export function StudioEditorPanel({
             summary: dto.summary.trim(),
             stepNum: dto.step_number,
             status: nextStatus,
+            coverImage: nextCover,
             license: nextLicense,
             tags: nextTags,
             body: dto.body_markdown,
@@ -515,6 +523,7 @@ export function StudioEditorPanel({
           localDraft &&
           (localDraft.title.trim() !== dto.title.trim() ||
             localDraft.summary.trim() !== dto.summary.trim() ||
+            (localDraft.coverImage ?? '').trim() !== nextCover ||
             (localDraft.license ?? '') !== nextLicense ||
             localDraft.body !== dto.body_markdown ||
             localDraft.tags !== nextTags)
@@ -646,6 +655,7 @@ export function StudioEditorPanel({
         summary: docSummary.trim(),
         stepNum: docStepNum,
         status: docStatus,
+        coverImage: docCoverImage.trim(),
         license: docLicense,
         tags: docTagsText,
         body: docBody,
@@ -658,6 +668,7 @@ export function StudioEditorPanel({
       docSummary,
       docStepNum,
       docStatus,
+      docCoverImage,
       docLicense,
       docTagsText,
       docBody,
@@ -723,6 +734,7 @@ export function StudioEditorPanel({
     docMinutes,
     docSyncedRev,
     docStatus,
+    docCoverImage,
     docLicense,
     docTagsText,
     docBody,
@@ -747,6 +759,7 @@ export function StudioEditorPanel({
     docMinutes,
     docSyncedRev,
     docStatus,
+    docCoverImage,
     docLicense,
     docTagsText,
     docBody,
@@ -781,6 +794,7 @@ export function StudioEditorPanel({
             summary: cur.docSummary,
             stepNum: cur.docStepNum,
             minutes: cur.docMinutes,
+            coverImage: cur.docCoverImage,
             license: cur.docLicense,
             tags: cur.docTagsText,
             body: cur.docBody,
@@ -842,6 +856,7 @@ export function StudioEditorPanel({
             synced_revision: cur.docSyncedRev,
             bump_canonical: false,
             status: 'draft',
+            cover_image: cur.docCoverImage.trim(),
             license: cur.docLicense,
             tags,
             body_markdown: cur.docBody,
@@ -861,6 +876,8 @@ export function StudioEditorPanel({
             setDocExists(true);
             setDocEtag(saved.etag ?? '');
             setDocStatus('draft');
+            const nextCover = (saved.cover_image ?? cur.docCoverImage).trim();
+            setDocCoverImage(nextCover);
             setDocMinutes(saved.estimated_minutes);
             setDocVersion(saved.version ?? saved.synced_revision);
             setDocSyncedRev(saved.synced_revision);
@@ -872,6 +889,7 @@ export function StudioEditorPanel({
                 summary: cur.docSummary.trim(),
                 stepNum: cur.docStepNum,
                 status: 'draft',
+                coverImage: nextCover,
                 license: cur.docLicense,
                 tags: cur.docTagsText,
                 body: cur.docBody,
@@ -895,6 +913,7 @@ export function StudioEditorPanel({
                 summary: cur.docSummary,
                 stepNum: cur.docStepNum,
                 minutes: cur.docMinutes,
+                coverImage: cur.docCoverImage,
                 license: cur.docLicense,
                 tags: cur.docTagsText,
                 body: cur.docBody,
@@ -924,6 +943,7 @@ export function StudioEditorPanel({
             summary: cur.docSummary,
             stepNum: cur.docStepNum,
             minutes: cur.docMinutes,
+            coverImage: cur.docCoverImage,
             license: cur.docLicense,
             tags: cur.docTagsText,
             body: cur.docBody,
@@ -1125,6 +1145,7 @@ export function StudioEditorPanel({
         synced_revision: docSyncedRev,
         bump_canonical: bumpCanonical,
         status: docStatus,
+        cover_image: docCoverImage.trim(),
         license: docLicense,
         tags,
         body_markdown: docBody,
@@ -1139,6 +1160,8 @@ export function StudioEditorPanel({
       setCanLeaveDoc(Boolean(saved.can_leave));
       setConflictState(null);
       setRemoteNotice(null);
+      const nextCover = (saved.cover_image ?? '').trim();
+      setDocCoverImage(nextCover);
       setDocMinutes(saved.estimated_minutes);
       setDocVersion(saved.version ?? saved.synced_revision);
       setDocSyncedRev(saved.synced_revision);
@@ -1165,6 +1188,7 @@ export function StudioEditorPanel({
           summary: docSummary.trim(),
           stepNum: docStepNum,
           status: docStatus,
+          coverImage: nextCover,
           license: docLicense,
           tags: docTagsText,
           body: docBody,
@@ -1394,6 +1418,7 @@ export function StudioEditorPanel({
   const handleApplyRestoredSnapshot = (saved: StudioStepEditorDto) => {
     const resolvedSlug = saved.step_slug || selStep;
     const nextStatus = saved.status === 'draft' ? 'draft' : 'published';
+    const nextCover = (saved.cover_image ?? '').trim();
     const nextLicense = normalizeLicenseId(saved.license);
     const nextTags = saved.tags.join(', ');
 
@@ -1410,6 +1435,7 @@ export function StudioEditorPanel({
     setDocCanonicalRev(saved.canonical_revision);
     setBumpCanonical(false);
     setDocStatus(nextStatus);
+    setDocCoverImage(nextCover);
     setDocLicense(nextLicense);
     setDocTagsText(nextTags);
     setDocBody(saved.body_markdown);
@@ -1425,6 +1451,7 @@ export function StudioEditorPanel({
         summary: saved.summary.trim(),
         stepNum: saved.step_number,
         status: nextStatus,
+        coverImage: nextCover,
         license: nextLicense,
         tags: nextTags,
         body: saved.body_markdown,
@@ -1919,6 +1946,7 @@ export function StudioEditorPanel({
                 setDocSummary(recoverableDraft.summary);
                 setDocStepNum(recoverableDraft.stepNum);
                 setDocMinutes(recoverableDraft.minutes);
+                setDocCoverImage((recoverableDraft.coverImage ?? '').trim());
                 setDocLicense(normalizeLicenseId(recoverableDraft.license));
                 setDocTagsText(recoverableDraft.tags);
                 setDocBody(recoverableDraft.body);
@@ -1950,7 +1978,7 @@ export function StudioEditorPanel({
           role="status"
           className="rounded-xl border border-border-ink/40 bg-action-subtle px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-primary"
         >
-          <span className="font-medium">
+          <span className="font-semibold">
             {extCopy.collab.remoteSavedBanner(
               remoteNotice.authorName,
               remoteNotice.editSeq,
@@ -2103,6 +2131,25 @@ export function StudioEditorPanel({
                     </span>
                   </div>
 
+                  {Boolean(docCoverImage.trim()) && (
+                    <div className="rounded-xl overflow-hidden border border-border-subtle">
+                      <ArticleCoverBanner
+                        variant="preview"
+                        coverUrl={docCoverImage}
+                        title={docTitle || draftStepSlug || selStep}
+                        trackSlug={selTrack}
+                        trackTitle={currentTrackObj ? stripHtmlTags(currentTrackObj.title) : selTrack}
+                        trackIconKind={currentTrackObj?.icon_kind}
+                        stepSlug={draftStepSlug || selStep}
+                        stepNumber={docStepNum}
+                        tags={docTagsText
+                          .split(',')
+                          .map((t) => t.trim())
+                          .filter(Boolean)}
+                      />
+                    </div>
+                  )}
+
                   <div>
                     <h2
                       className="text-2xl font-semibold text-ink-primary leading-tight"
@@ -2114,10 +2161,7 @@ export function StudioEditorPanel({
                         s.untitledPlaceholder
                       )}
                     </h2>
-                    <MarkerUnderline
-                      variant="canvas"
-                      className="w-52 max-w-full h-2.5 mt-0.5 block pointer-events-none"
-                    />
+                    <MarkerUnderline variant="canvas" />
                     {docSummary && (
                       <p className="mt-2 text-sm text-ink-secondary leading-relaxed">
                         <SafeHtml as="span" html={docSummary} />
@@ -2203,6 +2247,7 @@ export function StudioEditorPanel({
                 trackTitle={
                   currentTrackObj ? stripHtmlTags(currentTrackObj.title) : selTrack
                 }
+                trackIconKind={currentTrackObj?.icon_kind}
                 chapterTitle={
                   currentChapterObj
                     ? stripHtmlTags(currentChapterObj.title)
@@ -2231,6 +2276,8 @@ export function StudioEditorPanel({
                 onChangeTitle={handleTitleChange}
                 docSummary={docSummary}
                 onChangeSummary={setDocSummary}
+                docCoverImage={docCoverImage}
+                onChangeCoverImage={setDocCoverImage}
                 docStepNum={docStepNum}
                 onChangeStepNum={setDocStepNum}
                 docLicense={docLicense}

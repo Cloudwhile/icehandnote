@@ -7,7 +7,7 @@ import { api } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
 import { APP_VERSION, type LocaleCode, type UpdateCheckResponse } from '../../lib/types';
 import { toSafeHttpUrl } from '../../lib/urlSafety';
-import { IconCheck } from '../ui/Icons';
+import { IconCheck, IconExternalLink } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
 
@@ -81,9 +81,10 @@ export function UpdateCheckStatus({
                 href={safeReleaseUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-mono font-semibold text-link-ink no-underline hover:underline"
+                className="font-mono font-semibold text-link-ink no-underline hover:underline inline-flex items-center gap-1"
               >
-                {st.updateAvailableBadge(result.latest_version)} ↗
+                <span>{st.updateAvailableBadge(result.latest_version)}</span>
+                <IconExternalLink className="w-3.5 h-3.5" />
               </a>
             ) : (
               <span className="font-mono font-semibold text-link-ink">
@@ -100,9 +101,10 @@ export function UpdateCheckStatus({
                   href={safeReleaseUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
+                  className="inline-flex items-center gap-1 min-h-7 py-1 font-semibold text-link-ink no-underline hover:underline"
                 >
-                  {st.viewReleaseLink}
+                  <span>{st.viewReleaseLink.replace(/\s*↗$/, '')}</span>
+                  <IconExternalLink className="w-3.5 h-3.5" />
                 </a>
               )}
             </>

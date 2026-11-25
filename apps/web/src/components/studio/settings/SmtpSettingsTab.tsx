@@ -24,7 +24,7 @@ import {
   writeViewCache,
 } from '../../../lib/viewCache';
 import { RadioCardGroup, SwitchRow } from '../../ui/FormControls';
-import { IconAlertCircle, IconCheck, IconShield } from '../../ui/Icons';
+import { IconAlertCircle, IconCheck, IconChevronRight, IconShield } from '../../ui/Icons';
 import { InkSelect } from '../../ui/InkSelect';
 import { PasswordInput } from '../../ui/PasswordInput';
 import { StatusBadge } from '../../ui/StatusBadge';
@@ -1197,9 +1197,13 @@ export function SmtpSettingsTab({
               type="button"
               aria-expanded={templatesOpen}
               onClick={() => setTemplatesOpen((v) => !v)}
-              className="inline-flex items-center gap-1 min-h-8 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
+              className="inline-flex items-center gap-1.5 min-h-8 text-xs font-semibold text-link-ink hover:underline cursor-pointer"
             >
-              <span>{templatesOpen ? '▾' : '▸'}</span>
+              <IconChevronRight
+                className={`w-3.5 h-3.5 motion-safe:transition-transform ${
+                  templatesOpen ? 'rotate-90' : ''
+                }`}
+              />
               <span>{extSettings.smtpTemplatesToggle}</span>
             </button>
 

@@ -1,14 +1,15 @@
 /*
- * Reader Sidebar & Mobile Drawer (Merged Chapters + Distinct Series Navigation):
+ * Reader Sidebar & Mobile Drawer (Multi-Chapter Series Hierarchy + Scroll-Spy TOC):
  * - Series-first hierarchy (`章节合并区分系列`):
- *   1. Active Series displays its colored series marker, title, unified task progress bar, and cleanly
- *      merged chapters (single-chapter series merge articles directly without redundant double headers;
- *      multi-chapter series use smooth native `<details>` collapsible chapter groups).
- *   2. Other Series appear below a crisp divider with distinct series color dots and article counts
- *      so readers can distinguish and jump across series effortlessly.
+ *   1. Active Series displays its hand-drawn series emblem (`TrackHandIcon`), title, unified task progress bar,
+ *      and either a clean flat article list (for single-chapter series) or native `<details>` collapsible
+ *      chapter groups (for multi-chapter series, with current chapter open by default).
+ *   2. Other Series appear below a crisp divider with their own hand-drawn emblems and article counts.
+ *   3. Desktop TOC includes IntersectionObserver scroll-spy (`aria-current="location"`) highlighting the
+ *      section currently in view.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { runDirectionalTransition } from '../../lib/api';
 import { UI_COPY } from '../../lib/i18n';
@@ -16,16 +17,18 @@ import { SafeHtml, stripHtmlTags } from '../../lib/sanitizer';
 import type {
   ChapterNavDto,
   LocaleCode,
+  StepNavItemDto,
   TocItem,
   TrackSummaryDto,
 } from '../../lib/types';
-import { IconClose, IconList, IconPen } from '../ui/Icons';
+import { IconClose, IconList, IconPen, TrackHandIcon } from '../ui/Icons';
 import { SwipeDrawerDialog } from '../ui/SwipeDrawerDialog';
 
 interface ChapterSidebarProps {
   locale: LocaleCode;
   trackSlug: string;
   trackTitle: string;
+  trackIconKind?: string;
   currentStepId: string;
   /** Interactive task progress inside the currently open article (when present) */
   articleTaskStats?: { done: number; total: number };
@@ -46,6 +49,7 @@ export function ChapterSidebarAndDrawer({
   locale,
   trackSlug,
   trackTitle,
+  trackIconKind,
   currentStepId,
   articleTaskStats,
   chapters,
@@ -56,8 +60,37 @@ export function ChapterSidebarAndDrawer({
 }: ChapterSidebarProps) {
   const copy = UI_COPY[locale];
   const [tocOpen, setTocOpen] = useState(false);
+  const [activeTocId, setActiveTocId] = useState<string>(() => toc[0]?.id ?? '');
   const tocContainerRef = useRef<HTMLDivElement | null>(null);
   const tocTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    setActiveTocId(toc[0]?.id ?? '');
+    if (toc.length === 0 || typeof IntersectionObserver === 'undefined') {
+      return;
+    }
+    const elements = toc
+      .map((item) => document.getElementById(item.id))
+      .filter((el): el is HTMLElement => el !== null);
+    if (elements.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length > 0 && visible[0].target.id) {
+          setActiveTocId(visible[0].target.id);
+        }
+      },
+      { rootMargin: '-18% 0px -68% 0px', threshold: 0 },
+    );
+
+    for (const el of elements) {
+      observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, [toc]);
 
   useEffect(() => {
     if (!tocOpen) return;
@@ -84,12 +117,19 @@ export function ChapterSidebarAndDrawer({
   }, [tocOpen]);
 
   const navigate = useNavigate();
-  const allSteps = chapters.flatMap((ch) => ch.steps);
+  const multiChapter = chapters.length > 1;
+  const allSteps = useMemo(() => chapters.flatMap((ch) => ch.steps), [chapters]);
   const totalArticles = allSteps.length;
   const activeStepIdx = Math.max(
     0,
     allSteps.findIndex((st) => st.id === currentStepId),
   );
+  const flatIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    allSteps.forEach((st, i) => map.set(st.id, i));
+    return map;
+  }, [allSteps]);
+
   const taskTotal = articleTaskStats?.total ?? 0;
   const taskDone = articleTaskStats?.done ?? 0;
   const taskPct = taskTotal > 0 ? Math.round((taskDone / taskTotal) * 100) : 0;
@@ -115,11 +155,18 @@ export function ChapterSidebarAndDrawer({
     runDirectionalTransition(() => navigate(href), direction);
   };
 
-  const renderFlatChapterList = (onSelect?: () => void) => (
+  const renderStepItems = (
+    chapterSlug: string,
+    steps: StepNavItemDto[],
+    onSelect?: () => void,
+  ) => (
     <ul className="list-none m-0 p-0 space-y-1">
-      {allSteps.map((st, idx) => {
+      {steps.map((st, idx) => {
         const active = st.id === currentStepId;
-        const href = `/${locale}/series/${trackSlug}/${st.slug}`;
+        const href = multiChapter
+          ? `/${locale}/series/${trackSlug}/${chapterSlug}/${st.slug}`
+          : `/${locale}/series/${trackSlug}/${st.slug}`;
+        const flatIdx = flatIndexById.get(st.id) ?? idx;
         return (
           <li key={st.id}>
             <Link
@@ -128,7 +175,7 @@ export function ChapterSidebarAndDrawer({
                 navigateSeriesStep(
                   e,
                   href,
-                  idx >= activeStepIdx ? 'forward' : 'backward',
+                  flatIdx >= activeStepIdx ? 'forward' : 'backward',
                   onSelect,
                 )
               }
@@ -163,15 +210,56 @@ export function ChapterSidebarAndDrawer({
     </ul>
   );
 
+  const renderChaptersTree = (onSelect?: () => void) => {
+    if (!multiChapter) {
+      const chSlug = chapters[0]?.slug ?? 'chapters';
+      return renderStepItems(chSlug, allSteps, onSelect);
+    }
+
+    return (
+      <div className="space-y-2">
+        {chapters.map((ch, chIdx) => {
+          const chHasActive = ch.steps.some((st) => st.id === currentStepId);
+          return (
+            <details
+              key={ch.slug}
+              className="sidebar-chapter-group"
+              open={chHasActive || chIdx === 0}
+            >
+              <summary>
+                <span className="font-mono text-xs text-ink-muted shrink-0 tabular-nums">
+                  {String(ch.number || chIdx + 1).padStart(2, '0')}
+                </span>
+                <span className="flex-1 truncate">
+                  <SafeHtml as="span" html={ch.title} />
+                </span>
+                <span className="font-mono text-xs text-ink-muted shrink-0 tabular-nums">
+                  {ch.steps.length}
+                </span>
+              </summary>
+              <div className="ps-2 pt-1 pb-1.5">
+                {renderStepItems(ch.slug, ch.steps, onSelect)}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    );
+  };
+
   const renderNavTree = (onSelect?: () => void) => (
     <div className="space-y-6">
-      {/* 1. Active Series Block (distinct colored accent + merged chapter articles) */}
+      {/* 1. Active Series Block (distinct colored accent + hand-drawn emblem + chapter hierarchy) */}
       <div className="space-y-3.5">
         <div
           className="ps-3 space-y-2"
           style={{ borderInlineStart: `3px solid ${activeAccent}` }}
         >
           <div className="flex items-start gap-2">
+            <TrackHandIcon
+              kind={trackIconKind}
+              className="w-4 h-4 mt-0.5 text-link-ink"
+            />
             <span className="text-sm font-semibold text-ink-primary leading-snug">
               <SafeHtml as="span" html={trackTitle} />
             </span>
@@ -201,11 +289,10 @@ export function ChapterSidebarAndDrawer({
           )}
         </div>
 
-        {/* Flat sequential chapters inside the active series */}
-        {renderFlatChapterList(onSelect)}
+        {renderChaptersTree(onSelect)}
       </div>
 
-      {/* 2. Other Series Switcher (clearly separates and links all sibling series) */}
+      {/* 2. Other Series Switcher (hand-drawn series emblems + article counts) */}
       {otherSeries.length > 0 && (
         <div className="pt-4 border-t border-dashed border-border-subtle space-y-2">
           <div className="px-1 text-xs font-semibold text-ink-muted">
@@ -215,41 +302,46 @@ export function ChapterSidebarAndDrawer({
             {otherSeries
               .filter((series) => Boolean(series.first_step_slug))
               .map((series) => {
-              const idx = Math.max(
-                0,
-                allTracks.findIndex((t) => t.slug === series.slug),
-              );
-              const accent = seriesAccentColor(idx);
-              const href = `/${locale}/series/${series.slug}/${series.first_step_slug}`;
-              return (
-                <li key={series.id}>
-                  <Link
-                    to={href}
-                    onClick={(e) =>
-                      navigateSeriesStep(e, href, 'forward', onSelect)
-                    }
-                    className="group flex items-start gap-2.5 min-h-11 lg:min-h-0 px-2.5 py-2.5 lg:py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="w-2 h-2 rounded-full mt-1.5 shrink-0"
-                      style={{ backgroundColor: accent }}
-                    />
-                    <span className="min-w-0 flex-1 space-y-0.5">
-                      <span className="block font-semibold leading-snug text-ink-secondary group-hover:text-ink-primary transition-colors">
-                        <SafeHtml as="span" html={series.title} />
+                const idx = Math.max(
+                  0,
+                  allTracks.findIndex((t) => t.slug === series.slug),
+                );
+                const accent = seriesAccentColor(idx);
+                const href =
+                  series.chapter_count > 1 && series.first_chapter_slug
+                    ? `/${locale}/series/${series.slug}/${series.first_chapter_slug}/${series.first_step_slug}`
+                    : `/${locale}/series/${series.slug}/${series.first_step_slug}`;
+                return (
+                  <li key={series.id}>
+                    <Link
+                      to={href}
+                      onClick={(e) =>
+                        navigateSeriesStep(e, href, 'forward', onSelect)
+                      }
+                      className="group flex items-start gap-2.5 min-h-11 lg:min-h-0 px-2.5 py-2.5 lg:py-2 rounded-xl text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="mt-0.5 shrink-0"
+                        style={{ color: accent }}
+                      >
+                        <TrackHandIcon kind={series.icon_kind} className="w-4 h-4" />
                       </span>
-                      <span className="block text-xs text-ink-muted tabular-nums">
-                        {copy.formatTrackCounts(
-                          series.chapter_count,
-                          series.step_count,
-                        )}
+                      <span className="min-w-0 flex-1 space-y-0.5">
+                        <span className="block font-semibold leading-snug text-ink-secondary group-hover:text-ink-primary transition-colors">
+                          <SafeHtml as="span" html={series.title} />
+                        </span>
+                        <span className="block text-xs text-ink-muted tabular-nums">
+                          {copy.formatTrackCounts(
+                            series.chapter_count,
+                            series.step_count,
+                          )}
+                        </span>
                       </span>
-                    </span>
-                  </Link>
-                </li>
-              );
-            })}
+                    </Link>
+                  </li>
+                );
+              })}
           </ul>
         </div>
       )}
@@ -271,20 +363,28 @@ export function ChapterSidebarAndDrawer({
               <span>{copy.tocHeading}</span>
             </div>
             <ul className="list-none m-0 p-0 space-y-1">
-              {toc.map((item) => (
-                <li key={item.id}>
-                  <a
-                    href={`#${item.id}`}
-                    className="flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline text-ink-secondary hover:text-ink-primary transition-colors"
-                    style={{ paddingInlineStart: `${6 + (item.level - 1) * 8}px` }}
-                  >
-                    <span className="font-mono font-semibold text-link-ink shrink-0">
-                      {item.number}
-                    </span>
-                    <span className="truncate">{stripHtmlTags(item.text)}</span>
-                  </a>
-                </li>
-              ))}
+              {toc.map((item) => {
+                const isCurrent = activeTocId === item.id;
+                return (
+                  <li key={item.id}>
+                    <a
+                      href={`#${item.id}`}
+                      aria-current={isCurrent ? 'location' : undefined}
+                      className={`flex items-baseline gap-2 py-1 px-1.5 rounded-lg text-xs no-underline transition-colors ${
+                        isCurrent
+                          ? 'font-semibold text-ink-primary bg-action-subtle/55 border-s-2 border-action-bg'
+                          : 'text-ink-secondary hover:text-ink-primary'
+                      }`}
+                      style={{ paddingInlineStart: `${6 + (item.level - 1) * 8}px` }}
+                    >
+                      <span className="font-mono font-semibold text-link-ink shrink-0">
+                        {item.number}
+                      </span>
+                      <span className="truncate">{stripHtmlTags(item.text)}</span>
+                    </a>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

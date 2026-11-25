@@ -3,12 +3,14 @@
  * Cleanly separated from the Editor Toolbar (`工具栏`) and Writing Canvas (`编辑区`).
  */
 
-import { type FormEvent, useRef } from 'react';
+import { type FormEvent, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { api } from '../../lib/api';
 import { MAX_EMAIL_LENGTH } from '../../lib/email';
 import { EXT_COPY, UI_COPY } from '../../lib/i18n';
 import { sanitizeStepSlugDraft } from '../../lib/slugify';
 import { normalizeLicenseId } from '../../lib/licenses';
+import { ArticleCoverBanner } from '../notebook/ArticleCoverBanner';
 import { CcLicenseSelector } from '../notebook/CcLicenseCard';
 import type {
   ArticleAuthorDto,
@@ -19,8 +21,9 @@ import type {
   SiteSettingsDto,
 } from '../../lib/types';
 import { useAccessibleFormValidation } from '../../lib/useFormValidation';
+import { FileUploadButton } from '../ui/FileUploadButton';
 import { FieldErrorText } from '../ui/FormControls';
-import { IconClose, IconCopy, IconExternalLink } from '../ui/Icons';
+import { IconClose, IconCopy, IconCoverBanner, IconExternalLink } from '../ui/Icons';
 import { StatusBadge } from '../ui/StatusBadge';
 import { useToast } from '../ui/ToastProvider';
 import { UserAvatar } from '../ui/UserAvatar';
@@ -31,6 +34,7 @@ interface StudioEditorInspectorProps {
   siteSettings: SiteSettingsDto;
   trackSlug: string;
   trackTitle: string;
+  trackIconKind?: string;
   chapterTitle: string;
   stepSlug: string;
   draftStepSlug: string;
@@ -48,6 +52,8 @@ interface StudioEditorInspectorProps {
   onChangeTitle: (val: string) => void;
   docSummary: string;
   onChangeSummary: (val: string) => void;
+  docCoverImage: string;
+  onChangeCoverImage: (val: string) => void;
   docStepNum: number;
   onChangeStepNum: (val: number) => void;
   docLicense: LicenseId | '';
@@ -82,6 +88,7 @@ export function StudioEditorInspector({
   siteSettings,
   trackSlug,
   trackTitle,
+  trackIconKind,
   chapterTitle,
   stepSlug,
   draftStepSlug,
@@ -99,6 +106,8 @@ export function StudioEditorInspector({
   onChangeTitle,
   docSummary,
   onChangeSummary,
+  docCoverImage,
+  onChangeCoverImage,
   docStepNum,
   onChangeStepNum,
   docLicense,
@@ -133,6 +142,21 @@ export function StudioEditorInspector({
   const inviteFormRef = useRef<HTMLFormElement | null>(null);
   const slugInputRef = useRef<HTMLInputElement | null>(null);
   const skipBlurCommitRef = useRef(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
+
+  const handleUploadCover = async (file: File) => {
+    if (uploadingCover) return;
+    setUploadingCover(true);
+    try {
+      const res = await api.uploadStudioMedia(file);
+      onChangeCoverImage(res.url);
+      toast.success(extCopy.studio.imageUploadedMsg);
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setUploadingCover(false);
+    }
+  };
 
   const parsedTags = docTagsText
     .split(',')
@@ -326,6 +350,71 @@ export function StudioEditorInspector({
                 </span>
               </button>
             )}
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="doc-cover-input"
+                className="ink-field-label mb-0! inline-flex items-center gap-1.5"
+              >
+                <IconCoverBanner className="w-3.5 h-3.5 text-ink-muted" />
+                <span>{extCopy.studio.coverBannerLabel}</span>
+              </label>
+              {!docCoverImage.trim() && (
+                <span className="px-1.5 py-0.5 rounded-md bg-surface-raised border border-border-subtle text-xs text-ink-secondary">
+                  {extCopy.studio.coverBannerAutoBadge}
+                </span>
+              )}
+            </div>
+
+            <div className="rounded-xl overflow-hidden border border-border-subtle">
+              <ArticleCoverBanner
+                variant="preview"
+                coverUrl={docCoverImage}
+                title={docTitle || draftStepSlug || stepSlug}
+                trackSlug={trackSlug}
+                trackTitle={trackTitle}
+                trackIconKind={trackIconKind}
+                stepSlug={draftStepSlug || stepSlug}
+                stepNumber={docStepNum}
+                tags={parsedTags}
+              />
+            </div>
+
+            <input
+              id="doc-cover-input"
+              type="text"
+              data-testid="studio-cover-image-input"
+              value={docCoverImage}
+              onChange={(e) => onChangeCoverImage(e.target.value)}
+              placeholder={extCopy.studio.coverBannerPlaceholder}
+              className="ink-field-input text-xs font-mono"
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <FileUploadButton
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                label={extCopy.studio.coverBannerUploadBtn}
+                uploadingLabel={extCopy.studio.coverBannerUploadingBtn}
+                uploading={uploadingCover}
+                onSelectFile={(f) => void handleUploadCover(f)}
+              />
+              {docCoverImage.trim() && (
+                <button
+                  type="button"
+                  onClick={() => onChangeCoverImage('')}
+                  className="min-h-8 px-2.5 py-1 rounded-xl text-xs font-semibold border border-border-subtle bg-surface-raised hover:border-border-ink text-ink-secondary inline-flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <IconClose className="w-3 h-3" />
+                  <span>{extCopy.studio.coverBannerClearBtn}</span>
+                </button>
+              )}
+            </div>
+
+            <p className="text-xs text-ink-muted leading-relaxed m-0">
+              {extCopy.studio.coverBannerHint}
+            </p>
           </div>
 
           <div>

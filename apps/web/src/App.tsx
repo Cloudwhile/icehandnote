@@ -710,6 +710,25 @@ function LocaleShellInner({
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
                     authScopeKey={user ? `user:${user.id}` : 'anon'}
+                    canAuthorEdit={Boolean(
+                      user && (user.role === 'author' || user.role === 'admin'),
+                    )}
+                    onChangeLocale={handleLocaleSwitch}
+                  />
+                }
+              />
+              <Route
+                path="series/:track/:chapter/:step"
+                element={
+                  <StepReaderPage
+                    locale={locale}
+                    theme={theme}
+                    siteSettings={siteSettings}
+                    settingsReady={settingsReady}
+                    authScopeKey={user ? `user:${user.id}` : 'anon'}
+                    canAuthorEdit={Boolean(
+                      user && (user.role === 'author' || user.role === 'admin'),
+                    )}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
@@ -723,6 +742,9 @@ function LocaleShellInner({
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
                     authScopeKey={user ? `user:${user.id}` : 'anon'}
+                    canAuthorEdit={Boolean(
+                      user && (user.role === 'author' || user.role === 'admin'),
+                    )}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
@@ -736,6 +758,9 @@ function LocaleShellInner({
                     siteSettings={siteSettings}
                     settingsReady={settingsReady}
                     authScopeKey={user ? `user:${user.id}` : 'anon'}
+                    canAuthorEdit={Boolean(
+                      user && (user.role === 'author' || user.role === 'admin'),
+                    )}
                     onChangeLocale={handleLocaleSwitch}
                   />
                 }
